@@ -9,11 +9,11 @@ are before writing code.
 
 ## Where the rest of the project is documented
 
-- [Architecture](https://github.com/JuanReyes01/cicg-feeder-project/blob/main/docs/architecture/overview.md)
-  — what this station owns and, just as important, what it must not do
+- [Design](https://github.com/JuanReyes01/cicg-feeder-project/blob/main/docs/design.md)
+  — requirements, architecture and roadmap, including what this station owns and, just as
+  important, what it must not do
 - [Node ↔ station protocol](https://github.com/JuanReyes01/cicg-feeder-project/blob/main/docs/protocol/messages.md)
   — the frames it exchanges with the nodes
-- [Requirements](https://github.com/JuanReyes01/cicg-feeder-project/blob/main/docs/requirements/trap-network-requirements.md)
 
 Two boundaries are worth repeating here because breaking them is easy and expensive: the station
 **never decides when a trap fires**, and it **never invents a data format** — it writes the CSV
