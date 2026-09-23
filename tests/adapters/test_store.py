@@ -21,7 +21,12 @@ import pytest
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.domain import payloads
-from feeder_station.domain.events import OPERATOR_ARM, OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
+from feeder_station.domain.events import (
+    OPERATOR_ARM,
+    OPERATOR_CAPTURE_ACKNOWLEDGED,
+    OPERATOR_SET_TARGETS,
+    StationEvent,
+)
 from feeder_station.domain.traps import Registry, TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -864,6 +869,144 @@ def test_a_heartbeats_non_int_state_counts_as_unreadable_not_silent(tmp_path: Pa
     assert trap.state is TrapState.IDLE  # the older, readable CAPTURED report
     assert trap.state_may_be_stale is True
     assert reopened.rehydration_errors == 1
+
+
+# --- WARNING 1 (verify-report-batch2c.md): three more silent, uncounted ------
+# not-readable paths, one field over from the two guards fixed above. Every
+# guard below now raises through the same `_unreadable` helper (unified, not
+# a third bespoke `raise`), so all three feed the same `except Exception` in
+# `rehydrate()` -- counted, logged with a traceback, never a plausible default.
+
+
+def test_a_captured_rows_null_tag_counts_as_unreadable_not_silent(tmp_path: Path) -> None:
+    """Case D: a real CAPTURED frame always carries a tag (`decode_captured`
+    requires one), so a newest CAPTURED row with `tag` NULL is a corruption
+    shape the wire decoder could never itself produce -- before this fix,
+    `_rehydrate_capture` read `captured is None or captured.tag is None` as
+    one case and answered "no fact" for both, silently: not counted, not
+    flagged, losing both the capture object (S3) and this row's state-race
+    candidate. The older, readable HEARTBEAT still wins the race (WARNING J:
+    a real report beats nothing at all) but must now say a fresher,
+    unreadable one existed.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 1},  # 1 -> ARMED
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.CAPTURED,
+            msg_id=2,
+            node_epoch=None,
+            tag=None,  # corrupt: a real CAPTURED frame always carries a tag
+            fields={"state_after": 2},
+            payload=b"",
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.ARMED  # the older, readable report -- still the best fact
+    assert trap.state_may_be_stale is True  # ... but a newer one existed and could not be read
+    assert reopened.rehydration_errors == 1  # counted, not silent
+    assert trap.capture is None  # nothing readable to restore either
+
+
+def test_a_corrupt_targets_version_counts_as_unreadable_instead_of_dropping_the_command(
+    tmp_path: Path,
+) -> None:
+    """Case E: a `SET_TARGETS` row whose `targets_version` is present but
+    not an `int` used to make `_rehydrate_desired_command` `return` early,
+    silently -- the whole pending command dropped, not counted, not logged,
+    while `desired_tags` (restored independently, S2/13.11-13.12) still
+    shows the edit as if it had been accepted. No heartbeat: the node has
+    never reported, so nothing else could satisfy or explain the command.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=7,
+            msg_type=OPERATOR_SET_TARGETS,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={"targets_version": "CORRUPT", "tags": ["0384199C87EC06"]},
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened = Store(db_path)
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.pending_command is None  # unreadable version -- never fabricated as confirmed
+    assert trap.desired_tags == (bytes.fromhex("0384199C87EC06"),)  # restored independently (S2)
+    assert reopened.rehydration_errors == 1  # counted, not silent
+
+
+def test_a_corrupt_tags_list_counts_as_unreadable_instead_of_fabricating_an_empty_list(
+    tmp_path: Path,
+) -> None:
+    """Case F: a `SET_TARGETS` row with a well-formed `targets_version` but
+    a `tags` field that is not a list used to fall through
+    `_tags_from_fields(...) or ()`, fabricating an *empty* desired list --
+    a trap configured to hunt specific tags silently becomes a trap
+    configured to hunt none, with nothing saying the real list could not be
+    read. The wire is protected (`command_sender._stored_tags` refuses to
+    send an empty list), so the practical effect was a command that never
+    resolves rather than a wrong send -- but the row is still not counted.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=7,
+            msg_type=OPERATOR_SET_TARGETS,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={"targets_version": 5, "tags": "CORRUPT"},  # not a list
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened = Store(db_path)
+    reopened.rehydrate(registry)
+
+    # unreadable tags must never be replaced by a fabricated empty list -- no
+    # command is ever installed for this node, the same "no fact" discipline
+    # WARNING J already applies to `state`
+    assert 7 not in {trap.node_id for trap in registry.traps()}
+    assert reopened.rehydration_errors == 1  # counted, not silent
 
 
 def test_trap_state_from_wire_maps_every_valid_byte_to_the_right_state() -> None:

@@ -24,7 +24,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from feeder_station.domain import payloads
 from feeder_station.domain.commands import Command, CommandKind, ReportedState
@@ -696,7 +696,7 @@ class Store:
             # `except Exception` guard `rehydrate()` already counts and
             # flags a fresher sibling row's failure through, instead of
             # answering "no fact" as if nothing were wrong.
-            raise TypeError(f"HEARTBEAT state field is not an int: {state_value!r}")
+            _unreadable("HEARTBEAT state", state_value)
         fact = _ReportedFact(
             seq=heartbeat.seq,
             state=trap_state_from_wire(state_value),
@@ -731,8 +731,15 @@ class Store:
         (c).
         """
         captured = self.latest(node_id, payloads.CAPTURED)
-        if captured is None or captured.tag is None:
-            return None
+        if captured is None:
+            return None  # no CAPTURED row at all -- an honest "no fact", not corruption
+        if captured.tag is None:
+            # WARNING 1 (verify-report-batch2c.md, case D): `decode_captured`
+            # always requires a tag, so a stored CAPTURED row with `tag`
+            # NULL is a corruption shape the wire decoder could never
+            # itself produce -- the same "not readable" as a wrong-typed
+            # `state_after` below, not a legitimate absence.
+            _unreadable("CAPTURED tag", captured.tag)
 
         acknowledged = self.latest(node_id, OPERATOR_CAPTURE_ACKNOWLEDGED)
         if acknowledged is None or acknowledged.seq <= captured.seq:
@@ -747,7 +754,7 @@ class Store:
             # WARNING 1 (verify-report-batch2.md): same correction as
             # `_rehydrate_heartbeat` — a row that cannot be read must be
             # counted and flagged, not answered as "no fact" in silence.
-            raise TypeError(f"CAPTURED state_after field is not an int: {state_after!r}")
+            _unreadable("CAPTURED state_after", state_after)
         return _ReportedFact(
             seq=captured.seq,
             state=trap_state_from_wire(state_after),
@@ -798,7 +805,12 @@ class Store:
         if latest_kind is CommandKind.SET_TARGETS:
             version = latest.fields.get("targets_version")
             if not isinstance(version, int):
-                return
+                # WARNING 1 (verify-report-batch2c.md, case E): a bare
+                # `return` here used to drop the whole pending command
+                # silently -- not counted, not logged -- while
+                # `desired_tags` (restored independently, above) still
+                # showed the edit as if it had been accepted.
+                _unreadable("SET_TARGETS targets_version", version)
             targets_version = version
 
         reported = _reported_state(registry, node_id)
@@ -820,7 +832,14 @@ class Store:
             registry.command_disarm(node_id, at=at)
         else:
             assert targets_version is not None  # narrowed above: SET_TARGETS always sets this
-            tags = _tags_from_fields(latest.fields) or ()
+            tags = _tags_from_fields(latest.fields)
+            if tags is None:
+                # WARNING 1 (verify-report-batch2c.md, case F): `... or ()`
+                # used to fabricate an *empty* desired list for unreadable
+                # `tags` -- a trap configured to hunt specific tags
+                # silently became a trap configured to hunt none, with
+                # nothing saying the real list could not be read.
+                _unreadable("SET_TARGETS tags", latest.fields.get("tags"))
             registry.command_set_targets(node_id, targets_version=targets_version, at=at, tags=tags)
 
 
@@ -851,6 +870,30 @@ def _reported_state(registry: Registry, node_id: int) -> ReportedState | None:
     if trap.state is None:
         return None
     return ReportedState(armed=trap.state is TrapState.ARMED, targets_version=trap.targets_version)
+
+
+def _unreadable(what: str, value: object) -> NoReturn:
+    """The single expression of "this value cannot be read" every not-
+    readable guard in this module now raises through (WARNING 1, verify-
+    report-batch2c.md) -- five call sites, previously four different
+    shapes.
+
+    Before this fix, three of the five worked around the same fact
+    differently, each a plausible, calm-looking value standing in for
+    "not readable" instead of a raise: a bare ``return None``
+    (:meth:`Store._rehydrate_capture`'s ``tag``), a bare ``return``
+    (:meth:`Store._rehydrate_desired_command`'s ``targets_version``), and
+    ``... or ()`` (the same method's ``tags``, fabricating an *empty*
+    desired list) -- uncounted and unflagged, strictly worse than the two
+    sites that already raised (:meth:`Store._rehydrate_heartbeat`'s
+    ``state``, :meth:`Store._rehydrate_capture`'s ``state_after``), each
+    with its own hand-written message. Every caller here sits inside
+    :meth:`Store.rehydrate`'s own ``except Exception`` (CRITICAL A):
+    raising, not returning early with a default, is what makes the
+    corruption counted in ``rehydration_errors`` and logged with a
+    traceback instead of read back as an ordinary absence of data.
+    """
+    raise ValueError(f"{what} is not readable: {value!r}")
 
 
 def _tags_from_fields(fields: dict[str, object]) -> tuple[bytes, ...] | None:
