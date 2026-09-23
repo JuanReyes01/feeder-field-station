@@ -124,6 +124,11 @@ function renderTrap(t) {
   const battery = t.battery_mv != null ? `${t.battery_mv} mV` : "sin dato";
   const version = t.targets_version != null ? t.targets_version : "—";
   const lastSeen = t.last_seen ? escapeHtml(t.last_seen) : "nunca";
+  // WARNING J (sdd-verify field-station-p4): `state` is `null` exactly
+  // when this station has no readable report to show -- never render
+  // that as the English enum values around it would suggest by omission;
+  // say so, in Spanish, same as every other "no data" label on this page.
+  const state = t.state != null ? t.state : "desconocido";
   // 13.11/13.12: what the trap is actually hunting -- the station's own
   // desired list, not only its version number.
   const targets = (t.targets && t.targets.length)
@@ -131,7 +136,7 @@ function renderTrap(t) {
     : "ninguno";
   return `
     <div class="trap ${noContact ? "no-contact" : ""}">
-      <div class="state">Trampa ${t.node_id} · ${t.state}</div>
+      <div class="state">Trampa ${t.node_id} · ${state}</div>
       ${noContact ? '<p class="no-contact-badge">⚠ SIN CONTACTO — este estado puede estar desactualizado</p>' : ""}
       <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
       <p class="muted">Objetivos actuales: ${targets}</p>

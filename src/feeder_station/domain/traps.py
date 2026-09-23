@@ -29,6 +29,16 @@ class TrapState(str, Enum):
     FAULT = "fault"
 
 
+# `_WIRE_STATE_ORDER = (IDLE, ARMED, FIRED, FAULT)` (adapters/store.py) maps
+# each member's *position* directly onto the HEARTBEAT/CAPTURED wire byte
+# (WARNING B, sdd-verify field-station-p4 batch 1: `len(TrapState)` derives
+# the valid wire range). A fifth member here would silently widen that
+# range to accept a byte the protocol has never sent -- which is why
+# "unknown" is `Trap.state`'s own type going `TrapState | None` (below),
+# not a new `TrapState` value: unknown-to-the-station is not one of the
+# four things a trap can report about itself.
+
+
 @dataclass
 class Capture:
     tag: bytes
@@ -39,7 +49,17 @@ class Capture:
 @dataclass
 class Trap:
     node_id: int
-    state: TrapState = TrapState.IDLE
+    # WARNING J (sdd-verify field-station-p4, verify-report-batch1-round2.md):
+    # `battery_mv`/`targets_version`/`last_seen` all default to `None` --
+    # "no data" -- when this station has nothing to report. `state` used to
+    # be the one field that invented a value instead (`TrapState.IDLE`, the
+    # calmest reading available), so a trap whose only readable report was
+    # `FAULT` could render as a calm, healthy "idle" after a corrupt-row
+    # skip at boot -- a false all-clear on a trap that may be holding an
+    # animal. `None` here means the same thing it means for its neighbours:
+    # the station does not know, and must say so, never guess the safest-
+    # looking answer.
+    state: TrapState | None = None
     battery_mv: int | None = None
     targets_version: int | None = None
     last_seen: datetime | None = None
@@ -149,22 +169,53 @@ class Registry:
     def restore_capture(self, node_id: int, tag: bytes, at: datetime) -> Capture:
         """Rehydration-only counterpart to :meth:`captured` (CRITICAL 2,
         sdd-verify field-station-p4): a capture replayed from the store at
-        boot must never overwrite ``state``/``last_seen`` with the
-        capture's own — possibly hours-old — timestamp. Those two facts are
-        the heartbeat replay's business alone (S4, trap-commands/spec.md:
-        "The trap's displayed state MUST always be whatever its own most
-        recent HEARTBEAT or HELLO reported").
+        boot must never overwrite ``state``/``last_seen`` itself — those
+        two facts are decided once, separately, by whichever report wins
+        the state race (:meth:`restore_reported_state`, CRITICAL 1 —
+        which may be this very same CAPTURED row, or a different one
+        entirely), never by the order replay steps happen to run in.
 
         ``captured()`` itself is unchanged and still used as-is by the live
         ingest path (``adapters/ingest.py``), where a CAPTURED frame really
         is the trap's own latest report arriving in real time — only a
         *replayed* one, arriving in whatever order the log happens to hold
-        it, must not be allowed to regress a fresher heartbeat already
+        it, must not be allowed to regress a fresher report already
         rehydrated first.
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.capture = Capture(tag=tag, at=at)
         return trap.capture
+
+    def restore_reported_state(self, node_id: int, state: TrapState, at: datetime) -> None:
+        """Rehydration-only: apply the single winning report (CRITICAL 1,
+        sdd-verify field-station-p4 batch 2) — whichever of a node's
+        HEARTBEAT, CAPTURED or FAULT rows is most recent by store ``seq``,
+        as ``adapters/store.py::rehydrate`` has already decided — setting
+        ``state``/``last_seen`` alone, mirroring :meth:`restore_capture`'s
+        own "never touch the other one's fields" discipline. Not called at
+        all when no state-bearing row could be read (WARNING J): ``Trap.
+        state`` then honestly stays at its own default, ``None``, rather
+        than this method inventing one.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.state = state
+        trap.last_seen = at
+
+    def restore_heartbeat_fields(
+        self, node_id: int, battery_mv: int | None, targets_version: int | None
+    ) -> None:
+        """Rehydration-only: ``battery_mv``/``targets_version`` exist on no
+        report but HEARTBEAT, so they are restored from the latest one
+        regardless of whether it wins the state race
+        :meth:`restore_reported_state` resolves separately (CRITICAL 1,
+        task 2.2's step (b)) — a CAPTURED or FAULT row winning the race
+        must not blank out a battery reading the heartbeat still has.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        if battery_mv is not None:
+            trap.battery_mv = battery_mv
+        if targets_version is not None:
+            trap.targets_version = targets_version
 
     def restore_desired_tags(self, node_id: int, tags: Sequence[bytes]) -> None:
         """Rehydration-only: replay the latest ``OPERATOR_SET_TARGETS``
@@ -205,7 +256,11 @@ class Registry:
             rows.append(
                 {
                     "node_id": trap.node_id,
-                    "state": trap.state.value,
+                    # WARNING J: `None` here (never a fabricated `"idle"`)
+                    # when this station has no readable report to show,
+                    # the same "never enabled, never counts as a value"
+                    # discipline `battery_mv`/`last_seen` already apply.
+                    "state": trap.state.value if trap.state is not None else None,
                     "reachable": reachable,
                     "trustworthy": reachable,
                     "battery_mv": trap.battery_mv,
