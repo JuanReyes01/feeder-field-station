@@ -69,13 +69,13 @@ Hardware gate: none — pure byte vectors.
 
 Traces: S1, S2, S5, S12.
 
-- [ ] 2.1 RED: encode vectors for `ARM`, `DISARM`, `GET_STATE`, `GET_BACKLOG`
-- [ ] 2.2 GREEN: implement those encoders
-- [ ] 2.3 RED: `test_encodes_time_sync_with_no_refusal_field` — exactly 4-byte LE epoch (D7)
-- [ ] 2.4 GREEN: implement `encode_time_sync`
-- [ ] 2.5 RED: `test_encodes_a_40_tag_target_list_across_two_frames` — `seq=0/2`, `seq=1/2`, ≤200 B each
-- [ ] 2.6 GREEN: implement `SET_TARGETS` chunking at 27 tags/frame, one shared `targets_version`
-- [ ] 2.7 REFACTOR: extract chunking helper if slice 7's rotation logic would otherwise duplicate it
+- [x] 2.1 RED: encode vectors for `ARM`, `DISARM`, `GET_STATE`, `GET_BACKLOG`
+- [x] 2.2 GREEN: implement those encoders
+- [x] 2.3 RED: `test_encodes_time_sync_with_no_refusal_field` — exactly 4-byte LE epoch (D7)
+- [x] 2.4 GREEN: implement `encode_time_sync`
+- [x] 2.5 RED: `test_encodes_a_40_tag_target_list_across_two_frames` — `seq=0/2`, `seq=1/2`, ≤200 B each
+- [x] 2.6 GREEN: implement `SET_TARGETS` chunking at 27 tags/frame, one shared `targets_version`
+- [x] 2.7 REFACTOR: extract chunking helper if slice 7's rotation logic would otherwise duplicate it
 
 Done: all downlink scenarios green; a chunked `SET_TARGETS` round-trips through slice 1's decoder.
 PR boundary: downlink additions to `domain/payloads.py` + tests. No adapter wiring.

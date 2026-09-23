@@ -17,7 +17,10 @@ width explicitly wins over the comment.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from .frames import PAYLOAD_MAX
 
 # Uplink message types (docs/protocol/messages.md, "Uplink, node to station").
 HELLO = 0x01
@@ -26,6 +29,22 @@ VISIT = 0x03
 CAPTURED = 0x04
 FAULT = 0x05
 ACK = 0x7F
+
+# Downlink message types (docs/protocol/messages.md, "Downlink, station to node").
+ARM = 0x81
+DISARM = 0x82
+SET_TARGETS = 0x83
+GET_STATE = 0x84
+TIME_SYNC = 0x85
+GET_BACKLOG = 0x86
+
+TAG_BYTES = 7
+
+# SET_TARGETS header: targets_version (2) + seq (2) + seq_total (2) + count (1).
+_SET_TARGETS_HEADER_BYTES = 7
+# How many tags fit in one 200-byte payload alongside that header — this is
+# what pins messages.md's "a 200-byte payload carries 27 tags" (200-7)//7=27.
+TAGS_PER_SET_TARGETS_FRAME = (PAYLOAD_MAX - _SET_TARGETS_HEADER_BYTES) // TAG_BYTES
 
 
 class PayloadError(ValueError):
@@ -179,3 +198,102 @@ def decode_ack(payload: bytes) -> Ack:
         acked_msg_id=payload[0] | (payload[1] << 8),
         status=payload[2],
     )
+
+
+def encode_arm(*, expires_epoch: int) -> bytes:
+    # expires_epoch: 4 bytes LE uint32 — pinned; it is a timestamp, and
+    # messages.md's "Timestamps are UTC seconds since the Unix epoch, uint32"
+    # convention applies to every epoch field, not only the uplink ones.
+    return bytes(
+        [
+            expires_epoch & 0xFF,
+            (expires_epoch >> 8) & 0xFF,
+            (expires_epoch >> 16) & 0xFF,
+            (expires_epoch >> 24) & 0xFF,
+        ]
+    )
+
+
+def encode_disarm() -> bytes:
+    # DISARM has no payload (messages.md: "--").
+    return b""
+
+
+def encode_get_state() -> bytes:
+    # GET_STATE has no payload; it is answered with HEARTBEAT (messages.md).
+    return b""
+
+
+def encode_time_sync(*, epoch: int) -> bytes:
+    # epoch: 4 bytes LE uint32 — pinned (Timestamps convention). No confidence
+    # or refusal field: the protocol has none (D7); a station that must not
+    # send TIME_SYNC withholds the frame entirely instead of encoding one.
+    return bytes(
+        [
+            epoch & 0xFF,
+            (epoch >> 8) & 0xFF,
+            (epoch >> 16) & 0xFF,
+            (epoch >> 24) & 0xFF,
+        ]
+    )
+
+
+def encode_get_backlog(*, after_msg_id: int, max_events: int) -> bytes:
+    # after_msg_id: 2 bytes LE — pinned, the same width as the frame header's
+    # own msg_id field (same choice already made for ACK's acked_msg_id).
+    # max_events: 2 bytes LE — assumption; a batch-size counter, sized like
+    # reads_today/duration_s rather than a frame-bounded field, since nothing
+    # in the protocol caps how many events a station may ask for in one turn.
+    return bytes(
+        [
+            after_msg_id & 0xFF,
+            (after_msg_id >> 8) & 0xFF,
+            max_events & 0xFF,
+            (max_events >> 8) & 0xFF,
+        ]
+    )
+
+
+def _chunk_tags(tags: Sequence[bytes]) -> list[Sequence[bytes]]:
+    """Split a tag list into groups no larger than one frame can carry.
+
+    Always returns at least one chunk (possibly empty) so an empty target
+    list still produces a single SET_TARGETS frame declaring `count=0`.
+    """
+    if not tags:
+        return [()]
+    return [
+        tags[start : start + TAGS_PER_SET_TARGETS_FRAME]
+        for start in range(0, len(tags), TAGS_PER_SET_TARGETS_FRAME)
+    ]
+
+
+def encode_set_targets(*, targets_version: int, tags: Sequence[bytes]) -> list[bytes]:
+    # targets_version: 2 bytes LE — reused, not a fresh assumption: it is the
+    # same value HEARTBEAT/HELLO report back, already fixed at that width.
+    # seq, seq_total: 2 bytes LE each — assumption; counters sized like
+    # reads_today/boot_count, since nothing bounds how many frames a very
+    # long target list could need.
+    # count: 1 byte — assumption; bounded by frame capacity (<=27, see
+    # TAGS_PER_SET_TARGETS_FRAME above), mirroring frames.py's own
+    # frame-bounded `payload_len` field rather than the open-ended counters.
+    for tag in tags:
+        _require_len(tag, TAG_BYTES, "SET_TARGETS tag")
+
+    chunks = _chunk_tags(tags)
+    seq_total = len(chunks)
+    frames = []
+    for seq, chunk in enumerate(chunks):
+        header = bytes(
+            [
+                targets_version & 0xFF,
+                (targets_version >> 8) & 0xFF,
+                seq & 0xFF,
+                (seq >> 8) & 0xFF,
+                seq_total & 0xFF,
+                (seq_total >> 8) & 0xFF,
+                len(chunk),
+            ]
+        )
+        frames.append(header + b"".join(chunk))
+    return frames

@@ -173,3 +173,58 @@ def test_a_fixed_length_payload_one_byte_short_is_rejected(decoder, valid_length
 def test_a_fault_payload_with_zero_bytes_is_rejected() -> None:
     with pytest.raises(PayloadError):
         payloads.decode_fault(b"")
+
+
+def test_encodes_an_arm_payload() -> None:
+    result = payloads.encode_arm(expires_epoch=0x01020304)
+
+    assert result == bytes([0x04, 0x03, 0x02, 0x01])
+
+
+def test_encodes_a_disarm_payload() -> None:
+    assert payloads.encode_disarm() == b""
+
+
+def test_encodes_a_get_state_payload() -> None:
+    assert payloads.encode_get_state() == b""
+
+
+def test_encodes_a_get_backlog_payload() -> None:
+    result = payloads.encode_get_backlog(after_msg_id=0xBEEF, max_events=10)
+
+    assert result == bytes([0xEF, 0xBE, 0x0A, 0x00])
+
+
+def test_encodes_time_sync_with_no_refusal_field() -> None:
+    result = payloads.encode_time_sync(epoch=0x01020304)
+
+    assert result == bytes([0x04, 0x03, 0x02, 0x01])
+    assert len(result) == 4
+
+
+def _set_targets_header(frame: bytes) -> tuple[int, int, int, int]:
+    targets_version = frame[0] | (frame[1] << 8)
+    seq = frame[2] | (frame[3] << 8)
+    seq_total = frame[4] | (frame[5] << 8)
+    count = frame[6]
+    return targets_version, seq, seq_total, count
+
+
+def test_encodes_a_40_tag_target_list_across_two_frames() -> None:
+    tags = [bytes([i, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) for i in range(40)]
+
+    frames = payloads.encode_set_targets(targets_version=9, tags=tags)
+
+    assert len(frames) == 2
+    assert all(len(frame) <= 200 for frame in frames)
+
+    version0, seq0, seq_total0, count0 = _set_targets_header(frames[0])
+    version1, seq1, seq_total1, count1 = _set_targets_header(frames[1])
+
+    assert version0 == version1 == 9
+    assert seq_total0 == seq_total1 == 2
+    assert (seq0, seq1) == (0, 1)
+    assert count0 == 27
+    assert count1 == 13
+    assert frames[0][7:] == b"".join(tags[:27])
+    assert frames[1][7:] == b"".join(tags[27:])
