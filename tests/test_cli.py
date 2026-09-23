@@ -11,6 +11,7 @@ flag produced without actually starting a server.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -509,7 +510,9 @@ def test_boot_survives_a_non_value_error_corrupt_row(tmp_path: Path, corrupt: ob
     assert body["rehydration_errors"] == 1
 
 
-def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
+def test_boot_survives_a_broken_node_roster_query(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """`_known_node_ids()`'s query and the loop over it used to sit above
     the per-step `try` entirely. Dropping the table is a deterministic
     stand-in for corruption landing on it.
@@ -526,6 +529,16 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
     "fold connected into ok" precedent `link_ok` already sets, so a
     monitoring check or a person glancing at `ok` alone cannot read this as
     a healthy, merely quiet station.
+
+    **Extended (WARNING 3, verify-report-batch2c.md): the fourth skip/drop
+    log site, still unpinned.** `store.py` has three `logger.exception`
+    sites, not two -- the state-race loop and `_rehydrate_desired_command`
+    were each pinned by their own dedicated `caplog` test, but the roster
+    failure at `store.py:556` (this very scenario) was measured only
+    through `rehydration_errors`/`roster_lost`, never through its own log
+    record. N7 (downgrading that site to `logger.debug`, dropping the
+    traceback) survived all 757 tests. One `caplog` assertion here closes
+    it, the same shape the other two sites already use.
     """
     db_path = tmp_path / "station.db"
     Store(db_path).close()
@@ -535,7 +548,10 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
     raw.execute("DROP TABLE node_cursor")
     raw.close()
 
-    with TestClient(app) as c:
+    with (
+        caplog.at_level(logging.DEBUG, logger="feeder_station.adapters.store"),
+        TestClient(app) as c,
+    ):
         response = c.get("/health")
         traps = c.get("/api/traps").json()
 
@@ -545,6 +561,14 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
     assert body["roster_lost"] is True
     assert body["ok"] is False  # a lost registry must not read as a healthy station
     assert traps == []
+
+    roster_records = [
+        r for r in caplog.records if "could not read the node roster" in r.getMessage()
+    ]
+    assert len(roster_records) == 1
+    record = roster_records[0]
+    assert record.levelno == logging.ERROR  # not downgraded to DEBUG
+    assert record.exc_info is not None  # the traceback -- not dropped
 
 
 def test_one_bad_row_does_not_look_like_a_lost_roster(tmp_path: Path) -> None:
