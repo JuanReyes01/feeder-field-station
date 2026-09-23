@@ -85,6 +85,22 @@ def test_a_silent_trap_is_not_reported_as_armed() -> None:
     assert view["trustworthy"] is False
 
 
+def test_a_fault_uplink_sets_the_trap_to_fault_state() -> None:
+    """radio-gateway spec.md: "On a FAULT uplink, the system MUST update the
+    affected trap's reported state to fault." The node itself reported this
+    — same standing as any other heartbeat-shaped fact (S4), not a guess
+    this station made about a silent node (that is `is_reachable()`'s job).
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
+
+    registry.fault(7, at=NOW + timedelta(minutes=1))
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.FAULT
+    assert trap.last_seen == NOW + timedelta(minutes=1)
+
+
 def test_traps_are_listed_in_a_stable_order() -> None:
     registry = Registry(silence_after=timedelta(minutes=5))
     for node in (9, 3, 7):

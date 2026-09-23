@@ -98,6 +98,16 @@ class Registry:
         trap.capture = Capture(tag=tag, at=at)
         return trap.capture
 
+    def fault(self, node_id: int, at: datetime) -> None:
+        """A `FAULT` uplink (radio-gateway spec.md): the trap itself reported
+        it, exactly the same standing as a heartbeat (S4) — not this
+        station's own guess about a node gone quiet, which `is_reachable()`
+        computes separately.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.state = TrapState.FAULT
+        trap.last_seen = at
+
     def acknowledge(self, node_id: int, at: datetime) -> None:
         self._traps[node_id].capture = None
 

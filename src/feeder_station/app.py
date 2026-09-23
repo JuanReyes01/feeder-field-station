@@ -11,16 +11,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from feeder_station.config import StationConfig
 from feeder_station.domain.traps import Registry
-
-SILENCE_AFTER = timedelta(minutes=5)
 
 
 def now() -> datetime:
@@ -32,6 +31,16 @@ class Broadcaster:
 
     def __init__(self) -> None:
         self._clients: set[asyncio.Queue[str]] = set()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Capture the running loop, once, at lifespan startup (DD11).
+
+        Nothing calls `publish_threadsafe` before the app has started
+        serving, so binding here — rather than guessing a loop eagerly in
+        `__init__`, before one necessarily exists — is safe.
+        """
+        self._loop = loop
 
     def subscribe(self) -> asyncio.Queue[str]:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=32)
@@ -42,6 +51,7 @@ class Broadcaster:
         self._clients.discard(queue)
 
     def publish(self, event: dict[str, Any]) -> None:
+        """Loop-thread only. See `publish_threadsafe` for any other thread."""
         payload = json.dumps(event)
         for queue in list(self._clients):
             # A browser that cannot keep up is dropped from this event, never
@@ -49,10 +59,41 @@ class Broadcaster:
             with suppress(asyncio.QueueFull):
                 queue.put_nowait(payload)
 
+    def publish_threadsafe(self, event: dict[str, Any]) -> None:
+        """Safe to call from any thread, including the gateway thread (DD11).
 
-def create_app(registry: Registry | None = None) -> FastAPI:
-    app = FastAPI(title="CICG field station")
-    app.state.registry = registry or Registry(silence_after=SILENCE_AFTER)
+        Python's own documentation is explicit: "This class [asyncio.Queue]
+        is not thread safe." `publish()` calls `Queue.put_nowait` directly
+        and may only be called from the loop's own thread — today, every
+        caller is a FastAPI route handler already on that thread. Anything
+        else (the radio-gateway thread, once ingest is wired to it) MUST
+        call this instead: it marshals the actual `publish()` call onto the
+        loop via `call_soon_threadsafe`, the one piece of `asyncio` the
+        documentation names as callable from any thread.
+        """
+        loop = self._loop
+        if loop is None:
+            # No loop bound yet — the lifespan has not started (for example
+            # a bare `TestClient(create_app())` used without its own `with`
+            # block). Publishing is never S9-critical (design.md section 3,
+            # step 9): dropping it here is the same best-effort a slow
+            # subscriber's own `QueueFull` already gets in `publish()`.
+            return
+        loop.call_soon_threadsafe(self.publish, event)
+
+
+def create_app(registry: Registry | None = None, config: StationConfig | None = None) -> FastAPI:
+    resolved_config = config or StationConfig.load()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # DD11: the loop only exists once the app actually starts serving —
+        # capture it here, not at construction time.
+        app.state.broadcaster.bind_loop(asyncio.get_running_loop())
+        yield
+
+    app = FastAPI(title="CICG field station", lifespan=lifespan)
+    app.state.registry = registry or Registry(silence_after=resolved_config.silence_after)
     app.state.broadcaster = Broadcaster()
 
     @app.get("/health")

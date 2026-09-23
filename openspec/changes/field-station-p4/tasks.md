@@ -167,25 +167,25 @@ resolve-by-symlink logic and reconnect state machine only (5.9/5.10).
 Traces: S9, S3, S4, S11. Files: `adapters/ingest.py` (new), `app.py` (modified:
 `Broadcaster.publish_threadsafe`), `domain/traps.py` (modified: `Registry.fault()`), `tests/adapters/test_ingest.py`.
 
-- [ ] 6.1 RED: `test_app.py::test_publish_threadsafe_is_safe_from_a_background_thread` — drives
+- [x] 6.1 RED: `test_app.py::test_publish_threadsafe_is_safe_from_a_background_thread` — drives
       `Queue.put_nowait` from a real thread under load; **this is the DD11 test, explicit, not a
       footnote:** today's `Broadcaster.publish` is called straight from a non-loop thread and
       `asyncio.Queue` is documented NOT thread-safe
-- [ ] 6.2 GREEN: `Broadcaster` captures the running loop at lifespan startup;
+- [x] 6.2 GREEN: `Broadcaster` captures the running loop at lifespan startup;
       `publish_threadsafe(event)` routes through `loop.call_soon_threadsafe(self.publish, event)`;
       **ingest MUST NOT call the gateway until this lands**
-- [ ] 6.3 RED: `test_ack_withheld_on_write_failure` — store raises → no ACK written to the port
-- [ ] 6.4 GREEN: `adapters/ingest.py::ingest_frame()` — decode → `store.append()` (fsync) → ACK write
+- [x] 6.3 RED: `test_ack_withheld_on_write_failure` — store raises → no ACK written to the port
+- [x] 6.4 GREEN: `adapters/ingest.py::ingest_frame()` — decode → `store.append()` (fsync) → ACK write
       → registry update → `publish_threadsafe()`, in that literal order; ACK only after commit returns
-- [ ] 6.5 RED: `test_registry_updates_after_the_write_not_before` — ordering assertion via a spy store
-- [ ] 6.6 GREEN: confirm ordering holds (should already pass from 6.4)
-- [ ] 6.7 RED: `test_fault_uplink_updates_reported_state_to_fault`
-- [ ] 6.8 GREEN: `Registry.fault(node_id, at)` sets `TrapState.FAULT` (enum already exists)
-- [ ] 6.9 RED: `test_silent_node_is_marked_unreachable_within_15_minutes` — uses `config.silence_after`
+- [x] 6.5 RED: `test_registry_updates_after_the_write_not_before` — ordering assertion via a spy store
+- [x] 6.6 GREEN: confirm ordering holds (should already pass from 6.4)
+- [x] 6.7 RED: `test_fault_uplink_updates_reported_state_to_fault`
+- [x] 6.8 GREEN: `Registry.fault(node_id, at)` sets `TrapState.FAULT` (enum already exists)
+- [x] 6.9 RED: `test_silent_node_is_marked_unreachable_within_15_minutes` — uses `config.silence_after`
       (task 4.1/4.2), not the old hardcoded `timedelta(minutes=5)` in `app.py`
-- [ ] 6.10 GREEN: replace `app.py`'s hardcoded `SILENCE_AFTER` with `config.silence_after`; wire
+- [x] 6.10 GREEN: replace `app.py`'s hardcoded `SILENCE_AFTER` with `config.silence_after`; wire
       `ingest.py`'s view path to it
-- [ ] 6.11 REFACTOR: `adapters/ingest.py` module docstring: "the only place that knows the S9 ordering"
+- [x] 6.11 REFACTOR: `adapters/ingest.py` module docstring: "the only place that knows the S9 ordering"
 
 Done: `ingest_frame()` is the single call site wiring gateway→store→ACK→registry→SSE in that order;
 6.1's thread-safety test passes under real contention; FAULT/silence scenarios pass.

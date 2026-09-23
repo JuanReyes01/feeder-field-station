@@ -155,6 +155,18 @@ def test_decodes_an_ack_payload() -> None:
     assert result.status == 0
 
 
+def test_encodes_an_ack_payload() -> None:
+    result = payloads.encode_ack(acked_msg_id=0xBEEF, status=0)
+
+    assert result == bytes([0xEF, 0xBE, 0x00])
+
+
+def test_encoded_ack_round_trips_through_decode_ack() -> None:
+    result = payloads.encode_ack(acked_msg_id=0x1234, status=2)
+
+    assert payloads.decode_ack(result) == payloads.Ack(acked_msg_id=0x1234, status=2)
+
+
 @pytest.mark.parametrize(
     ("decoder", "valid_length"),
     [

@@ -254,6 +254,23 @@ def encode_get_backlog(*, after_msg_id: int, max_events: int) -> bytes:
     )
 
 
+def encode_ack(*, acked_msg_id: int, status: int = 0) -> bytes:
+    # acked_msg_id: 2 bytes LE, status: 1 byte — pinned, the exact mirror of
+    # decode_ack's layout. messages.md lists `0x7F ACK` under *both* the
+    # uplink and downlink catalogues with the identical payload shape: a
+    # node ACKs a downlink command, and the station ACKs an uplink frame
+    # that asked for one (ack_required, frame header flag bit0). Only the
+    # decode half existed before this slice wired the station's own ACK
+    # send (adapters/ingest.py, S9's ingest-and-ACK ordering).
+    return bytes(
+        [
+            acked_msg_id & 0xFF,
+            (acked_msg_id >> 8) & 0xFF,
+            status & 0xFF,
+        ]
+    )
+
+
 def _chunk_tags(tags: Sequence[bytes]) -> list[Sequence[bytes]]:
     """Split a tag list into groups no larger than one frame can carry.
 
