@@ -643,12 +643,25 @@ class Store:
         ``test_boot_survives_a_broken_node_roster_query`` (CRITICAL A) go
         on proving the roster query itself sits inside ``rehydrate()``'s
         guard, without also having to corrupt ``event``.
+
+        **Widened again (WARNING 4, verify-report-batch2c.md): ``source =
+        'station'`` rows are unioned in too.** ``adapters/clock.py``'s own
+        ``STATION_TIME_SYNC_WITHHELD`` row names a ``node_id`` the station
+        has neither heard from nor commanded -- a station-sourced-only
+        node used to be invisible here while :meth:`_count_all_known_nodes`
+        counted it anyway, a *by-design* gap (not corruption) that read as
+        a permanently lost roster. Still deliberately narrower than
+        ``SELECT DISTINCT node_id FROM event`` outright: that would also
+        absorb ``source = 'node'`` rows, which is exactly the coverage
+        ``test_boot_survives_a_broken_node_roster_query`` and
+        ``test_a_partial_roster_says_so_instead_of_reading_healthy`` need
+        ``node_cursor`` to answer *on its own*, uncorrupted by a wider net.
         """
         rows = self._conn.execute(
             """
             SELECT node_id FROM node_cursor
             UNION
-            SELECT DISTINCT node_id FROM event WHERE source = 'operator'
+            SELECT DISTINCT node_id FROM event WHERE source IN ('operator', 'station')
             ORDER BY node_id
             """
         ).fetchall()
@@ -659,12 +672,21 @@ class Store:
         truth :meth:`_known_node_ids` is supposed to match. Every row in
         ``event`` names a real ``node_id`` regardless of ``source`` or any
         JSON-field corruption elsewhere in the row (the column is a plain
-        ``INTEGER NOT NULL``), so this can only ever under- or over-count
-        relative to :meth:`_known_node_ids` if that narrower union itself
-        missed something -- a `node_cursor` row lost to a partial write,
-        for instance, with the node's other rows in ``event`` intact.
-        Run inside the same guard as the roster query itself: a whole-table
-        failure here is exactly the roster-lost case already handled.
+        ``INTEGER NOT NULL``).
+
+        **Correction (verify-report-batch2c.md, WARNING 4): the claim that
+        a mismatch can only ever come from corruption was false.** Before
+        that report, :meth:`_known_node_ids`'s union left out
+        ``source = 'station'`` rows entirely, so a node known to this
+        method only through a ``STATION_TIME_SYNC_WITHHELD`` row differed
+        from :meth:`_known_node_ids` *by design*, permanently, with no
+        corruption involved -- a gap this docstring wrongly called
+        impossible. :meth:`_known_node_ids` now unions
+        ``source = 'station'`` too, so the two are expected to agree unless
+        a ``node_cursor`` row really was lost to a partial write, with the
+        node's other rows in ``event`` intact. Run inside the same guard
+        as the roster query itself: a whole-table failure here is exactly
+        the roster-lost case already handled.
         """
         row = self._conn.execute("SELECT COUNT(DISTINCT node_id) FROM event").fetchone()
         return int(row[0])

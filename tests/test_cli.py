@@ -24,7 +24,13 @@ from feeder_station.adapters.store import Store
 from feeder_station.cli import build_app
 from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
-from feeder_station.domain.events import OPERATOR_ARM, OPERATOR_SET_TARGETS, StationEvent, interpret
+from feeder_station.domain.events import (
+    OPERATOR_ARM,
+    OPERATOR_SET_TARGETS,
+    STATION_TIME_SYNC_WITHHELD,
+    StationEvent,
+    interpret,
+)
 from feeder_station.domain.traps import Registry
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -689,6 +695,66 @@ def test_a_partial_roster_says_so_instead_of_reading_healthy(tmp_path: Path) -> 
     assert health["roster_nodes_expected"] == 3  # ground truth: `event` names 3 distinct nodes
     assert health["roster_nodes_rehydrated"] == 2  # `_known_node_ids()` found only 2 of them
     assert health["ok"] is False  # a roster that came back short must not read as healthy
+
+
+def test_a_station_sourced_only_node_does_not_trip_the_partial_roster_check(
+    tmp_path: Path,
+) -> None:
+    """WARNING 4 (verify-report-batch2c.md): `_known_node_ids()` and
+    `_count_all_known_nodes()` used to differ *by design*, not only through
+    corruption. `_count_all_known_nodes()` counts every distinct
+    `node_id` in `event` regardless of `source`; `_known_node_ids()` only
+    ever unioned `node_cursor` (node-sourced) with `operator`-sourced rows
+    -- leaving out `source='station'` rows entirely
+    (`adapters/clock.py::attempt_time_sync` writes a
+    `STATION_TIME_SYNC_WITHHELD` row, naming a `node_id`, whenever S12
+    refuses to distribute an unset clock). A node the station has only
+    ever refused to time-sync -- never heard from, never commanded -- read
+    `ok: false` permanently, with `roster_lost: false` and
+    `rehydration_errors: 0` naming nothing: a by-design gap read as
+    corruption. `_known_node_ids()` now unions station-sourced rows too.
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=1,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 0, "battery_mv": 4000, "targets_version": 1},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.append(
+        StationEvent(
+            source="station",
+            node_id=5,
+            msg_type=STATION_TIME_SYNC_WITHHELD,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={"reason": "clock_unset"},
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        health = c.get("/health").json()
+
+    # node 5's only row is station-sourced -- ground truth (`event`) and the
+    # roster walk must agree that it is a real, known node, not a gap
+    assert health["roster_nodes_expected"] == 2
+    assert health["roster_nodes_rehydrated"] == 2
+    assert health["ok"] is True  # a by-design source gap must not read as a lost roster
 
 
 def test_state_may_be_stale_is_true_only_for_the_node_that_earned_it(tmp_path: Path) -> None:
