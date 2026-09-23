@@ -101,33 +101,33 @@ Traces: S9, S3, S5 (all 5 event-store requirements). Files: `config.py` (new), `
 (new), `adapters/store.py` (new), `tests/test_config.py`, `tests/domain/test_events.py`,
 `tests/adapters/test_store.py` (new dir).
 
-- [ ] 4.1 RED: `test_config.py::test_heartbeat_interval_is_5_minutes_silence_after_is_15_minutes` —
+- [x] 4.1 RED: `test_config.py::test_heartbeat_interval_is_5_minutes_silence_after_is_15_minutes` —
       **user decision:** heartbeat every 5 min, unreachable after 15 min (three missed beats); values
       live in `StationConfig`, never as literals
-- [ ] 4.2 GREEN: implement frozen `StationConfig` in `config.py` from argv/`FEEDER_STATION_*` env
-- [ ] 4.3 RED: `test_events.py::test_interpret_produces_a_station_event_from_a_captured_frame`
-- [ ] 4.4 GREEN: `StationEvent` + `interpret(frame) -> StationEvent` in `domain/events.py`
-- [ ] 4.5 RED: `test_store.py::test_every_opened_connection_has_the_full_pragma_set` — WAL,
+- [x] 4.2 GREEN: implement frozen `StationConfig` in `config.py` from argv/`FEEDER_STATION_*` env
+- [x] 4.3 RED: `test_events.py::test_interpret_produces_a_station_event_from_a_captured_frame`
+- [x] 4.4 GREEN: `StationEvent` + `interpret(frame) -> StationEvent` in `domain/events.py`
+- [x] 4.5 RED: `test_store.py::test_every_opened_connection_has_the_full_pragma_set` — WAL,
       `synchronous=FULL`, `busy_timeout=5000`, `foreign_keys=ON`, `journal_size_limit`, `trusted_schema=OFF`
-- [ ] 4.6 GREEN: `Store.__init__` creates schema + applies PRAGMAs on every connection open
-- [ ] 4.7 RED: `test_write_and_fsync_precede_acknowledgement` — write returns before an ACK may be emitted
-- [ ] 4.8 GREEN: `Store.append()` — one `BEGIN IMMEDIATE` transaction, insert `event` + upsert `node_cursor`
-- [ ] 4.9 RED: `test_msg_id_wraps_without_dropping_or_duplicating` — drive `0xFFFF → 0x0000` (D5)
-- [ ] 4.10 GREEN: bounded-window dedup query, `W=32768` per node (DD6)
-- [ ] 4.11 RED: `test_repeat_within_the_window_is_deduplicated` — stored once, `duplicate_of` set (DD8)
-- [ ] 4.12 GREEN: wire dedup result into `Appended.duplicate_of`; caller still ACKs
-- [ ] 4.13 RED: `test_unacknowledged_capture_survives_a_restart` — close, reopen, still unacknowledged
-- [ ] 4.14 GREEN: `Store.latest(node_id, msg_type)` off `event_by_type(node_id, msg_type, seq DESC)`
-- [ ] 4.15 RED: `test_cursor_query_returns_events_oldest_first`
-- [ ] 4.16 GREEN: `Store.cursor(node_id)` + recency-not-maximum `node_cursor` write (DD7)
-- [ ] 4.17 RED: `test_registry_reflects_last_known_state_after_restart` — rehydration entry point
-- [ ] 4.18 GREEN: `Store.rehydrate() -> ...` feeding `traps.rehydrate()` per design §6 (heartbeat →
+- [x] 4.6 GREEN: `Store.__init__` creates schema + applies PRAGMAs on every connection open
+- [x] 4.7 RED: `test_write_and_fsync_precede_acknowledgement` — write returns before an ACK may be emitted
+- [x] 4.8 GREEN: `Store.append()` — one `BEGIN IMMEDIATE` transaction, insert `event` + upsert `node_cursor`
+- [x] 4.9 RED: `test_msg_id_wraps_without_dropping_or_duplicating` — drive `0xFFFF → 0x0000` (D5)
+- [x] 4.10 GREEN: bounded-window dedup query, `W=32768` per node (DD6)
+- [x] 4.11 RED: `test_repeat_within_the_window_is_deduplicated` — stored once, `duplicate_of` set (DD8)
+- [x] 4.12 GREEN: wire dedup result into `Appended.duplicate_of`; caller still ACKs
+- [x] 4.13 RED: `test_unacknowledged_capture_survives_a_restart` — close, reopen, still unacknowledged
+- [x] 4.14 GREEN: `Store.latest(node_id, msg_type)` off `event_by_type(node_id, msg_type, seq DESC)`
+- [x] 4.15 RED: `test_cursor_query_returns_events_oldest_first`
+- [x] 4.16 GREEN: `Store.cursor(node_id)` + recency-not-maximum `node_cursor` write (DD7)
+- [x] 4.17 RED: `test_registry_reflects_last_known_state_after_restart` — rehydration entry point
+- [x] 4.18 GREEN: `Store.rehydrate() -> ...` feeding `traps.rehydrate()` per design §6 (heartbeat →
       capture-if-unacked → desired command state, in that order; reachability never rehydrated)
-- [ ] 4.19 RED: `test_kill_minus_9_crash_proxy` — subprocess writes frames, `kill -9` at randomized
+- [x] 4.19 RED: `test_kill_minus_9_crash_proxy` — subprocess writes frames, `kill -9` at randomized
       points, reopen — **CI proxy, not the hardware gate itself**
-- [ ] 4.20 GREEN: crash-proxy harness; assert `PRAGMA integrity_check` = `ok` and every acknowledged
+- [x] 4.20 GREEN: crash-proxy harness; assert `PRAGMA integrity_check` = `ok` and every acknowledged
       event present
-- [ ] 4.21 REFACTOR: one function applies the full PRAGMA set on every connection, reused by slice 11's
+- [x] 4.21 REFACTOR: one function applies the full PRAGMA set on every connection, reused by slice 11's
       export connection
 
 Done: all 5 event-store scenarios green; crash-proxy passes; no connection opens without the full

@@ -1,0 +1,81 @@
+"""Values that must never live as a literal deep inside some other module.
+
+S11's heartbeat interval and its silence timeout are the first case: today
+``app.py`` hardcodes ``SILENCE_AFTER = timedelta(minutes=5)`` next to the
+route handlers that use it. That hardcoding is exactly what a later slice
+(6.9/6.10) removes, replacing it with ``StationConfig.silence_after`` built
+here instead.
+
+Built from ``argv`` first, ``FEEDER_STATION_*`` environment variables next,
+and the defaults below last — the same precedence ``argparse`` itself uses
+for a flag with an environment-backed default. ``cli.py`` will eventually
+pass the process's real ``sys.argv``/``os.environ``; tests pass both
+explicitly so no test result depends on the machine it runs on.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import timedelta
+
+# S11, user decision: a heartbeat every 5 minutes, unreachable after three
+# missed beats (15 minutes). Named once, here, so nothing downstream repeats
+# either number as a bare literal.
+DEFAULT_HEARTBEAT_INTERVAL = timedelta(minutes=5)
+DEFAULT_SILENCE_AFTER = timedelta(minutes=15)
+
+ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
+ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
+
+
+@dataclass(frozen=True)
+class StationConfig:
+    heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL
+    silence_after: timedelta = DEFAULT_SILENCE_AFTER
+
+    @classmethod
+    def load(
+        cls,
+        argv: Sequence[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> StationConfig:
+        """Build a config from ``argv``, then ``env``, then the defaults.
+
+        Neither source is required: an empty ``argv`` and an empty ``env``
+        yield exactly the defaults this module names. Unknown flags in
+        ``argv`` are ignored rather than rejected, so a later slice's own
+        ``cli.py`` flags (``--db-path`` and friends) can share the same
+        ``argv`` without this parser tripping over them.
+        """
+        resolved_env: Mapping[str, str] = os.environ if env is None else env
+
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--heartbeat-interval-s", type=float, default=None)
+        parser.add_argument("--silence-after-s", type=float, default=None)
+        args, _unknown = parser.parse_known_args(list(argv) if argv is not None else [])
+
+        return cls(
+            heartbeat_interval=_resolve_seconds(
+                args.heartbeat_interval_s,
+                resolved_env.get(ENV_HEARTBEAT_INTERVAL_S),
+                DEFAULT_HEARTBEAT_INTERVAL,
+            ),
+            silence_after=_resolve_seconds(
+                args.silence_after_s,
+                resolved_env.get(ENV_SILENCE_AFTER_S),
+                DEFAULT_SILENCE_AFTER,
+            ),
+        )
+
+
+def _resolve_seconds(
+    from_argv: float | None, from_env: str | None, default: timedelta
+) -> timedelta:
+    if from_argv is not None:
+        return timedelta(seconds=from_argv)
+    if from_env is not None:
+        return timedelta(seconds=float(from_env))
+    return default
