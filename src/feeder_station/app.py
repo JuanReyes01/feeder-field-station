@@ -341,13 +341,27 @@ def create_app(
         store = app.state.store
         rehydration_errors = None if store is None else store.rehydration_errors
 
+        # WARNING K(b) (sdd-verify field-station-p4 batch 2,
+        # verify-report-batch1-round2.md): `rehydration_errors` alone read
+        # byte-identical for "one unreadable row, twenty otherwise-healthy
+        # nodes" and "the roster query itself died, registry empty" -- the
+        # second case used to crash the boot loudly; Batch 1's containment
+        # made it silent. A registry that never got a chance to exist is a
+        # degraded boot, not an error count: its own field, and folded into
+        # `ok` -- the same "fold connected into ok" precedent `link_ok`
+        # already sets, so neither a monitoring check nor a person glancing
+        # at `ok` alone can read this as a healthy, merely quiet station.
+        roster_lost = None if store is None else store.roster_lost
+        roster_ok = roster_lost is not True
+
         return {
-            "ok": workers_ok and link_ok,
+            "ok": workers_ok and link_ok and roster_ok,
             "clock": now().isoformat(),
             "clock_trust": app.state.clock.trust().value,
             "workers": workers,
             "link": link,
             "rehydration_errors": rehydration_errors,
+            "roster_lost": roster_lost,
         }
 
     @app.get("/api/traps")

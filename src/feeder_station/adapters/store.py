@@ -255,6 +255,13 @@ class Store:
         # -- an attribute on the owning adapter, not a value threaded back
         # through a return the caller might discard.
         self.rehydration_errors = 0
+        # WARNING K(b) (sdd-verify field-station-p4 batch 2,
+        # verify-report-batch1-round2.md): `rehydration_errors` alone reads
+        # identically for "one bad row, roster otherwise intact" and "the
+        # roster query itself died, registry empty" -- a degraded boot, not
+        # an error count. Set only in that second branch, reset at the
+        # start of each rehydration pass.
+        self.roster_lost = False
         _ensure_schema(self._conn)
 
     @property
@@ -527,11 +534,13 @@ class Store:
         ``station-deployment/spec.md``'s S7.
         """
         self.rehydration_errors = 0
+        self.roster_lost = False
         try:
             node_ids = self._known_node_ids()
         except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
             logger.exception("rehydrate: could not read the node roster")
             self.rehydration_errors += 1
+            self.roster_lost = True  # WARNING K(b): degraded boot, not a bad-row count
             return
         for node_id in node_ids:
             facts: list[_ReportedFact] = []

@@ -23,7 +23,7 @@ from feeder_station.adapters.store import Store
 from feeder_station.cli import build_app
 from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
-from feeder_station.domain.events import OPERATOR_SET_TARGETS, StationEvent, interpret
+from feeder_station.domain.events import OPERATOR_ARM, OPERATOR_SET_TARGETS, StationEvent, interpret
 from feeder_station.domain.traps import Registry
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -513,6 +513,19 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
     """`_known_node_ids()`'s query and the loop over it used to sit above
     the per-step `try` entirely. Dropping the table is a deterministic
     stand-in for corruption landing on it.
+
+    **Edited assertion (WARNING K(b), verify-report-batch1-round2.md).**
+    Before this batch: asserted only `ok is True` and `rehydration_errors
+    == 1` -- byte-for-byte the same response a single unreadable row among
+    otherwise-healthy nodes produces (see
+    `test_one_bad_row_does_not_look_like_a_lost_roster` below), even though
+    this case is the whole registry coming up empty, every pending operator
+    command gone until re-issued. That is the rule the report names: a
+    failure that loses the whole registry is a degraded boot, not an error
+    count, so it now gets its own field and folds into `ok` -- the same
+    "fold connected into ok" precedent `link_ok` already sets, so a
+    monitoring check or a person glancing at `ok` alone cannot read this as
+    a healthy, merely quiet station.
     """
     db_path = tmp_path / "station.db"
     Store(db_path).close()
@@ -524,11 +537,87 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
 
     with TestClient(app) as c:
         response = c.get("/health")
+        traps = c.get("/api/traps").json()
 
     assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is True
     assert body["rehydration_errors"] == 1
+    assert body["roster_lost"] is True
+    assert body["ok"] is False  # a lost registry must not read as a healthy station
+    assert traps == []
+
+
+def test_one_bad_row_does_not_look_like_a_lost_roster(tmp_path: Path) -> None:
+    """WARNING K(b) — the other half of the distinction: one unreadable
+    row among otherwise-healthy nodes must keep reading as the ordinary,
+    already-visible `rehydration_errors` count, not as a degraded boot.
+    Three nodes seeded, one with an out-of-range `state` byte (CRITICAL
+    2's own corruption technique); the other two are untouched.
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    for node_id, state in ((1, 0), (2, 1)):
+        seed.append(
+            StationEvent(
+                source="node",
+                node_id=node_id,
+                msg_type=payloads.HEARTBEAT,
+                msg_id=1,
+                node_epoch=None,
+                tag=None,
+                fields={"state": state, "battery_mv": 4000, "targets_version": 1},
+                payload=b"",
+            ),
+            received_epoch=1000.0,
+            clock_trust="unset",
+        )
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=3,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 7, "battery_mv": 4000, "targets_version": 1},  # 7: no known TrapState
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    # An operator row too, so node 3's only *readable* row still creates it
+    # in the registry (CRITICAL 2's own "no other readable row" case is a
+    # separate scenario, already covered by
+    # test_rehydrate_skips_and_counts_an_unreadable_row_without_blocking_other_nodes)
+    # -- this test's own point is that three nodes, not zero, must still show.
+    seed.append(
+        StationEvent(
+            source="operator",
+            node_id=3,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1001.0,
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+
+    with TestClient(app) as c:
+        response = c.get("/health")
+        traps = c.get("/api/traps").json()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rehydration_errors"] == 1
+    assert body["roster_lost"] is False
+    assert body["ok"] is True  # one bad row among healthy nodes -- not a degraded boot
+    assert len(traps) == 3  # the corrupt-state node is still present, WARNING J's own honesty
 
 
 # --- WARNING J (verify-report-batch1-round2.md): a row rehydration cannot
