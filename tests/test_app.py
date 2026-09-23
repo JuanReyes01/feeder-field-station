@@ -5,6 +5,20 @@ actually operable by a biologist with no manual (S13) and whether it truly
 works one-handed on a phone (S10) are field gates, not CI gates -- a green
 suite here proves the routes, payload shapes and static file exist and
 behave; it is not a usability result.
+
+**Explicit decision (Batch 2e, verify-report-batch2d.md PROOF 1, recorded
+in `specs/operator-ui/spec.md`'s own verification note):** the badge tests
+below pin `index.html`'s source text -- a regex anchored on the ternary
+that emits `.stale-badge` -- not the page's rendered DOM. That regex
+cannot see content, placement or on-screen visibility, only that a
+matching substring exists somewhere in the file; three mutations invented
+against it (an emptied badge body, the ternary hoisted into dead code,
+`.stale-badge { display: none; }`) all shipped green. This project has no
+Node/browser test toolchain to build a DOM harness with (no `package.json`,
+nothing in `pyproject.toml`'s `dev` group), so a fourth round of
+regex-tightening was rejected in favour of recording the gap: `renderTrap`'s
+actual rendered output is unverified at this layer, honestly, rather than
+implied covered by a green suite.
 """
 
 import asyncio

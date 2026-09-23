@@ -40,6 +40,22 @@ until acknowledged.
 - WHEN the trap list renders
 - THEN that trap is visually distinguished as unreachable rather than shown identically to a healthy one
 
+**Verification note (Batch 2e, `verify-report-batch2d.md` PROOF 1):** the same distinction applies to
+`state_may_be_stale` (a rehydrated report that may not be the trap's newest). Its data layer is pinned
+end to end — `Registry.view()` and `GET /api/traps` are covered both ways. Its rendering inside
+`index.html`'s `renderTrap` — the badge's actual on-screen content, placement and visibility — is
+checked in CI only by a regex anchored on the source text of the ternary (`tests/test_app.py`), never by
+rendering the page. Measured: three mutations invented against that regex all shipped green — an emptied
+badge body, the same ternary hoisted into dead code the function never returns, and a CSS rule that hides
+the markup while leaving it in the DOM (`display: none`) — because a regex over source text cannot see
+content, placement or visibility, only that a matching substring exists somewhere in the file. This
+project has no Node or browser test toolchain (no `package.json`, nothing in `pyproject.toml`'s `dev`
+dependency group); adding one to pin a single badge was judged not worth a new, project-wide test-runtime
+dependency. Decision, recorded rather than left implied: `index.html`'s actual rendered output is
+unverified at this layer, for this element and any other purely presentational one. An operator-facing
+regression here (the badge silently failing to render) would have to be caught by a human looking at the
+page, not by this suite.
+
 ### Requirement: Clock-unset banner
 
 When the station's clock trust state is `unset`, the interface MUST display this prominently, rather

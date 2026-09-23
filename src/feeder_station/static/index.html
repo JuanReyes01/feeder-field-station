@@ -138,9 +138,16 @@ function renderTrap(t) {
   // flagged trap must not render byte-identical to a confident one --
   // independent of `reachable` (`no-contact-badge` above), which after a
   // restart comes from whichever row won the state race and can stay
-  // `true` even while that row's own freshness is in doubt. Rendered as
-  // doubt (italic), not as the bolder "no contact" alarm: this trap is not
-  // silent, its last-known word just might not be its newest one.
+  // `true` even while that row's own freshness is in doubt.
+  // Record correction (Batch 2e, verify-report-batch2d.md Q7): this
+  // comment used to say "rendered as doubt (italic)", but `.stale-badge`
+  // has been `font-weight: 700` -- the same bold weight as
+  // `.no-contact-badge`, no italic -- since the very commit that added
+  // this comment. The CSS is what an operator needs: doubt about a
+  // trap's own state must read at a glance next to "SIN CONTACTO", not as
+  // a footnote nobody notices at a smaller, lighter weight. The comment
+  // was wrong, not the rule; this trap is still not silent, its
+  // last-known word just might not be its newest one.
   // 13.11/13.12: what the trap is actually hunting -- the station's own
   // desired list, not only its version number.
   const targets = (t.targets && t.targets.length)
