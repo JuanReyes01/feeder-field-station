@@ -393,32 +393,41 @@ CI proxy: 12.3's killed-process-then-restart test; named outstanding in the veri
 
 ---
 
-## Slice 13 — `target-list-delivery` (PR 13, needs 8+12)
+## Slice 13 — `operator-actions-are-real` (PR 13, needs 8+12)
 
-**Added 2026-09-23, after slice 10 exposed it.** The target list is hollow: `PUT /targets`
-validates the tags, bumps `targets_version`, and **discards the bytes**. `Command` carries a version
-and never the content, `encode_set_targets` exists with nothing calling it, and nothing anywhere
-stores a desired tag list. The operator types tags, the UI shows pending and then delivered, and no
-tag was ever transmitted.
+**Added 2026-09-23, widened after slice 11.** The HTTP routes are a facade. Arm, disarm, acknowledge
+and edit-targets update in-memory state and publish an SSE event, and **none of them writes to the
+store or reaches a trap**. Three faces of one hole:
 
-That is worse than a missing feature. A feature that is visibly absent gets reported; one that
-*looks* like it worked gets trusted, and the trap sits armed for an animal it was never told about.
+- `PUT /targets` validates the tags, bumps `targets_version` and **discards the bytes**. Nothing
+  anywhere stores what a trap is hunting, and `encode_set_targets` has no caller.
+- `POST /acknowledge` clears the capture in memory only — though `event-store/spec.md` says in so
+  many words that acknowledging **MUST be a store write, not merely an in-memory flag**. Today a
+  power cut resurrects an attended capture and somebody walks back out to a trap already seen to.
+- `OPERATOR_ARM` / `OPERATOR_DISARM` / `OPERATOR_CAPTURE_ACKNOWLEDGED` msg types are defined and
+  **nothing in the codebase ever writes one**.
 
-Traces: S2, and the half of S3 that assumes a trap knows what it is hunting.
+A feature that is visibly absent gets reported. One that *looks* like it worked gets trusted.
 
-- [ ] 13.1 RED: `test_the_submitted_tags_are_stored_not_just_the_version` — PUT a list, reopen the
+Traces: S1, S2, S3, S9.
+
+- [ ] 13.1 RED: `test_acknowledging_a_capture_survives_a_restart_through_the_route` — POST the real
+      route, rebuild the app from the same store, the capture stays acknowledged
+- [ ] 13.2 GREEN: the acknowledge route writes to the store before it touches the registry
+- [ ] 13.3 RED: `test_arm_and_disarm_are_recorded_as_operator_events`
+- [ ] 13.4 GREEN: both routes append their operator event
+- [ ] 13.5 RED: `test_the_submitted_tags_are_stored_not_just_the_version` — PUT a list, reopen the
       store, the exact bytes are still there against that version
-- [ ] 13.2 GREEN: persist the desired tag list per node, versioned, in the store
-- [ ] 13.3 RED: `test_set_targets_frames_carry_the_stored_tags` — the sender emits the real chunked
-      frames from stored content, through `encode_set_targets`, not an empty list
-- [ ] 13.4 GREEN: the command sender reads the stored list and transmits it
-- [ ] 13.5 RED: `test_a_list_longer_than_one_frame_is_delivered_whole` — 40 tags, both frames sent,
-      and the version is only considered delivered once the node reports it
-- [ ] 13.6 GREEN: drive the multi-frame path from storage
-- [ ] 13.7 RED: `test_the_ui_shows_the_tags_a_trap_is_actually_hunting` — the page renders the
-      stored list, so an operator can see what the trap has, not only what was typed at it
-- [ ] 13.8 GREEN: expose the stored list in `view()` and render it
+- [ ] 13.6 GREEN: persist the desired tag list per node, versioned
+- [ ] 13.7 RED: `test_set_targets_frames_carry_the_stored_tags` — the sender emits real chunked
+      frames from stored content through `encode_set_targets`, not an empty list
+- [ ] 13.8 GREEN: the command sender reads the stored list and transmits it
+- [ ] 13.9 RED: `test_a_list_longer_than_one_frame_is_delivered_whole` — 40 tags, both frames, and
+      delivered only once the node reports the version
+- [ ] 13.10 GREEN: drive the multi-frame path from storage
+- [ ] 13.11 RED: `test_the_ui_shows_the_tags_a_trap_is_actually_hunting`
+- [ ] 13.12 GREEN: expose the stored list in `view()` and render it
 
-Done: a tag list typed on a phone reaches a trap, and the interface shows what the trap holds.
-PR boundary: store schema addition, `Command`/sender changes, the UI read path.
-Hardware gate: real delivery to a node needs the firmware's `station_link`, which does not exist.
+Done: an operator action survives a restart and reaches a trap; the page shows what the trap holds.
+PR boundary: store schema, the four routes, `Command`/sender, the UI read path.
+Hardware gate: real delivery needs the firmware's `station_link`, which does not exist.
