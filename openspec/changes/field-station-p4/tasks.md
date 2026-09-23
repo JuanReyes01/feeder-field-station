@@ -302,19 +302,25 @@ field gate in the verify report.
 Traces: S6 (re-scoped, D1), S14, D6. Files: `adapters/export.py` (new), `docs/requirements.md`
 (amended), `tests/adapters/test_export.py`.
 
-- [ ] 11.1 RED: `test_export_contains_only_station_witnessed_event_types`
-- [ ] 11.2 GREEN: `export_events_csv()` scans `event`, filters to visit/capture/trap-state-change types
-- [ ] 11.3 RED: `test_export_is_labelled_as_the_stations_own_record` — header/README text
-- [ ] 11.4 GREEN: write `README.txt` + CSV header per DD13's folder layout
-- [ ] 11.5 RED: `test_export_under_concurrent_writes_omits_nothing_acknowledged` (D6, writer thread
+- [x] 11.1 RED: `test_export_contains_only_station_witnessed_event_types`
+- [x] 11.2 GREEN: `export_events_csv()` scans `event`, filters to visit/capture/trap-state-change types
+- [x] 11.3 RED: `test_export_is_labelled_as_the_stations_own_record` — header/README text
+- [x] 11.4 GREEN: write `README.txt` + CSV header per DD13's folder layout
+- [x] 11.5 RED: `test_export_under_concurrent_writes_omits_nothing_acknowledged` (D6, writer thread
       appending during export)
-- [ ] 11.6 GREEN: `Store.snapshot_into(path)` via `VACUUM INTO`; startup assertion
+- [x] 11.6 GREEN: `Store.snapshot_into(path)` via `VACUUM INTO`; startup assertion
       `sqlite3.sqlite_version_info >= (3, 27)`
-- [ ] 11.7 RED: `test_plain_file_copy_is_not_the_export_path`
-- [ ] 11.8 GREEN: confirm export only ever reads the `VACUUM INTO` copy, never the live file
-- [ ] 11.9 RED: `test_documented_copy_step_produces_a_complete_openable_copy`
-- [ ] 11.10 GREEN: assemble `station-export-{timestamp}/` (db + CSV + README); add the CLI/UI trigger
-- [ ] 11.11 Docs (no test): amend `docs/requirements.md` S6 per D1 — station's own export, not a
+- [x] 11.7 RED: `test_plain_file_copy_is_not_the_export_path`
+- [x] 11.8 GREEN: confirm export only ever reads the `VACUUM INTO` copy, never the live file
+- [x] 11.9 RED: `test_documented_copy_step_produces_a_complete_openable_copy`
+- [~] 11.10 GREEN: assemble `station-export-{timestamp}/` (db + CSV + README); add the CLI/UI trigger
+      — folder assembly done (`export_station()`); CLI/UI trigger deliberately NOT wired: slice 11's
+      own Files list (adapters/export.py, docs/requirements.md, tests/adapters/test_export.py) and
+      PR boundary don't include `cli.py`/`app.py`, and task 12.8 explicitly assigns `cli.py` args to
+      slice 12. Wiring a trigger into either file now would touch out-of-scope files and collide with
+      slice 12's planned `cli.py` changes. `export_station()` is the trigger — reachable and fully
+      tested; exposing it via CLI/HTTP is a follow-up, either folded into slice 12 or a small addendum.
+- [x] 11.11 Docs (no test): amend `docs/requirements.md` S6 per D1 — station's own export, not a
       per-reading raw file
 
 Done: all 3 data-export scenarios pass, including the concurrent-write snapshot; `docs/requirements.md`

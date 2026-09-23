@@ -36,6 +36,21 @@ DEDUP_WINDOW = 32768
 
 SCHEMA_VERSION = 1
 
+# DD13: `Store.snapshot_into`'s `VACUUM INTO` (adapters/export.py, D6) needs
+# SQLite 3.27 or newer. Checked once, at station startup — a station booting
+# on a too-old SQLite fails loudly here instead of silently at the first
+# export attempt, months later, on removable media.
+_MIN_SQLITE_VERSION_FOR_VACUUM_INTO = (3, 27)
+
+
+def _assert_vacuum_into_is_supported() -> None:
+    if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION_FOR_VACUUM_INTO:
+        raise RuntimeError(
+            f"SQLite {sqlite3.sqlite_version} is older than 3.27; VACUUM INTO "
+            "(the only export path D6 allows) is not available"
+        )
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -196,6 +211,7 @@ class Store:
     """The station's own event log, and everything derived from it."""
 
     def __init__(self, path: str | Path) -> None:
+        _assert_vacuum_into_is_supported()
         self._path = Path(path)
         self._conn = open_connection(self._path)
         _ensure_schema(self._conn)
@@ -206,6 +222,26 @@ class Store:
     def integrity_check(self) -> str:
         row = self._conn.execute("PRAGMA integrity_check").fetchone()
         return str(row[0])
+
+    def snapshot_into(self, path: str | Path) -> None:
+        """A consistent point-in-time copy of the live database (D6, DD13).
+
+        One ``VACUUM INTO`` statement: SQLite opens a read transaction
+        against this connection and copies every row committed as of that
+        instant — including anything still only in ``station.db-wal`` and
+        never yet checkpointed into ``station.db`` itself — into a fresh,
+        compacted file at ``path``. Nothing about the live file, or any
+        other connection against it, is touched; nothing is locked for
+        longer than the copy itself takes.
+
+        This is the *only* path an export may take (D6): a plain filesystem
+        copy of a live WAL-mode database can land mid-checkpoint and
+        silently omit rows S9 already promised were durable. See
+        ``adapters/export.py`` and
+        ``tests/adapters/test_export.py::test_export_under_concurrent_writes_omits_nothing_acknowledged``
+        for the proof.
+        """
+        self._conn.execute("VACUUM INTO ?", (str(path),))
 
     def append(self, event: StationEvent, *, received_epoch: float, clock_trust: str) -> Appended:
         """Persist one event, including its fsync, before returning.

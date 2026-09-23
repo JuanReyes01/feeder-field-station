@@ -29,7 +29,7 @@ It is **not** the analysis app, and it does **not** decide when a trap fires.
 | S3 | Notify a person on capture, naming the trap (R4) | A capture appears **at once** in every browser that has the interface open, over plain HTTP on the local network, naming the trap and the tag — **and** is still there for anyone who opens the interface hours later |
 | S4 | Show which traps are armed (R5) | The UI shows, per trap: armed state, battery, clock, target-list version and time since last contact — all sourced from the trap's own heartbeat, never from what the station last commanded |
 | S5 | Serve at least 10 traps (R6) | Ten traps report and are commanded without the operator waiting on the UI |
-| S6 | Write the raw file format the analysis app ingests (R8's station half) | `feeder-analysis` ingests a station export with no code changes and no warnings |
+| S6 | Export the station's own witnessed events — visits, captures, trap-state changes — as CSV, alongside a consistent-snapshot copy of the database (R8's station half, **re-scoped 2026-09-23 by design decision D1**: the radio only ever carries collapsed events, never an individual reader pass, so the station structurally cannot produce the per-reading raw-ingest file `feeder-analysis` wants; that stays the node's own SD card, collected by hand) | A produced export's CSV contains exactly the visit, capture and trap-state-change events the station has stored, labelled as the station's own record, and nothing else |
 
 ## The station's own requirements
 
