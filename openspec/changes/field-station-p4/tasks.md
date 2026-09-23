@@ -328,6 +328,19 @@ CI-provable.** CI proxy: 11.1-11.10's mechanical-correctness scenarios; usabilit
 Traces: S7, S8. Files: `deploy/feeder-station.service` (new), `docs/deploy.md` (new), `cli.py`
 (modified), `tests/test_deploy_unit.py`.
 
+**Added 2026-09-23, after slice 7.** Nothing in slices 1-11 ever *starts* a thread. Design §7
+describes three (the serial reader, the rotation scheduler, the loop) but no slice owned standing
+them up, so the whole change could finish green with a station that serves HTTP and never speaks to
+a trap. These tasks close that, and they come first in this slice because the systemd unit is
+worthless without them.
+
+- [ ] 12.0a RED: `test_the_app_starts_the_gateway_and_scheduler_threads` — with a fake port and a
+      fake clock, starting the app runs a real rotation round and ingests a frame end to end
+- [ ] 12.0b GREEN: the lifespan starts both threads and stops them on shutdown; a thread that dies
+      is reported in `/health` rather than silently leaving the station deaf
+- [ ] 12.0c RED: `test_a_dead_gateway_thread_is_visible_in_health` — kill the thread, `/health` says so
+- [ ] 12.0d GREEN: supervise both threads from the lifespan
+
 - [ ] 12.1 RED: `test_unit_file_has_restart_always_and_no_internet_wait_dependency` — parses the
       `.service` file; asserts `Restart=always`, `After=network.target`, and no
       `network-online.target` in `Requires=`/`Wants=`/`After=`
