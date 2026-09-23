@@ -36,7 +36,7 @@ class Broadcaster:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the running loop, once, at lifespan startup (DD11).
 
-        Nothing calls `publish_threadsafe` before the app has started
+        Nothing publishes before the app has started
         serving, so binding here — rather than guessing a loop eagerly in
         `__init__`, before one necessarily exists — is safe.
         """
@@ -51,25 +51,21 @@ class Broadcaster:
         self._clients.discard(queue)
 
     def publish(self, event: dict[str, Any]) -> None:
-        """Loop-thread only. See `publish_threadsafe` for any other thread."""
-        payload = json.dumps(event)
-        for queue in list(self._clients):
-            # A browser that cannot keep up is dropped from this event, never
-            # blocked on: the state stays correct in the next page load.
-            with suppress(asyncio.QueueFull):
-                queue.put_nowait(payload)
+        """Safe from any thread (DD11). This is the only way to publish.
 
-    def publish_threadsafe(self, event: dict[str, Any]) -> None:
-        """Safe to call from any thread, including the gateway thread (DD11).
+        Python's documentation is explicit: "This class [asyncio.Queue] is
+        not thread safe." So the enqueue always happens on the loop, marshalled
+        there by `call_soon_threadsafe` — the one piece of `asyncio` the
+        documentation names as callable from any thread. Calling it from the
+        loop's own thread is fine too, which is why there is a single path and
+        not a choice.
 
-        Python's own documentation is explicit: "This class [asyncio.Queue]
-        is not thread safe." `publish()` calls `Queue.put_nowait` directly
-        and may only be called from the loop's own thread — today, every
-        caller is a FastAPI route handler already on that thread. Anything
-        else (the radio-gateway thread, once ingest is wired to it) MUST
-        call this instead: it marshals the actual `publish()` call onto the
-        loop via `call_soon_threadsafe`, the one piece of `asyncio` the
-        documentation names as callable from any thread.
+        There used to be two methods, a fast one for "the loop thread" and a
+        safe one for everything else, on the belief that every route handler
+        ran on the loop. That belief was wrong: Starlette runs a plain `def`
+        endpoint in a threadpool, so `arm()` and `acknowledge()` were already
+        the unsafe case. A correctness rule nobody can get wrong beats a rule
+        everybody is told to remember.
         """
         loop = self._loop
         if loop is None:
@@ -77,9 +73,17 @@ class Broadcaster:
             # a bare `TestClient(create_app())` used without its own `with`
             # block). Publishing is never S9-critical (design.md section 3,
             # step 9): dropping it here is the same best-effort a slow
-            # subscriber's own `QueueFull` already gets in `publish()`.
+            # subscriber's own `QueueFull` already gets.
             return
-        loop.call_soon_threadsafe(self.publish, event)
+        loop.call_soon_threadsafe(self._fan_out, json.dumps(event))
+
+    def _fan_out(self, payload: str) -> None:
+        """The actual enqueue. Runs on the loop thread, always."""
+        for queue in list(self._clients):
+            # A browser that cannot keep up is dropped from this event, never
+            # blocked on: the state stays correct in the next page load.
+            with suppress(asyncio.QueueFull):
+                queue.put_nowait(payload)
 
 
 def create_app(registry: Registry | None = None, config: StationConfig | None = None) -> FastAPI:

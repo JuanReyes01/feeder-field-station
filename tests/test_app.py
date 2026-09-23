@@ -4,7 +4,6 @@ import asyncio
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -49,19 +48,23 @@ def test_a_capture_is_visible_to_a_browser_that_arrives_later() -> None:
 # --- 6.1/6.2: DD11 — asyncio.Queue is documented as not thread-safe --------
 
 
-def test_publish_threadsafe_is_safe_from_a_background_thread() -> None:
+def test_publish_is_safe_from_a_background_thread() -> None:
     """DD11, explicit, not a footnote.
 
-    Python's own docs: "This class [asyncio.Queue] is not thread safe."
-    `Broadcaster.publish` calls `Queue.put_nowait` and may only run on the
-    loop's own thread. This drives `publish_threadsafe` from a real
-    background thread under load and proves every call actually lands on
-    the loop's own thread instead — never on the thread that called it.
+    Python's own docs: "This class [asyncio.Queue] is not thread safe." So the
+    enqueue — `Broadcaster._fan_out` — may only ever run on the loop's own
+    thread, no matter which thread called `publish`. This hammers `publish`
+    from a real background thread and proves every resulting enqueue landed on
+    the loop.
 
-    This is the test that would fail if `publish_threadsafe` were changed to
-    call `self.publish` directly instead of marshalling through
-    `loop.call_soon_threadsafe`: `observed_thread_ids` would then contain the
-    hammering thread's id instead of the loop thread's.
+    It is the test that fails if `publish` is ever changed to enqueue directly
+    instead of marshalling through `loop.call_soon_threadsafe`:
+    `observed_thread_ids` would then hold the hammering thread's id.
+
+    Note what is deliberately NOT asserted: that `publish` itself runs on the
+    loop. It must be callable from anywhere — a route handler in Starlette's
+    threadpool, the gateway thread — which is the whole point of having one
+    method instead of two.
     """
     broadcaster = Broadcaster()
     queue = broadcaster.subscribe()
@@ -78,19 +81,19 @@ def test_publish_threadsafe_is_safe_from_a_background_thread() -> None:
     broadcaster.bind_loop(loop)
 
     observed_thread_ids: list[int] = []
-    real_publish = broadcaster.publish
+    real_fan_out = broadcaster._fan_out
 
-    def spying_publish(event: dict[str, Any]) -> None:
+    def spying_fan_out(payload: str) -> None:
         observed_thread_ids.append(threading.get_ident())
-        real_publish(event)
+        real_fan_out(payload)
 
-    broadcaster.publish = spying_publish  # type: ignore[method-assign]
+    broadcaster._fan_out = spying_fan_out  # type: ignore[method-assign]
 
     event_count = 300
 
     def hammer() -> None:
         for i in range(event_count):
-            broadcaster.publish_threadsafe({"type": "n", "i": i})
+            broadcaster.publish({"type": "n", "i": i})
 
     hammer_thread = threading.Thread(target=hammer)
     hammer_thread.start()
