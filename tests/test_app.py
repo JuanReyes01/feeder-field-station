@@ -542,7 +542,17 @@ def test_the_app_starts_its_background_workers(tmp_path: Path) -> None:
     gateway = SerialGateway(DeviceConfig(explicit_path="fake"), open_port=lambda device: fake_port)
 
     app = create_app(
-        registry=registry, clock=_FixedClock(ClockTrust.NTP), store=store, gateway=gateway
+        registry=registry,
+        clock=_FixedClock(ClockTrust.NTP),
+        store=store,
+        gateway=gateway,
+        # CRITICAL 3 (sdd-verify field-station-p4): this test is about the
+        # scheduler's *wiring* (does it run at all), not the shared
+        # station-wide budget -- a generous rate keeps it from depending on
+        # whether node 11's async ingest beats the first tick and briefly
+        # pushes TIME_SYNC demand above the default budget's capacity; the
+        # budget itself is proven for real in tests/test_cli.py.
+        config=StationConfig(channel_budget_frames_per_s=1000.0),
     )
 
     with TestClient(app) as c:

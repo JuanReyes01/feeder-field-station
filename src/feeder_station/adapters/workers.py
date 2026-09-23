@@ -27,6 +27,7 @@ theoretical.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,8 +39,50 @@ from feeder_station.adapters.scheduler import poll_node
 from feeder_station.adapters.serial_gateway import SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.config import StationConfig
-from feeder_station.domain import backlog
+from feeder_station.domain import backlog, pacing
+from feeder_station.domain.clock_trust import may_distribute_time
 from feeder_station.domain.traps import Registry
+
+# CRITICAL 3 (sdd-verify field-station-p4): the three orderings
+# `run_scheduler_loop` cycles through, one per tick, so no single
+# transmitter permanently wins every tie for the shared budget -- see that
+# function's own docstring for why a fixed priority (e.g. commands always
+# first) was rejected.
+_ROTATIONS: tuple[tuple[str, str, str], ...] = (
+    ("commands", "time_sync", "poll"),
+    ("time_sync", "poll", "commands"),
+    ("poll", "commands", "time_sync"),
+)
+
+
+@dataclass
+class SharedBudget:
+    """Adapter-level mutable holder around the pure ``domain/pacing.py::
+    TokenBucket`` (CRITICAL 3, sdd-verify field-station-p4) -- the same
+    "pure state, mutated under registry_lock" shape this module already
+    gives ``backlog.RotationSchedule``, just wrapped so every transmitter
+    this loop calls sees one small, required capability
+    (``try_send() -> bool``) instead of the bucket's own immutable-replace
+    API. Driven by ``time.monotonic()``, never by the injected ``Clock``:
+    airtime occupancy is a real, physical constraint on elapsed wall-clock
+    time, orthogonal to the station's notion of *trusted* time (which
+    several tests, and a station with no NTP yet, deliberately freeze or
+    distrust) -- binding the budget's refill to that clock would make it
+    stop refilling exactly when the clock is least reliable.
+
+    One instance, constructed once per ``run_scheduler_loop`` call and
+    passed by reference into every transmitter it calls -- never
+    reconstructed per call, which would silently reset the budget and
+    defeat the whole fix (the same "a fresh copy per call is a bug, not a
+    feature" lesson ``RotationSchedule`` already needed for the rotation
+    itself, CRITICAL 4: rebuilding it every tick was the original defect).
+    """
+
+    bucket: pacing.TokenBucket
+
+    def try_send(self) -> bool:
+        self.bucket, allowed = pacing.try_consume(self.bucket, now=time.monotonic())
+        return allowed
 
 
 @dataclass
@@ -203,12 +246,61 @@ def run_scheduler_loop(
     ``unset`` was never offered ``TIME_SYNC`` again even once NTP later
     made the clock trustworthy — severing exactly the boot-with-no-
     internet recovery S12 exists for.
+
+    **CRITICAL 3 fix (sdd-verify field-station-p4, batch 3a):** the three
+    transmitters above -- ``poll_node``, ``send_due_commands`` and
+    ``attempt_time_sync``'s *actual* sends -- now all draw from one
+    ``SharedBudget`` (``domain/pacing.py``), sized from
+    ``config.channel_budget_frames_per_s``. Before this fix, only
+    ``poll_node`` was paced; ten traps holding an unconfirmed command
+    alone drove the station to 11.68% real airtime occupancy against the
+    ~1% ``docs/protocol/messages.md`` budget, because ``send_due_commands``
+    and ``attempt_time_sync`` each had their own unpaced loop and nothing
+    bounded the *sum*.
+
+    ``poll_node`` and ``attempt_time_sync`` are gated here, at their one
+    production call site each (confirmed by ``rg 'poll_node\\(|attempt_
+    time_sync\\('`` across ``src/`` -- ``poll_node``'s only other caller,
+    ``adapters/scheduler.py::run_rotation_round``, has no production
+    caller of its own, CRITICAL 5): a refused attempt simply is not made
+    this tick, and (for the poll) ``next_poll_due_at`` is left unadvanced
+    so the same turn is retried, not lost. ``send_due_commands`` is gated
+    *inside* itself instead, because one call can sweep every trap in the
+    roster -- a call-site check alone would not have bounded a ten-trap
+    burst in a single pass. TIME_SYNC only spends a token when a send
+    would actually happen (``may_distribute_time(clock.trust())``); a
+    withheld attempt still costs nothing, exactly as before this fix --
+    CRITICAL 4's own write-volume problem is a separate, later batch.
+
+    **Which of the three gets the budget first, and why it rotates
+    instead of a fixed order:** a strict "commands always first" priority
+    was considered and rejected. ``send_due_commands`` finds a due command
+    on almost every tick for as long as any trap's command stays
+    unconfirmed (a broken radio, forever) -- if that category always won
+    the shared, scarce token, it would starve backlog polling and
+    TIME_SYNC station-wide for as long as that one trap stayed
+    unconfirmed, which is the same shape of bug this fix exists to close,
+    just moved onto a different victim. ``rotation_index`` instead cycles
+    which of the three categories is tried first each tick, so sustained
+    demand from one category can slow the other two but never exclude
+    them indefinitely. If operator commands (arming or disarming a trap
+    holding, or about to hold, an animal) must always preempt routine
+    polling for safety reasons, that is a real domain policy decision
+    beyond this batch's scope -- flagged here, not picked silently.
     """
     schedule: backlog.RotationSchedule | None = None
     next_poll_due_at: datetime | None = None
     last_polled_at: dict[int, datetime] = {}
     arrivals: dict[int, float] = {} if last_frame_arrival is None else last_frame_arrival
     synced_node_ids: set[int] = set()
+    budget = SharedBudget(
+        pacing.start(
+            capacity=pacing.DEFAULT_CAPACITY,
+            frames_per_s=config.channel_budget_frames_per_s,
+            now=time.monotonic(),
+        )
+    )
+    rotation_index = 0
 
     while not stop.is_set():
         with registry_lock:
@@ -221,32 +313,55 @@ def run_scheduler_loop(
                 if next_poll_due_at is None:
                     next_poll_due_at = now
 
-                if now >= next_poll_due_at:
-                    node_id = backlog.current_target(schedule)
-                    since = last_polled_at.get(node_id)
-                    heard = since is not None and arrivals.get(node_id, 0.0) > since.timestamp()
-                    last_polled_at[node_id] = now
-                    poll_node(node_id, store=store, gateway=gateway)
-                    schedule = backlog.record_response(
-                        schedule, heard=heard, retry_budget=config.backlog_retry_budget
-                    )
-                    next_poll_due_at = now + config.heartbeat_interval
+                # CRITICAL 3: rotate which of the three transmitters gets
+                # first claim on the shared, scarce budget each tick -- see
+                # the docstring above for why a fixed priority was
+                # rejected. Plain sequential dispatch, not nested closures,
+                # so none of it captures a loop variable by reference.
+                order = _ROTATIONS[rotation_index % len(_ROTATIONS)]
+                rotation_index += 1
 
-                send_due_commands(
-                    registry,
-                    store=store,
-                    gateway=gateway,
-                    now=now,
-                    arm_duration_s=config.arm_duration.total_seconds(),
-                )
-                for node_id in node_ids:
-                    # CRITICAL 3: only a frame actually sent counts as
-                    # synced -- a withheld attempt must stay eligible for
-                    # retry on a later tick, once the clock is trusted.
-                    if node_id not in synced_node_ids and attempt_time_sync(
-                        node_id, clock=clock, store=store, gateway=gateway
-                    ):
-                        synced_node_ids.add(node_id)
+                for category in order:
+                    if category == "poll":
+                        if now < next_poll_due_at or not budget.try_send():
+                            continue  # CRITICAL 3: stays due, retried next tick
+                        node_id = backlog.current_target(schedule)
+                        since = last_polled_at.get(node_id)
+                        heard = since is not None and arrivals.get(node_id, 0.0) > since.timestamp()
+                        last_polled_at[node_id] = now
+                        poll_node(node_id, store=store, gateway=gateway)
+                        schedule = backlog.record_response(
+                            schedule, heard=heard, retry_budget=config.backlog_retry_budget
+                        )
+                        next_poll_due_at = now + config.heartbeat_interval
+                    elif category == "commands":
+                        send_due_commands(
+                            registry,
+                            store=store,
+                            gateway=gateway,
+                            now=now,
+                            arm_duration_s=config.arm_duration.total_seconds(),
+                            budget=budget,
+                        )
+                    else:  # "time_sync"
+                        for node_id in node_ids:
+                            if node_id in synced_node_ids:
+                                continue
+                            # CRITICAL 3: only spend a token on an attempt
+                            # that would actually transmit -- a withheld
+                            # attempt (clock still unset) writes a log
+                            # row, not a frame, and must not compete for
+                            # airtime it never uses.
+                            would_send = may_distribute_time(clock.trust())
+                            if would_send and not budget.try_send():
+                                continue
+                            # CRITICAL 3: only a frame actually sent counts
+                            # as synced -- a withheld attempt must stay
+                            # eligible for retry once trusted.
+                            if attempt_time_sync(
+                                node_id, clock=clock, store=store, gateway=gateway
+                            ):
+                                synced_node_ids.add(node_id)
         stop.wait(tick_s)
 
 

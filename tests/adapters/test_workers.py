@@ -27,7 +27,7 @@ from feeder_station.adapters.workers import (
     run_scheduler_loop,
     run_supervised,
 )
-from feeder_station.config import DEFAULT_HEARTBEAT_INTERVAL, StationConfig
+from feeder_station.config import StationConfig
 from feeder_station.domain import payloads
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import STATION_TIME_SYNC_WITHHELD
@@ -423,7 +423,17 @@ def test_backlog_rotation_persists_across_ticks_and_is_paced(tmp_path: Path) -> 
         registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
     gateway = _SpyGateway()
     poll_interval_s = 0.1
-    config = StationConfig(heartbeat_interval=timedelta(seconds=poll_interval_s))
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=poll_interval_s),
+        # CRITICAL 3 (sdd-verify field-station-p4): this test isolates
+        # GET_BACKLOG's own per-node cadence (CRITICAL 4's concern); the
+        # new station-wide budget is a second, independent throttle this
+        # test is not about (see the new GET_BACKLOG-alone and TIME_SYNC-
+        # alone budget tests below for that), and with ten trusted-clock
+        # nodes all wanting TIME_SYNC on tick 1, the default budget would
+        # starve GET_BACKLOG entirely for tens of seconds.
+        channel_budget_frames_per_s=1000.0,
+    )
     stop = threading.Event()
 
     thread = threading.Thread(
@@ -463,21 +473,129 @@ def test_backlog_rotation_persists_across_ticks_and_is_paced(tmp_path: Path) -> 
     assert frames_per_second < 15, f"got {frames_per_second:.1f} GET_BACKLOG frames/s"
 
 
-def test_default_backlog_pacing_holds_the_stations_own_airtime_budget() -> None:
-    """docs/protocol/messages.md: a ~50-byte frame costs 0.37 s of airtime
-    at Long Fast, and the station's own design budget keeps the channel
-    under 1% occupied. CRITICAL 4 measured 30-40 GET_BACKLOG/s under the
-    old per-tick full sweep -- 400-1500x over that budget. Pacing one
-    GET_BACKLOG poll per `config.heartbeat_interval` (5 minutes,
-    `DEFAULT_HEARTBEAT_INTERVAL`) keeps backlog polling's own contribution
-    to the budget under 0.2%, regardless of roster size -- unlike a
-    per-node interval, which would scale back up with more traps.
+# --- CRITICAL 3 (sdd-verify field-station-p4, batch 3a): the shared budget
+# --- gates GET_BACKLOG and TIME_SYNC too, not just command resends --------
+
+
+def test_get_backlog_alone_holds_the_channel_budget_measured_for_real(tmp_path: Path) -> None:
+    """3.6 (sdd-verify field-station-p4, batch 3a) -- **rewritten, not
+    deleted**. Before: `test_default_backlog_pacing_holds_the_stations_
+    own_airtime_budget` computed `1/300 * 0.37 < 0.01` from two module
+    constants -- CRITICAL 3's own report: "it measures nothing... is
+    arithmetic asserting arithmetic." This keeps that test's original,
+    honestly-scoped subject -- GET_BACKLOG's *own* contribution alone,
+    matching its old docstring -- but now drives the real
+    `run_scheduler_loop` on a real thread and counts real frames off the
+    wire; `test_station_total_frame_rate_holds_the_channel_budget_off_
+    the_real_wire` (tests/test_cli.py) owns the *total* across all three
+    transmitters, which nothing before this batch measured at all.
+
+    Ten idle traps (no pending command, clock left `UNSET` so TIME_SYNC
+    never actually transmits) isolates GET_BACKLOG as the only category
+    competing for the shared budget -- and `heartbeat_interval` is set
+    fast enough that, without the shared budget gating `poll_node`, this
+    would poll far above the configured rate (as
+    `test_backlog_rotation_persists_across_ticks_and_is_paced` above
+    already proves for the per-node cadence alone, with the budget
+    deliberately loosened there). Here the budget itself is the binding
+    constraint being measured.
     """
-    airtime_per_frame_s = 0.37  # docs/protocol/messages.md
-    channel_budget_fraction = 0.01  # docs/protocol/messages.md, "under 1% occupied"
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    for node_id in range(10):
+        registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _SpyGateway()
+    channel_budget_frames_per_s = 2.0
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.02),  # would poll far faster than the budget
+        channel_budget_frames_per_s=channel_budget_frames_per_s,
+    )
+    stop = threading.Event()
 
-    frames_per_second = 1 / DEFAULT_HEARTBEAT_INTERVAL.total_seconds()
-    occupancy_fraction = frames_per_second * airtime_per_frame_s
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _RealClock(trust=ClockTrust.UNSET),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.005,
+        },
+        daemon=True,
+    )
+    started = time.monotonic()
+    thread.start()
+    time.sleep(2.0)
+    stop.set()
+    thread.join(timeout=2.0)
+    elapsed = time.monotonic() - started
 
-    assert frames_per_second == 1 / 300
-    assert occupancy_fraction < channel_budget_fraction
+    assert not thread.is_alive()
+    written_types = {decode(raw).msg_type for raw in gateway.written}
+    assert written_types == {payloads.GET_BACKLOG}  # the only category competing here
+    frames_per_second = len(gateway.written) / elapsed
+
+    # A generous margin over the *configured* rate (this test accelerates
+    # it for speed -- messages.md's real ~0.027/s is proven separately,
+    # off the real default config, in tests/test_cli.py): the bucket
+    # starts with `pacing.DEFAULT_CAPACITY` free tokens, so a short
+    # window's average sits above the asymptotic rate -- the point here is
+    # "bounded by the budget", not "already converged to it".
+    assert frames_per_second < channel_budget_frames_per_s * 3, (
+        f"got {frames_per_second:.2f} GET_BACKLOG frames/s, budget is "
+        f"{channel_budget_frames_per_s}/s"
+    )
+
+
+def test_time_sync_alone_is_capped_by_the_shared_budget(tmp_path: Path) -> None:
+    """CRITICAL 3: ten nodes all newly eligible for TIME_SYNC on the very
+    first tick (a trusted clock, nothing synced yet) used to attempt every
+    one of them in that single tick -- unbounded by anything but the
+    roster size. This isolates TIME_SYNC as the only category competing
+    for the shared budget (no pending commands, GET_BACKLOG paced far
+    slower than the budget by a long `heartbeat_interval`) and proves the
+    same shared bucket caps it too, not just GET_BACKLOG and command
+    resends.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    for node_id in range(10):
+        registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _SpyGateway()
+    config = StationConfig(
+        heartbeat_interval=timedelta(minutes=5),  # GET_BACKLOG must not compete here
+        channel_budget_frames_per_s=2.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _RealClock(trust=ClockTrust.NTP),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.005,
+        },
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.05)  # one tick's worth of real time -- well under a refill period
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    time_sync_count = sum(
+        1 for raw in gateway.written if decode(raw).msg_type == payloads.TIME_SYNC
+    )
+    # `pacing.DEFAULT_CAPACITY` tokens start the bucket full -- at most that
+    # many TIME_SYNC frames can go out before the very first refill, however
+    # many of the ten nodes are simultaneously eligible.
+    assert time_sync_count <= 3, f"{time_sync_count} of 10 nodes synced in one tick"
+    assert 0 < time_sync_count, "the budget must not refuse every attempt either"
