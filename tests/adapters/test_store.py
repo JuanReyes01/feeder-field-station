@@ -15,7 +15,7 @@ import threading
 from datetime import timedelta
 from pathlib import Path
 
-from feeder_station.adapters.store import Store
+from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.domain import payloads
 from feeder_station.domain.events import OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
 from feeder_station.domain.traps import Registry, TrapState
@@ -350,6 +350,45 @@ def test_rehydrate_skips_and_counts_an_unreadable_row_without_blocking_other_nod
     assert reopened.rehydration_errors == 1
     assert 7 not in {trap.node_id for trap in registry.traps()}  # the unreadable row, skipped
     assert registry.trap(9).state is TrapState.ARMED  # another node's row, unaffected
+
+
+def test_rehydration_errors_resets_each_call_not_accumulating(tmp_path: Path) -> None:
+    """SUGGESTION E: three calls against one bad row must read 1, 1, 1,
+    never 1, 2, 3.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 7, "battery_mv": 4000, "targets_version": 1},  # 7: no known TrapState
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    store.rehydrate(registry)
+    store.rehydrate(registry)
+    store.rehydrate(registry)
+
+    assert store.rehydration_errors == 1  # not 3 -- each call starts fresh
+
+
+def test_trap_state_from_wire_maps_every_valid_byte_to_the_right_state() -> None:
+    """WARNING B: the wire-order mapping, pinned end to end."""
+    assert [trap_state_from_wire(v) for v in range(len(TrapState))] == [
+        TrapState.IDLE,
+        TrapState.ARMED,
+        TrapState.FIRED,
+        TrapState.FAULT,
+    ]
 
 
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------

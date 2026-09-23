@@ -18,6 +18,7 @@ hands one out.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from feeder_station.domain.traps import Registry, TrapState
 DEDUP_WINDOW = 32768
 
 SCHEMA_VERSION = 1
+
+logger = logging.getLogger(__name__)
 
 # DD13: `Store.snapshot_into`'s `VACUUM INTO` (adapters/export.py, D6) needs
 # SQLite 3.27 or newer. Checked once, at station startup — a station booting
@@ -471,27 +474,34 @@ class Store:
         that exercised it fed an already-populated registry to
         ``create_app`` by hand instead.
 
-        **Skip-and-count, never raise (CRITICAL 2, sdd-verify
-        field-station-p4).** Each of a node's three replay steps runs
-        under its own ``try``: a row this method cannot interpret —
-        ``payloads.decode_heartbeat``/``decode_captured`` already reject an
-        out-of-range ``state``/``state_after`` byte at write time (task
-        1.2), but an older row written before that check existed, or any
-        future row the check did not anticipate, can still be sitting in
-        ``station.db`` — is skipped and counted in
-        :attr:`rehydration_errors` instead of propagating out of this
-        method. The same best-effort discipline
-        ``adapters/ingest.py::_apply_to_registry`` already applies to the
-        live path: one bad row must never cost every other node its state,
-        and it must never cost the station its boot. A restart that cannot
-        read one row must still be a restart — ``event-store/spec.md``'s
-        "Registry rehydration at boot" requirement, and
-        ``station-deployment/spec.md``'s S7 ("starts by itself... a power
-        cut must not need a person"), which a rehydration-time crash loop
-        directly violates.
+        **Skip-and-count, never raise (CRITICAL 2; widened by CRITICAL A,
+        sdd-verify field-station-p4 batch 1).** An unreadable row is
+        skipped, logged with its node id, and counted in
+        :attr:`rehydration_errors` instead of propagating.
+
+        The guard is ``except Exception``, not a hand-picked tuple: a
+        narrower ``except ValueError`` missed three exception types
+        CRITICAL A found (``OverflowError``, two ``AttributeError``
+        shapes), and predicting how corrupt data will fail cannot be done
+        reliably. The contract here genuinely is indifference to the error
+        type. ``BaseException`` stays uncaught. The roster query
+        (:meth:`_known_node_ids`) and the loop over it are inside this
+        guard too now, not only each node's three replay steps — a
+        ``sqlite3.DatabaseError`` reading ``node_cursor`` used to sit
+        above the ``try`` and would have escaped regardless.
+
+        A restart that cannot read one row must still be a restart —
+        ``event-store/spec.md``'s "Registry rehydration at boot", and
+        ``station-deployment/spec.md``'s S7.
         """
         self.rehydration_errors = 0
-        for node_id in self._known_node_ids():
+        try:
+            node_ids = self._known_node_ids()
+        except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
+            logger.exception("rehydrate: could not read the node roster")
+            self.rehydration_errors += 1
+            return
+        for node_id in node_ids:
             for step in (
                 self._rehydrate_heartbeat,
                 self._rehydrate_capture,
@@ -499,14 +509,8 @@ class Store:
             ):
                 try:
                     step(node_id, registry)
-                except ValueError:
-                    # `ValueError` covers both `payloads.PayloadError` (a
-                    # future row this method itself decodes) and
-                    # `trap_state_from_wire`'s own raise for a
-                    # pre-existing out-of-range row — the same family
-                    # `_require_len` et al. already raise for a malformed
-                    # payload (task 1.2's decode-error type, reused here
-                    # rather than invented fresh).
+                except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
+                    logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
                     self.rehydration_errors += 1
 
     def _known_node_ids(self) -> list[int]:

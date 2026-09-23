@@ -11,9 +11,11 @@ flag produced without actually starting a server.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station.adapters.store import Store
@@ -241,6 +243,85 @@ def test_boot_survives_an_out_of_range_stored_heartbeat_state(tmp_path: Path) ->
     seed.close()
 
     app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+
+    with TestClient(app) as c:
+        response = c.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["rehydration_errors"] == 1
+
+
+# --- CRITICAL A (verify-report-batch1.md): `state=7` above is only one
+# member of the family `except ValueError` missed -- these drive the other
+# two (`OverflowError`, `AttributeError`) plus the roster query itself.
+
+
+def _seed_valid_heartbeat(store: Store) -> int:
+    appended = store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 0, "battery_mv": 4000, "targets_version": 1},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    return appended.seq
+
+
+def _corrupt_received_epoch_overflow(store: Store, seq: int) -> None:
+    store._conn.execute("UPDATE event SET received_epoch = 1e20 WHERE seq = ?", (seq,))
+
+
+def _corrupt_fields_not_an_object(store: Store, seq: int) -> None:
+    store._conn.execute("UPDATE event SET fields = 'null' WHERE seq = ?", (seq,))
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [_corrupt_received_epoch_overflow, _corrupt_fields_not_an_object],
+    ids=["received_epoch_overflow", "fields_not_an_object"],
+)
+def test_boot_survives_a_non_value_error_corrupt_row(tmp_path: Path, corrupt: object) -> None:
+    """P1/P2: written directly, bypassing `Store.append`, simulating a
+    bit-flip landing on an already-stored row (S7).
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seq = _seed_valid_heartbeat(seed)
+    corrupt(seed, seq)  # type: ignore[operator]
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+
+    with TestClient(app) as c:
+        response = c.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["rehydration_errors"] == 1
+
+
+def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
+    """`_known_node_ids()`'s query and the loop over it used to sit above
+    the per-step `try` entirely. Dropping the table is a deterministic
+    stand-in for corruption landing on it.
+    """
+    db_path = tmp_path / "station.db"
+    Store(db_path).close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    raw.execute("DROP TABLE node_cursor")
+    raw.close()
 
     with TestClient(app) as c:
         response = c.get("/health")
