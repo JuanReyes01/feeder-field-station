@@ -363,17 +363,33 @@ def test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_
     Here the node raised a `FAULT` at its own clock-time 18:37:20 but could
     not send it until the link came back, by which point it had already
     sent a live `HEARTBEAT` (`armed`) at 18:45:20 -- eight minutes *later*
-    by its own clock. The `FAULT` still arrives at the station last
-    (`received_epoch`/`seq` both newer) once the backlog is pulled.
+    by its own clock. The `FAULT` still arrives at the station last (`seq`
+    2) once the backlog is pulled.
 
-    Trusting `node_epoch` would mean trusting a clock `clock_trust.py`
-    exists precisely because the station may not, pre-sync (S12) -- the
-    same "must not depend on the clock" reasoning `DEDUP_WINDOW`'s own
-    comment already gives for count-bounded, not time-bounded, dedup.
-    Switching to `node_epoch` is a real option but a bigger one (it would
-    have to reckon with per-event `clock_trust`), not a one-line key swap
-    -- so arrival is the decision made and pinned here, not deferred
-    silently.
+    **Correction (verify-report-batch2.md, WARNING 5): `received_epoch` is
+    given a stepped-back value on purpose, not merely a later one.** The
+    fixture used to give the FAULT a *later* `received_epoch` (2060.0) than
+    the HEARTBEAT's (2000.0), which made `key=seq` and `key=at` agree on
+    every ordering this fixture could produce -- the mutation this test
+    exists to kill (`max(..., key=lambda fact: fact.seq)` -> `key=lambda
+    fact: fact.at`) survived the whole 748-test suite despite this test's
+    presence. `_ReportedFact.at` is `_epoch_to_datetime(row.received_epoch)`
+    -- the station's own wall clock (`Clock.now()` is `system_now()`,
+    `clock.py`), which is *not* guaranteed monotonic with `seq`: it is
+    exactly the clock `clock_trust.py` exists because the station may not
+    trust, pre-sync (S12), and chrony/timesyncd may step it *backward* once
+    a real sync lands. The FAULT below arrives with a station clock reading
+    that has since been stepped back below the HEARTBEAT's own -- `seq`
+    (an autoincrement primary key, never revisited) still orders it last;
+    `received_epoch` no longer agrees. Trusting `node_epoch` instead would
+    mean trusting the *node's* clock, which the station has even less
+    reason to -- the same "must not depend on the clock" reasoning
+    `DEDUP_WINDOW`'s own comment already gives for count-bounded, not
+    time-bounded, dedup. Switching to `node_epoch` is a real option but a
+    bigger one (it would have to reckon with per-event `clock_trust`), not
+    a one-line key swap -- so arrival-by-`seq` is the decision made and
+    pinned here, not deferred silently, and it is now pinned against both
+    alternatives this fixture can reach.
     """
     db_path = tmp_path / "station.db"
     store = Store(db_path)
@@ -401,9 +417,12 @@ def test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_
         payload=b"",
     )
     # Buffered on the node while the link was down, pulled later by
-    # GET_BACKLOG -- arrives at the station (seq/received_epoch) after the
-    # heartbeat above, even though the node raised it first.
-    store.append(fault, received_epoch=2060.0, clock_trust="rtc")
+    # GET_BACKLOG -- arrives at the station last by seq (2, after the
+    # heartbeat's 1), even though the node raised it first by its own
+    # clock AND even though the station's own wall clock, stepped back by
+    # chrony between the two appends, now reads it as *earlier* than the
+    # heartbeat (1000.0 < 2000.0). key=seq and key=at now disagree.
+    store.append(fault, received_epoch=1000.0, clock_trust="rtc")
     store.close()
 
     reopened = Store(db_path)
@@ -411,9 +430,11 @@ def test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_
     reopened.rehydrate(registry)
 
     trap = registry.trap(7)
-    # Arrival wins: FAULT arrived last (seq 2, received 2060.0), even though
-    # by the node's own node_epoch the HEARTBEAT (armed) is the newer report.
+    # Arrival (seq) wins: FAULT arrived last (seq 2), even though by the
+    # node's own node_epoch it is the older report AND by the station's own
+    # (stepped-back) received_epoch it now reads as the older one too.
     assert trap.state is TrapState.FAULT
+    assert trap.last_seen == datetime.fromtimestamp(1000.0, tz=UTC)
 
 
 def test_rehydrate_reflects_a_heartbeat_when_no_capture_exists(tmp_path: Path) -> None:

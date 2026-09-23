@@ -577,6 +577,22 @@ class Store:
             # Switching to `node_epoch` is a real option but a bigger one: it
             # would have to reckon with per-event `clock_trust`, not a
             # one-line key swap.
+            #
+            # Correction (verify-report-batch2.md, WARNING 5): `seq` is not
+            # merely "arrival, not node_epoch" -- it is also the one key of
+            # the two that survives a stepped station clock. `fact.at` is
+            # `_epoch_to_datetime(received_epoch)`, and `received_epoch` is
+            # this station's own `Clock.now()` (`system_now()`, clock.py) --
+            # the same clock `clock_trust.py` exists because it is *unsynced
+            # at boot* and can be stepped **backward** once chrony/timesyncd
+            # actually syncs it. `seq`, an autoincrement primary key, cannot
+            # regress; `received_epoch` can. `apply-progress-batch2a.md`
+            # previously recorded `received_epoch` as "monotonic with seq in
+            # every single-writer ingestion fixture" -- that claim is false,
+            # and is corrected in place there. Pinned against a stepped-back
+            # `received_epoch` fixture by
+            # test_a_backlog_replayed_report_does_not_win_the_state_race_by_
+            # the_nodes_own_older_clock.
             if facts:
                 winner = max(facts, key=lambda fact: fact.seq)
                 registry.restore_reported_state(node_id, winner.state, at=winner.at)

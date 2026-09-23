@@ -363,6 +363,21 @@ prefer it when present): the WARNING A test failed as expected (`FAULT` no longe
 collateral damage to the other 741 tests. Reverted in full afterward. See "Mutation testing" below for
 both runs' actual output.
 
+**Correction (verify-report-batch2.md, WARNING 5): the monotonicity claim above is false, not merely
+"definitional given the current code shape."** `received_epoch` is the station's own `Clock.now()`
+(`system_now()`, `clock.py`) — the same clock `clock_trust.py` exists because it is unsynced at boot
+and can be **stepped backward** by chrony/timesyncd once a real sync lands. It is monotonic with `seq`
+only while the station's wall clock never steps backward between two appends; nothing in this codebase
+guarantees that. Measured on an ordinary two-row fixture with no code change: giving the second-arriving
+row a *lower* `received_epoch` than the first (the clock-step case) makes `key=seq` and `key=at` diverge
+immediately — `key=at` picks the wrong winner. The demo mutation above happened to use a fixture where
+the two orderings could never disagree (`received_epoch` given a strictly later value on the
+later-`seq` row), which is why it read as "definitionally the same" rather than as a fixture gap. Closed
+in Batch 2c: `test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_older_clock`
+now gives the FAULT row a stepped-back `received_epoch`, and the named mutation (`key=fact.seq` →
+`key=fact.at`) now dies against it without any production code change — the code was always correct;
+only this record's explanation of why the test couldn't prove it was wrong.
+
 ### 3. A comment this batch made false (WARNING D)
 
 `tests/test_app.py:737-741`'s comment claimed no trap is created by rehydration for node 7; measured, a
