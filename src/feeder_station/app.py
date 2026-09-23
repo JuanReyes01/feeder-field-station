@@ -318,6 +318,10 @@ def create_app(
                 "frames_in": state.frames_in,
                 "frames_out": state.frames_out,
                 "decode_errors": state.decode_errors,
+                # WARNING C (sdd-verify field-station-p4 batch 1): a
+                # payload-level decode failure, distinguishable from the
+                # COBS-level `decode_errors` above.
+                "payload_errors": state.payload_errors,
                 "last_error": state.last_error,
             }
         # "fold connected into ok" (verify-report.md's own fix wording): a

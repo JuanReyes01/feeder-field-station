@@ -22,6 +22,7 @@ page load (S3) — neither is retried from here.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -53,9 +54,16 @@ class AckPort(Protocol):
 
 Publish = Callable[[dict[str, Any]], None]
 RecordArrival = Callable[[int, float], None]
+RecordPayloadError = Callable[[], None]
+
+logger = logging.getLogger(__name__)
 
 
 def _no_op_record_arrival(node_id: int, received_epoch: float) -> None:
+    return None
+
+
+def _no_op_record_payload_error() -> None:
     return None
 
 
@@ -69,6 +77,7 @@ def ingest_frame(
     received_epoch: float,
     clock_trust: str,
     record_arrival: RecordArrival = _no_op_record_arrival,
+    record_payload_error: RecordPayloadError = _no_op_record_payload_error,
 ) -> None:
     """Carry one raw, already-COBS-decoded frame through the S9 ordering.
 
@@ -79,10 +88,17 @@ def ingest_frame(
     try:
         frame = frames.decode(raw_frame)
         event = interpret(frame)
-    except (FrameError, PayloadError, UninterpretableFrame):
+    except (FrameError, PayloadError, UninterpretableFrame) as exc:
         # Steps 1-3 failure: nothing was acknowledged, so S9 is intact by
         # construction. The node already assumes an unreliable link and
         # retries; there is nothing more honest to do than drop this one.
+        # WARNING C (sdd-verify field-station-p4 batch 1): counted and
+        # logged here, separately from FrameStream's COBS-level
+        # `decode_errors` one layer below, so the two causes stay
+        # distinguishable -- a trap whose every heartbeat lands here used
+        # to look identical to one that had simply gone silent.
+        logger.warning("ingest: dropped an undecodable frame: %s", exc)
+        record_payload_error()
         return
 
     # CRITICAL 4 (sdd-verify, field-station-p4): the scheduler's own "did

@@ -537,6 +537,9 @@ class _CrashingGateway:
     def write_frame(self, raw_frame: bytes) -> bool:  # pragma: no cover - unreachable
         return True
 
+    def record_payload_error(self) -> None:  # pragma: no cover - unreachable
+        return None
+
     @property
     def link_state(self) -> LinkState:
         # This gateway never even reaches `connect_once()` -- `ensure_
@@ -550,6 +553,7 @@ class _CrashingGateway:
             frames_in=0,
             frames_out=0,
             decode_errors=0,
+            payload_errors=0,
             last_error=None,
         )
 
@@ -595,6 +599,9 @@ class _LinkDroppingGateway:
     def read_frames(self, *, size: int = 4096) -> list[bytes]:
         return []
 
+    def record_payload_error(self) -> None:  # pragma: no cover - unused here
+        return None
+
     def write_frame(self, raw_frame: bytes) -> bool:  # pragma: no cover - unused here
         return True
 
@@ -607,6 +614,7 @@ class _LinkDroppingGateway:
             frames_in=0,
             frames_out=0,
             decode_errors=0,
+            payload_errors=0,
             last_error=None if self._connected else "simulated link drop",
         )
 

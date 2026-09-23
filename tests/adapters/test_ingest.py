@@ -227,3 +227,25 @@ def test_an_undecodable_frame_is_dropped_with_no_ack() -> None:
 
     assert ack_port.written == []
     assert published == []
+
+
+def test_an_undecodable_frame_is_counted_via_record_payload_error() -> None:
+    """WARNING C (sdd-verify field-station-p4, verify-report-batch1.md):
+    before this, a payload-level decode failure was dropped with no
+    counter and no log anywhere.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    payload_errors: list[None] = []
+
+    ingest_frame(
+        b"\x01\x02\x03",  # too short to even be a header
+        store=_StubStore(),
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+        record_payload_error=lambda: payload_errors.append(None),
+    )
+
+    assert payload_errors == [None]

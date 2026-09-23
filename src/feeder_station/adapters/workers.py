@@ -81,6 +81,7 @@ def run_gateway_loop(
     clock: Clock,
     stop: threading.Event,
     last_frame_arrival: dict[int, float],
+    record_payload_error: Callable[[], None],
 ) -> None:
     """The blocking serial-read half of design.md section 7's "gateway
     thread": ``SerialGateway.ensure_connected()``/``read_frames()`` (slice
@@ -122,6 +123,7 @@ def run_gateway_loop(
                     received_epoch=clock.now().timestamp(),
                     clock_trust=clock.trust().value,
                     record_arrival=last_frame_arrival.__setitem__,
+                    record_payload_error=record_payload_error,
                 )
 
 
@@ -286,6 +288,7 @@ def start_workers(
                 clock=clock,
                 stop=stop,
                 last_frame_arrival=last_frame_arrival,
+                record_payload_error=gateway.record_payload_error,
             ),
         ),
         name="feeder-station-gateway",

@@ -127,6 +127,7 @@ def test_run_gateway_loop_ingests_a_frame_then_honours_stop(tmp_path: Path) -> N
         clock=_FixedClock(),
         stop=stop,
         last_frame_arrival=last_frame_arrival,
+        record_payload_error=lambda: None,
     )
 
     assert stop.is_set()
@@ -193,6 +194,7 @@ def test_a_crashing_gateway_loop_is_caught_by_run_supervised(tmp_path: Path) -> 
             clock=_FixedClock(),
             stop=threading.Event(),
             last_frame_arrival={},
+            record_payload_error=lambda: None,
         ),
     )
 

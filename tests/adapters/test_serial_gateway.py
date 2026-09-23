@@ -223,3 +223,16 @@ def test_link_state_counts_frames_in_and_out_and_decode_errors() -> None:
     assert gateway.write_frame(raw) is True
     assert port.written == [wire]
     assert gateway.link_state.frames_out == 1
+
+
+def test_record_payload_error_is_counted_separately_from_decode_errors() -> None:
+    """WARNING C (sdd-verify field-station-p4, verify-report-batch1.md): a
+    payload-level failure (adapters/ingest.py) must be distinguishable
+    from a COBS-level one (above) -- the whole point of the finding.
+    """
+    gateway = SerialGateway(DeviceConfig())
+
+    gateway.record_payload_error()
+
+    assert gateway.link_state.payload_errors == 1
+    assert gateway.link_state.decode_errors == 0

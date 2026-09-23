@@ -146,6 +146,11 @@ class LinkState:
     frames_in: int
     frames_out: int
     decode_errors: int
+    # WARNING C (sdd-verify field-station-p4 batch 1): a payload-level
+    # decode failure (adapters/ingest.py), kept separate from the
+    # COBS-level `decode_errors` above so the two causes stay
+    # distinguishable in /health.
+    payload_errors: int
     last_error: str | None
 
 
@@ -180,6 +185,7 @@ class SerialGateway:
         self._since: float | None = None
         self._frames_in = 0
         self._frames_out = 0
+        self._payload_errors = 0
         self._last_error: str | None = None
         # design.md section 7's concurrency table, "Serial writes" row: one
         # lock around `port.write()` -- slice 12 is the first slice that
@@ -200,8 +206,15 @@ class SerialGateway:
             frames_in=self._frames_in,
             frames_out=self._frames_out,
             decode_errors=self._frame_stream.decode_errors,
+            payload_errors=self._payload_errors,
             last_error=self._last_error,
         )
+
+    def record_payload_error(self) -> None:
+        """WARNING C: called by ``adapters/ingest.py::ingest_frame`` on a
+        payload-level decode failure (see :class:`LinkState`).
+        """
+        self._payload_errors += 1
 
     def resolve(self) -> str | None:
         """Run the 4-step resolution fresh — never cache it across calls."""
