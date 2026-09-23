@@ -8,6 +8,7 @@ behave; it is not a usability result.
 """
 
 import asyncio
+import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -386,6 +387,27 @@ def test_clock_unset_banner_present_when_health_reports_unset() -> None:
     app = create_app(clock=_FixedClock(ClockTrust.UNSET))
     c = TestClient(app)
     assert c.get("/health").json()["clock_trust"] == "unset"
+
+
+# --- WARNING 2 (verify-report-batch2.md): the stale-state badge must be
+# conditional on the field, not a constant either way. -----------------------
+
+
+def test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant() -> None:
+    """Full DOM rendering is not pytest's domain (see this module's own
+    docstring) -- this proves the mechanical fact a plain substring check
+    cannot: `renderTrap` must *branch* on `t.state_may_be_stale`, not
+    merely mention the field somewhere. A bare `"state_may_be_stale" in
+    html` assertion would still pass if the badge were emitted
+    unconditionally (`True` or `False`) or removed from the markup
+    entirely while the field name stayed in a comment -- this pins the
+    actual ternary that keys the badge's presence on the flag.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"t\.state_may_be_stale\s*\?", html), (
+        "renderTrap must branch on t.state_may_be_stale, not render a constant"
+    )
 
 
 # --- 10.11 REFACTOR: no external asset anywhere in the shipped page --------

@@ -26,6 +26,7 @@
   .trap.no-contact { border-color: #a86a00; }
   .state { font-weight: 700; text-transform: uppercase; font-size: .8rem; letter-spacing: .05em; }
   .no-contact-badge { color: #ffb648; font-weight: 700; margin: .3rem 0; }
+  .stale-badge { color: #ffcf7a; font-style: italic; font-size: .85rem; margin: .3rem 0; }
   .pending { color: #7ec8ff; font-size: .85rem; }
   .muted { color: #999; font-size: .85rem; }
   .empty { color: #999; }
@@ -129,6 +130,13 @@ function renderTrap(t) {
   // that as the English enum values around it would suggest by omission;
   // say so, in Spanish, same as every other "no data" label on this page.
   const state = t.state != null ? t.state : "desconocido";
+  // WARNING 2 (sdd-verify field-station-p4 batch 2 close-out): a stale-
+  // flagged trap must not render byte-identical to a confident one --
+  // independent of `reachable` (`no-contact-badge` above), which after a
+  // restart comes from whichever row won the state race and can stay
+  // `true` even while that row's own freshness is in doubt. Rendered as
+  // doubt (italic), not as the bolder "no contact" alarm: this trap is not
+  // silent, its last-known word just might not be its newest one.
   // 13.11/13.12: what the trap is actually hunting -- the station's own
   // desired list, not only its version number.
   const targets = (t.targets && t.targets.length)
@@ -138,6 +146,7 @@ function renderTrap(t) {
     <div class="trap ${noContact ? "no-contact" : ""}">
       <div class="state">Trampa ${t.node_id} · ${state}</div>
       ${noContact ? '<p class="no-contact-badge">⚠ SIN CONTACTO — este estado puede estar desactualizado</p>' : ""}
+      ${t.state_may_be_stale ? '<p class="stale-badge">⚠ puede no ser el último reporte de esta trampa</p>' : ""}
       <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
       <p class="muted">Objetivos actuales: ${targets}</p>
       ${t.pending_command ? `<p class="pending">${describePending(t)}</p>` : ""}

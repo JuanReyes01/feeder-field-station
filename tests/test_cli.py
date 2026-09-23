@@ -620,6 +620,74 @@ def test_one_bad_row_does_not_look_like_a_lost_roster(tmp_path: Path) -> None:
     assert len(traps) == 3  # the corrupt-state node is still present, WARNING J's own honesty
 
 
+def test_state_may_be_stale_is_true_only_for_the_node_that_earned_it(tmp_path: Path) -> None:
+    """WARNING 2 (verify-report-batch2.md): the only three assertions that
+    ever read `state_may_be_stale` before this test live at the `Registry`
+    unit level (`tests/adapters/test_store.py`), which calls
+    `rehydrate()`/`restore_reported_state()` directly -- never through
+    `Registry.view()`'s own serialization. Two mutations proved that gap:
+    `view()` emitting `"state_may_be_stale": False` unconditionally, and
+    the rehydration flag being set unconditionally on *every* trap, both
+    survived the whole 748-test suite. A real `/api/traps` boot with one
+    genuinely stale-flagged node and one genuinely healthy node in the same
+    response kills both directions at once: node 7's newest FAULT row is
+    unreadable (an older HEARTBEAT wins, flagged stale); node 9's only row
+    is perfectly readable.
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 1},  # 1 -> ARMED
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.FAULT,
+            msg_id=2,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=b"",
+        ),
+        received_epoch=1e20,  # unreadable: OverflowError inside _epoch_to_datetime
+        clock_trust="unset",
+    )
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=9,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 0, "battery_mv": 4100, "targets_version": 1},  # 0 -> IDLE
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+
+    assert rows[7]["state_may_be_stale"] is True  # a newer FAULT existed and could not be read
+    assert rows[9]["state_may_be_stale"] is False  # perfectly readable, nothing to doubt
+
+
 # --- WARNING J (verify-report-batch1-round2.md): a row rehydration cannot
 # read must never fabricate "idle" -- "unknown" must be representable. ------
 
@@ -777,8 +845,7 @@ def test_a_command_to_a_never_heard_from_node_survives_a_restart(
         boot2_rows = {row["node_id"]: row for row in c2.get("/api/traps").json()}
 
     assert never_heard_node in boot2_rows, (
-        "LOST across the restart -- the roster query does not cover every "
-        "operator-sourced msg_type"
+        "LOST across the restart -- the roster query does not cover every operator-sourced msg_type"
     )
     assert boot2_rows[never_heard_node]["pending_command"] == expected_pending
     # never reported -- not a fabricated "idle" (WARNING J's own discipline)
