@@ -352,7 +352,24 @@ def create_app(
         # already sets, so neither a monitoring check nor a person glancing
         # at `ok` alone can read this as a healthy, merely quiet station.
         roster_lost = None if store is None else store.roster_lost
-        roster_ok = roster_lost is not True
+
+        # WARNING 4 (sdd-verify field-station-p4 batch 2 close-out,
+        # verify-report-batch2.md): `roster_lost` only ever catches a
+        # roster *query* that raises -- a query that succeeds while
+        # returning fewer nodes than the store actually holds (a partial
+        # write, a `node_cursor` row lost while its node's other rows
+        # survive) read identically to a fully healthy boot. Compare the
+        # two counts `Store.rehydrate` already keeps: a roster that comes
+        # back short says so, the same "fold connected into ok" precedent
+        # `link_ok`/`roster_lost` already set.
+        roster_nodes_expected = None if store is None else store.roster_nodes_expected
+        roster_nodes_rehydrated = None if store is None else store.roster_nodes_rehydrated
+        roster_incomplete = (
+            roster_nodes_expected is not None
+            and roster_nodes_rehydrated is not None
+            and roster_nodes_rehydrated < roster_nodes_expected
+        )
+        roster_ok = roster_lost is not True and not roster_incomplete
 
         return {
             "ok": workers_ok and link_ok and roster_ok,
@@ -362,6 +379,8 @@ def create_app(
             "link": link,
             "rehydration_errors": rehydration_errors,
             "roster_lost": roster_lost,
+            "roster_nodes_expected": roster_nodes_expected,
+            "roster_nodes_rehydrated": roster_nodes_rehydrated,
         }
 
     @app.get("/api/traps")

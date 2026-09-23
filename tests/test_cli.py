@@ -620,6 +620,53 @@ def test_one_bad_row_does_not_look_like_a_lost_roster(tmp_path: Path) -> None:
     assert len(traps) == 3  # the corrupt-state node is still present, WARNING J's own honesty
 
 
+def test_a_partial_roster_says_so_instead_of_reading_healthy(tmp_path: Path) -> None:
+    """WARNING 4 (verify-report-batch2.md): `roster_lost` is all-or-nothing
+    -- it is set only when the roster *query itself* raises. A query that
+    succeeds while returning fewer nodes than the store actually holds (a
+    `node_cursor` row lost to a partial write, simulated here by deleting
+    it directly while the node's own `HEARTBEAT` row survives in `event`)
+    reads `ok: true`, `roster_lost: false`, `rehydration_errors: 0`, and
+    silently drops the node from `/api/traps` -- exactly the case WARNING
+    K(b) named as its own third, un-taken close: "a count of nodes
+    expected vs rehydrated."
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    for node_id in (1, 2, 3):
+        seed.append(
+            StationEvent(
+                source="node",
+                node_id=node_id,
+                msg_type=payloads.HEARTBEAT,
+                msg_id=1,
+                node_epoch=None,
+                tag=None,
+                fields={"state": 0, "battery_mv": 4000, "targets_version": 1},
+                payload=b"",
+            ),
+            received_epoch=1000.0,
+            clock_trust="unset",
+        )
+    seed.close()
+
+    raw = sqlite3.connect(db_path, isolation_level=None)
+    raw.execute("DELETE FROM node_cursor WHERE node_id = 2")
+    raw.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        health = c.get("/health").json()
+        traps = c.get("/api/traps").json()
+
+    assert [row["node_id"] for row in traps] == [1, 3]  # node 2 silently dropped
+    assert health["roster_lost"] is False  # the query itself did not raise
+    assert health["rehydration_errors"] == 0  # no row anywhere was unreadable
+    assert health["roster_nodes_expected"] == 3  # ground truth: `event` names 3 distinct nodes
+    assert health["roster_nodes_rehydrated"] == 2  # `_known_node_ids()` found only 2 of them
+    assert health["ok"] is False  # a roster that came back short must not read as healthy
+
+
 def test_state_may_be_stale_is_true_only_for_the_node_that_earned_it(tmp_path: Path) -> None:
     """WARNING 2 (verify-report-batch2.md): the only three assertions that
     ever read `state_may_be_stale` before this test live at the `Registry`

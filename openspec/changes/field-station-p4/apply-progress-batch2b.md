@@ -203,6 +203,14 @@ All four mutations reverted; full suite green afterward (see Verification below)
    (`docs/deploy.md`'s own "confirm it is actually serving" step). This is the rule WARNING K(b)
    (task 2.9) exists to fix; the assertion change is the fix's own acceptance test, not a
    loosening — it is *strictly stricter* than before (three assertions instead of two).
+   **Correction (verify-report-batch2.md, "the shifted test" section): this is not stricter, it is
+   an inversion.** `assert body["ok"] is True` was replaced by `assert body["ok"] is False` —
+   removed, not added to. `roster_lost is True` and `traps == []` are genuine additions; the third
+   change is a flip, not a third assertion alongside the original two. The behaviour change is
+   justified (see `verify-report-batch2.md`'s "The `ok: false` question" section — `roster_lost` is
+   its own field, and a hazard wired to it was already possible via `link_ok`, so it does not create
+   a new class of crash-loop risk), but it should have been recorded as an inversion, not as "three
+   assertions instead of two."
 2. No other existing assertion changed. `git diff` for every other file in this batch shows pure
    addition.
 

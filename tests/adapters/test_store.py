@@ -811,7 +811,9 @@ def test_a_captured_rows_non_int_state_after_counts_as_unreadable_not_silent(
     reopened.rehydrate(registry)
 
     trap = registry.trap(7)
-    assert trap.state is TrapState.ARMED  # the older, readable report -- still the best fact there is
+    assert (
+        trap.state is TrapState.ARMED
+    )  # the older, readable report -- still the best fact there is
     assert trap.state_may_be_stale is True  # ... but a newer one existed and could not be read
     assert reopened.rehydration_errors == 1  # counted, not silent
 

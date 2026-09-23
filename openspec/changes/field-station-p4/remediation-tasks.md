@@ -313,6 +313,10 @@ reports when it gives up on something.
   survived the whole 748-test suite (M15, M26). Closed for real in Batch 2c: both `isinstance` guards
   now raise into the same counted/flagged path as every other unreadable row, `renderTrap` renders a
   distinct badge keyed on the flag, and an `/api/traps`-level test pins both directions.
+  Also **partially closed on the count axis, not the presence axis** (WARNING K(b)'s own third,
+  un-taken close — WARNING 4, Batch 2c): `roster_lost` catches only a roster *query* that raises, not
+  a query that succeeds while returning fewer nodes than the store holds. `Store.roster_nodes_expected`/
+  `roster_nodes_rehydrated`, surfaced in `/health` and folded into `ok`, close it.
 - [x] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
   downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
   the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the

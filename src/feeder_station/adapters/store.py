@@ -262,6 +262,18 @@ class Store:
         # an error count. Set only in that second branch, reset at the
         # start of each rehydration pass.
         self.roster_lost = False
+        # WARNING 4 (verify-report-batch2.md): `roster_lost` only catches a
+        # roster *query* that raises -- a query that succeeds while
+        # returning fewer nodes than the store actually holds (a
+        # `node_cursor` row lost to a partial write, its node's other rows
+        # otherwise intact) reads identically to a fully healthy boot.
+        # `roster_nodes_expected` is `_count_all_known_nodes()`'s own
+        # source-agnostic count straight off `event` -- the ground truth
+        # `_known_node_ids()`'s own union is supposed to match; `roster_
+        # nodes_rehydrated` is how many `_known_node_ids()` actually
+        # returned. Both reset at the start of each rehydration pass.
+        self.roster_nodes_expected = 0
+        self.roster_nodes_rehydrated = 0
         _ensure_schema(self._conn)
 
     @property
@@ -535,13 +547,17 @@ class Store:
         """
         self.rehydration_errors = 0
         self.roster_lost = False
+        self.roster_nodes_expected = 0
+        self.roster_nodes_rehydrated = 0
         try:
             node_ids = self._known_node_ids()
+            self.roster_nodes_expected = self._count_all_known_nodes()
         except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
             logger.exception("rehydrate: could not read the node roster")
             self.rehydration_errors += 1
             self.roster_lost = True  # WARNING K(b): degraded boot, not a bad-row count
             return
+        self.roster_nodes_rehydrated = len(node_ids)
         for node_id in node_ids:
             facts: list[_ReportedFact] = []
             a_state_row_was_unreadable = False
@@ -637,6 +653,21 @@ class Store:
             """
         ).fetchall()
         return [row[0] for row in rows]
+
+    def _count_all_known_nodes(self) -> int:
+        """WARNING 4 (verify-report-batch2.md): the source-agnostic ground
+        truth :meth:`_known_node_ids` is supposed to match. Every row in
+        ``event`` names a real ``node_id`` regardless of ``source`` or any
+        JSON-field corruption elsewhere in the row (the column is a plain
+        ``INTEGER NOT NULL``), so this can only ever under- or over-count
+        relative to :meth:`_known_node_ids` if that narrower union itself
+        missed something -- a `node_cursor` row lost to a partial write,
+        for instance, with the node's other rows in ``event`` intact.
+        Run inside the same guard as the roster query itself: a whole-table
+        failure here is exactly the roster-lost case already handled.
+        """
+        row = self._conn.execute("SELECT COUNT(DISTINCT node_id) FROM event").fetchone()
+        return int(row[0])
 
     def _rehydrate_heartbeat(self, node_id: int, registry: Registry) -> _ReportedFact | None:
         """One row, one atomic attempt: the state candidate (step (a)) is

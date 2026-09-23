@@ -75,6 +75,14 @@ available (or a pre-built wheel installed with `pip`).
    A healthy response's `workers.gateway.enabled` is `true` only once a real serial device is
    configured — see the next section. Until then, `false` there is correct, not a fault.
 
+   `/health` always answers HTTP **200**, even when the station is degraded — `ok` lives in the
+   body, so a status-code-only probe (the default for most `HEALTHCHECK`/liveness wiring) will never
+   see a degraded station at all; parse the body and check `ok`. And when `ok` is `false`, a restart
+   only fixes one of the conditions it covers — a dead worker thread (`workers.*.alive: false`)
+   usually is fixed by one; a down radio link (`link.connected: false`) or a lost/incomplete roster
+   (`roster_lost`, or `roster_nodes_rehydrated` below `roster_nodes_expected`) are not, and wiring
+   either one to an automatic restart produces a loop.
+
 5. Point the unit at a real serial device once the radio is wired up. The shipped unit's `ExecStart=`
    passes no `--serial-device`, so the gateway starts and immediately reports the link down (step 4 of
    `adapters/serial_gateway.py`'s own resolution order) rather than crashing the station. Edit
