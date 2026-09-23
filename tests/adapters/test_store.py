@@ -1019,6 +1019,66 @@ def test_trap_state_from_wire_maps_every_valid_byte_to_the_right_state() -> None
     ]
 
 
+# --- BEHAVIOUR 2 (verify-report-batch2d.md, Batch 2e): a negative stored
+# state byte fabricated a valid TrapState instead of being rejected. -------
+
+
+def test_trap_state_from_wire_rejects_a_negative_value() -> None:
+    """BEHAVIOUR 2: Python's own negative indexing let `-1`/`-2`/`-3`/`-4`
+    silently resolve to `FAULT`/`FIRED`/`ARMED`/`IDLE` -- a corruption
+    shape `payloads._require_valid_state` already rejects on the wire
+    path, reachable here only through a corrupted `fields` column.
+    """
+    with pytest.raises(ValueError):
+        trap_state_from_wire(-1)
+
+
+def test_trap_state_from_wire_rejects_the_first_out_of_range_high_value() -> None:
+    """PROOF 4 (verify-report-batch2d.md): the mapping test above widens
+    silently with `_WIRE_STATE_ORDER` since it iterates
+    `range(len(TrapState))` -- pin the boundary explicitly so a fifth
+    entry cannot survive unnoticed. Already correct before this batch
+    (the wire path never produced `4`); pinned now so it stays that way.
+    """
+    with pytest.raises(ValueError):
+        trap_state_from_wire(4)
+
+
+def test_a_negative_stored_state_byte_counts_as_unreadable_not_a_fabricated_idle(
+    tmp_path: Path,
+) -> None:
+    """BEHAVIOUR 2, at the store level: a stored HEARTBEAT whose real
+    report was `FAULT` (`3`), corrupted in place to `-4`
+    (`3 - len(_WIRE_STATE_ORDER)`), must render as unreadable -- never as
+    a confident, calm `idle`, which is what `_WIRE_STATE_ORDER[-4]` used
+    to fabricate.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": -4, "battery_mv": 4000, "targets_version": 1},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    assert 7 not in {trap.node_id for trap in registry.traps()}
+    assert reopened.rehydration_errors == 1
+
+
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------
 
 

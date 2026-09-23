@@ -235,6 +235,15 @@ _WIRE_STATE_ORDER = (TrapState.IDLE, TrapState.ARMED, TrapState.FIRED, TrapState
 
 def trap_state_from_wire(value: int) -> TrapState:
     try:
+        # BEHAVIOUR 2 (sdd-verify field-station-p4, verify-report-batch2d.md):
+        # Python's own negative indexing let `-1`..`-4` resolve to
+        # `FAULT`/`FIRED`/`ARMED`/`IDLE` instead of raising -- `[-4]`
+        # fabricated the calmest possible answer for a byte that could
+        # only reach here through corruption (the wire path is already
+        # rejected by `payloads._require_valid_state`). Raised through the
+        # same `IndexError` branch below rather than a second message.
+        if value < 0:
+            raise IndexError(value)
         return _WIRE_STATE_ORDER[value]
     except IndexError as exc:
         raise ValueError(f"HEARTBEAT state byte {value} has no known TrapState") from exc
