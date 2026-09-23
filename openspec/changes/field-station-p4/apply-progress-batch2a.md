@@ -286,10 +286,163 @@ measured, also agrees.
 subject matter, not touched by this run. `_known_node_ids`, `design.md` and `/health`'s
 `rehydration_errors`-vs-degraded-boot distinction (WARNING K) also untouched, as instructed.
 
-## Status
+## Status (before the closure below)
 
 5/5 Batch 2a tasks complete (2.1, 2.2, 2.3, 2.4, 2.8). CRITICAL 1 is closed for the scope this batch
 covers (all five rehydration orderings agree live-vs-rehydrated). WARNING J is closed (an unreadable
 state-bearing row now renders `state: null` / "desconocido", never a fabricated `"idle"`). CRITICAL 6
 and WARNING K (Batch 2b: tasks 2.5-2.7, 2.9, 2.10) remain untouched and still broken, as expected —
 this run did not read or fix them. CRITICAL 3, 4, 5 and I (Batches 3-5) also remain untouched.
+
+---
+
+## Closure run: CRITICAL A + WARNING A + two doc corrections (task 2.4b, fifth commit in this stack)
+
+**Source**: `openspec/changes/field-station-p4/verify-report-batch2a.md`. Scope: CRITICAL A only, plus
+three items the same report named as smaller follow-ups. CRITICAL 6 and WARNING K(a)/K(b) (tasks
+2.5-2.7, 2.9, 2.10) remain untouched — Batch 2b, not this run. CRITICAL 3/4/5/I remain Batches 3-5.
+WARNING J's residual (WARNING C — a node's newest state row unreadable, an older readable one shown as
+current) also untouched, deferred to Batch 2b's task 2.9 per the report's own instruction.
+
+### 1. CRITICAL A — the live path now reads `state_after` too
+
+`Registry.captured()` (`domain/traps.py`) took a new `state: TrapState` parameter, applied the same way
+`heartbeat()` already applies its own `state` argument, instead of hardcoding `TrapState.FIRED`.
+`adapters/ingest.py::_apply_to_registry`'s CAPTURED branch (`_apply_captured`) decodes `state_after` and
+threads it through, guarded by the same defensive `isinstance` check `_apply_heartbeat` already has.
+
+**WARNING 7 confirmed closed on both sides**: `rg -n state_after src/` found it only in `payloads.py`
+before this commit; it now also appears in `adapters/ingest.py`.
+
+RED: `tests/test_cli.py::test_rehydrated_registry_matches_the_live_registry_for_every_captured_state_after`,
+parametrized over `state_after` 0/1/2/3, built from real wire bytes (`frames.encode` → `frames.decode` →
+`events.interpret`), replayed into a live registry via `_apply_to_registry` and compared against a real
+`cli.build_app` boot. Ran against the pre-fix tree: 3 of 4 cases failed (`state_after` 0/1/3; `2` passed
+by the coincidence CRITICAL A names). GREEN after the fix: 4/4.
+
+`tests/adapters/test_store.py::test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_fired`
+extended: it previously asserted only the rehydrated half (`ARMED`), never checking the live path for
+the identical log — exactly how CRITICAL A slipped through this file's own mutation-kill test. It now
+also replays the same event through `_apply_to_registry` and asserts the live trap reads `ARMED` too.
+
+Callers updated for the new required parameter: `tests/domain/test_traps.py`, `tests/test_app.py` (two
+call sites), `tests/adapters/test_ingest.py::_OrderedRegistry.captured`.
+
+### 2. WARNING A — the ordering key is arrival (`seq`), pinned deliberately
+
+**Decision: kept arrival order (store `seq`), not the node's own `node_epoch`.** `node_epoch` is
+persisted but was never read by the state race; `GET_BACKLOG` replay of a buffered, node-clock-stale
+report is a designed-for case, not exotic, so this needed a real answer, not a default.
+
+Reasoning: `clock_trust.py` exists precisely because a node's own clock is not trusted until it has
+synced (S12) — the same "must not depend on the clock" principle `DEDUP_WINDOW`'s own comment already
+gives for count-bounded, not time-bounded, dedup. Trusting `node_epoch` unconditionally would undo that
+precedent. A further, independent finding while investigating: `payloads.decode_fault` has no epoch
+field at all — a FAULT report carries no node-side timestamp on the wire — so a `node_epoch`-based rule
+could not even be applied uniformly across all three report types without inventing a fallback for
+FAULT rows. Switching to `node_epoch` is a real option but a materially bigger one (it would have to
+reckon with per-event `clock_trust`), not a one-line key swap — pinned as a decision made, not deferred
+silently, per the report's own instruction.
+
+Pinned by a new test: `tests/adapters/test_store.py::test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_older_clock` —
+a `HEARTBEAT` (node_epoch 18:45:20) and a `FAULT` buffered on the node at 18:37:20 (8 minutes older by
+the node's own clock) but arriving at the station *after* the heartbeat (`GET_BACKLOG` replay). Asserts
+the winner is `FAULT` (arrival), not `ARMED` (the node-clock-newer report). A comment citing this
+reasoning was added at `store.py`'s `max(facts, key=lambda fact: fact.seq)` call.
+
+**Mutation finding, reported honestly**: the report's own named mutation (`key=fact.seq` → `key=fact.at`)
+still SURVIVES the full suite including this new test. Investigated why: `_ReportedFact.at` is always
+`_epoch_to_datetime(row.received_epoch)` — the station's own receipt clock — never `node_epoch`. Since
+`received_epoch` is assigned by the station at insert time, it is monotonic with `seq` in every
+single-writer ingestion fixture; the two orderings are definitionally the same given the current code
+shape, so no test can ever distinguish them without a code change first. This is not a gap in the new
+test — it is why WARNING A itself already reported this same mutation surviving. To prove the new test
+has real discriminating power, a second, more invasive demo mutation was run by hand (added a
+`node_epoch` field to `_ReportedFact`, wired it from the `HEARTBEAT` row, and changed the winner key to
+prefer it when present): the WARNING A test failed as expected (`FAULT` no longer won), with zero
+collateral damage to the other 741 tests. Reverted in full afterward. See "Mutation testing" below for
+both runs' actual output.
+
+### 3. A comment this batch made false (WARNING D)
+
+`tests/test_app.py:737-741`'s comment claimed no trap is created by rehydration for node 7; measured, a
+trap *is* created (`state: 'fired'`, `capture: None`) because the acknowledged `CAPTURED` row still
+supplies the winning state fact (CRITICAL 1). Corrected to describe what the code does: acknowledging
+clears the capture object durably, not `state` — `Registry.acknowledge()`'s own scope. The assertion
+itself (`all(row["capture"] is None ...)`) was already correct and unchanged.
+
+### 4. `remediation-tasks.md` task 2.1 — inverted ordering labels
+
+Added a `**Correction (verify-report-batch2a.md, SUGGESTION 5)**` note in place, following the same
+convention tasks 1.2/1.4 already use for their own wrong assumptions: task 2.1's two bullets label
+orderings A and B backwards relative to `verify-report-2.md`'s own Part 1.2 table. Left the original
+text visible rather than silently rewritten. Also added task **2.4b** documenting this closure commit.
+
+## Mutation testing (this closure run)
+
+Applied in the real package root, confirmed via `uv run python -c "import feeder_station...; print(m.__file__)"`
+resolving to `src/`, not a worktree. Each reverted, `git status --porcelain` confirmed empty after every one.
+
+```
+A1: Registry.captured() -- hardcode TrapState.FIRED (re-hardcode the live path)
+    4 failed, 738 passed
+    FAILED test_store.py::test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_fired
+    FAILED test_cli.py::...for_every_captured_state_after[0-idle]
+    FAILED test_cli.py::...for_every_captured_state_after[1-armed]
+    FAILED test_cli.py::...for_every_captured_state_after[3-fault]
+    KILLED
+
+A2: _rehydrate_capture -- hardcode TrapState.FIRED (re-hardcode the rehydrated path)
+    Same 4 failures as A1.
+    KILLED
+
+A3: winner = max(facts, key=lambda fact: fact.seq) -> key=lambda fact: fact.at
+    742 passed (0 failed)
+    SURVIVED -- explained above: fact.at IS received_epoch, always monotonic with seq
+    in this code's current shape, so this specific swap changes nothing observable.
+    Matches WARNING A's own finding for this exact mutation.
+
+Demo (supplementary, not one of the three named mutations): order by node_epoch
+when present, added as scaffolding, reverted after
+    1 failed, 741 passed
+    FAILED test_store.py::test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_older_clock
+    KILLED -- proves the new WARNING A test has real discriminating power on the
+    axis that actually matters (node clock vs arrival), even though A3 does not.
+```
+
+## Diff size — over budget, flagged rather than cut
+
+`git diff --stat 0fa597d`:
+
+```
+ openspec/changes/field-station-p4/remediation-tasks.md |  22 +
+ src/feeder_station/adapters/ingest.py                  |  23 ++-
+ src/feeder_station/adapters/store.py                   |  14 ++
+ src/feeder_station/domain/traps.py                     |  28 ++--
+ tests/adapters/test_ingest.py                          |   4 +-
+ tests/adapters/test_store.py                            |  83 ++++-
+ tests/domain/test_traps.py                              |   2 +-
+ tests/test_app.py                                        |  16 +-
+ tests/test_cli.py                                        |  68 ++++-
+ 9 files changed, 238 insertions(+), 22 deletions(-)
+```
+
+**260 changed lines against a 200-line budget (30% over).** Trimmed once already from an initial 311
+(cut verbose docstrings/comments while keeping every citation). Composition: the two new/extended tests
+in `tests/adapters/test_store.py` and `tests/test_cli.py` (~150 lines) are the bulk, required by the
+brief's own instruction to parametrize over four `state_after` values through real wire bytes and a
+real boot, plus a from-scratch regression test for a previously-untested ordering axis. Not trimmed
+further: doing so would have meant dropping a `state_after` case below the requested minimum (0, 1, 3
+in addition to 2) or cutting the citation trail the project's own convention requires. Flagged here,
+per this batch's own precedent (its first run went 610 vs a 350-line target and flagged rather than cut),
+rather than pressed through silently.
+
+## Status
+
+6/6 items in this closure run complete: CRITICAL A (task 2.4b), WARNING A (ordering key pinned),
+WARNING 7 confirmed closed on both live and rehydrated paths, WARNING D (stale test comment corrected),
+and `remediation-tasks.md` task 2.1's inverted labels corrected in place. 742/742 tests pass
+(737 baseline + 5 new: 4 parametrized `state_after` cases, 1 WARNING A pinning test).
+`uv run ruff check .` exit 0; `uv run ruff format --check .` exit 1, same 6 baseline files, zero new
+drift; `uv run mypy src` exit 0. CRITICAL 6, WARNING K(a)/K(b), WARNING C (tasks 2.5-2.7, 2.9, 2.10) —
+Batch 2b — and CRITICAL 3/4/5/I — Batches 3-5 — remain untouched, as scoped.

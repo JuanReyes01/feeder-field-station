@@ -184,6 +184,15 @@ S4 discipline ("displayed state MUST always be whatever its own most recent repo
     covered, not just the four the report happened to print)
   Parametrize one test over all five cases — this is what makes it a property test rather than five
   copies of "this example passes."
+  **Correction (verify-report-batch2a.md, SUGGESTION 5): the two bullets above label the orderings
+  backwards relative to `verify-report-2.md`'s own Part 1.2 table.** That report's ordering A is
+  *capture-old/heartbeat-new* (`AGREE`, already passing) and its divergent row is *heartbeat-old/
+  capture-new* — the reverse of what this task's text says. Confirmed three ways: the report's table is
+  a direct measurement; `verify-report-2.md` CRITICAL 1's own prose table lists "HB 6h old, CAPTURED
+  2 min ago" among the *broken* rows; and the pre-existing `test_an_older_capture_does_not_regress_a_
+  newer_heartbeats_state` is capture-old/heartbeat-new. Batch 2a's implementation trusted the report's
+  table (right) over this task text (wrong) and flagged rather than silently edited it — left
+  uncorrected in place, as 1.2/1.4 do for their own wrong assumptions.
 - [x] 2.2 GREEN — `src/feeder_station/domain/traps.py`: add a rehydration-only `Registry` method that
   sets `state`/`last_seen` alone from a single winning fact (mirrors `restore_capture`'s existing
   "never touch the other one's fields" discipline) — this is the counterpart `restore_capture` already
@@ -210,6 +219,19 @@ S4 discipline ("displayed state MUST always be whatever its own most recent repo
   ordering B in the same file so it cannot regress silently again. Do not simply flip the assertion
   back to `FIRED` — that repeats the exact mistake the report diagnosed (validating one example
   instead of the rule). State explicitly, in the commit, which of (a)/(b) was chosen and why.
+
+- [x] 2.4b **CRITICAL A closure** (`verify-report-batch2a.md`) — fifth commit in this same stack, not
+  a new batch. 2.1-2.4/2.8 closed CRITICAL 1 on the *ordering* axis but left a new divergence on the
+  *report-content* axis: `_rehydrate_capture` (rehydrated) read `state_after`, while
+  `Registry.captured()` (live) still hardcoded `FIRED`. All five 2.1 logs used `state_after=2`, the one
+  value where the two answers coincide, so nothing caught it. Fix: `Registry.captured()` takes a
+  `state` argument (mirrors `heartbeat()`), `_apply_to_registry`'s CAPTURED branch decodes
+  `state_after` and passes it through. Also WARNING 7's live-side closure (`state_after` was "decoded,
+  stored, and then discarded" — now read on both paths). New RED test: `tests/test_cli.py::
+  test_rehydrated_registry_matches_the_live_registry_for_every_captured_state_after`, parametrized over
+  `state_after` 0/1/2/3, real wire bytes through `frames.encode` → `frames.decode` → `events.interpret`.
+  `tests/adapters/test_store.py::test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_
+  fired` extended to assert the live path too, not only the rehydrated one it previously pinned alone.
 
 ### CRITICAL 6 — roster
 
