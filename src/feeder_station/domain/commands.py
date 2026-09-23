@@ -29,9 +29,27 @@ from enum import Enum
 # design.md section 4 sets this shape ("sleep 1, 2, 4, 8, 16, 30... seconds
 # capped at 30") for the serial gateway's own reconnect loop
 # (adapters/serial_gateway.py::BACKOFF_SCHEDULE_S). A pending command's
-# resend follows the identical capped shape -- this is its own copy, not an
-# import of that adapter: domain/ never imports adapters/ (DD1).
-RESEND_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
+# resend used to copy that same 30 s cap verbatim -- this is its own copy,
+# not an import of that adapter: domain/ never imports adapters/ (DD1) --
+# but a command's own confirmation is a different fact than a reconnect's:
+# it can only ever be cleared by the trap's own next HEARTBEAT (DD15), so
+# capping the resend below the trap's own heartbeat cadence (S11's default,
+# `config.DEFAULT_HEARTBEAT_INTERVAL`, 300 s) cannot buy a faster
+# confirmation -- only more unconfirmable retransmits, each one competing
+# with GET_BACKLOG and TIME_SYNC for the same shared airtime budget
+# (CRITICAL 3, sdd-verify field-station-p4). Raised toward that cadence.
+RESEND_BACKOFF_S: tuple[float, ...] = (
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    16.0,
+    32.0,
+    64.0,
+    128.0,
+    256.0,
+    300.0,
+)
 
 
 class CommandKind(str, Enum):

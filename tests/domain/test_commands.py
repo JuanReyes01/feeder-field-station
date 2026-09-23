@@ -8,7 +8,12 @@ to hold a `Command` on a `Trap`; the reverse import would be a cycle).
 
 from datetime import UTC, datetime, timedelta
 
-from feeder_station.domain.commands import Command, CommandKind, ReportedState
+from feeder_station.domain.commands import (
+    RESEND_BACKOFF_S,
+    Command,
+    CommandKind,
+    ReportedState,
+)
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 
@@ -63,3 +68,24 @@ def test_due_for_resend_follows_the_capped_backoff_schedule() -> None:
     assert command.due_for_resend(NOW + timedelta(seconds=1.0)) is False
     assert command.due_for_resend(NOW + timedelta(seconds=2.9)) is False
     assert command.due_for_resend(NOW + timedelta(seconds=3.0)) is True  # 2nd backoff step
+
+
+def test_resend_backoff_is_capped_at_the_default_heartbeat_interval_not_30s() -> None:
+    """CRITICAL 3 (sdd-verify field-station-p4): a command can only ever be
+    confirmed by the trap's own next HEARTBEAT (DD15) -- capping the resend
+    backoff at 30 s below the default 300 s heartbeat cadence bought
+    nothing but unconfirmable retransmits, each one competing with
+    GET_BACKLOG and TIME_SYNC for the same shared airtime budget
+    (CRITICAL 3). The cap is now the default heartbeat interval itself
+    (`config.DEFAULT_HEARTBEAT_INTERVAL`, 300 s) -- this is a plain value
+    test, not property-shaped, since the cap genuinely is a constant.
+    """
+    assert RESEND_BACKOFF_S[-1] == 300.0
+    assert RESEND_BACKOFF_S[-1] > 30.0
+
+    command = Command(kind=CommandKind.ARM, attempts=1, last_sent_at=NOW)
+    for _ in range(20):  # far past the schedule's own length
+        command = Command(kind=CommandKind.ARM, attempts=command.attempts + 1, last_sent_at=NOW)
+
+    assert command.due_for_resend(NOW + timedelta(seconds=299.0)) is False
+    assert command.due_for_resend(NOW + timedelta(seconds=300.0)) is True
