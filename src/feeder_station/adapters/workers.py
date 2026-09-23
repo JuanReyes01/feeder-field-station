@@ -178,6 +178,7 @@ def run_scheduler_loop(
                 )
                 send_due_commands(
                     registry,
+                    store=store,
                     gateway=gateway,
                     now=now,
                     arm_duration_s=config.arm_duration.total_seconds(),

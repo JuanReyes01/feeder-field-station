@@ -22,7 +22,12 @@ from feeder_station.app import Broadcaster, create_app
 from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.clock_trust import ClockTrust
-from feeder_station.domain.events import StationEvent
+from feeder_station.domain.events import (
+    OPERATOR_ARM,
+    OPERATOR_DISARM,
+    OPERATOR_SET_TARGETS,
+    StationEvent,
+)
 from feeder_station.domain.frames import Frame
 from feeder_station.domain.frames import encode as encode_frame
 from feeder_station.domain.serial_framing import DELIMITER, cobs_decode, cobs_encode
@@ -587,3 +592,125 @@ def test_export_route_without_a_store_reports_unavailable_not_a_crash() -> None:
     c, _ = client()
     response = c.post("/api/export", json={"dest_root": "/tmp/wherever"})
     assert response.status_code == 503
+
+
+# --- Slice 13: operator-actions-are-real ------------------------------------
+
+# --- 13.1/13.2: acknowledging MUST be a store write, not an in-memory flag -
+
+
+def test_acknowledging_a_capture_survives_a_restart_through_the_route(tmp_path: Path) -> None:
+    """event-store/spec.md, "Capture persists until acknowledged": today's
+    `acknowledge()` route only ever clears `Trap.capture` in memory --
+    nothing writes an `OPERATOR_CAPTURE_ACKNOWLEDGED` row, so a power cut
+    right after this POST resurrects the capture on the next boot and sends
+    somebody back out to a trap already seen to. Proven through the real
+    HTTP route -- not a hand-called `Store.append` -- and a genuine
+    close/reopen/rehydrate of the database, the same discipline
+    `test_unacknowledged_capture_is_present_after_a_simulated_restart`
+    already uses for the un-acknowledged half of this same requirement.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    capture_event = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.CAPTURED,
+        msg_id=1,
+        node_epoch=None,
+        tag=TAG,
+        fields={"state_after": 2},
+        payload=b"",
+    )
+    store.append(capture_event, received_epoch=1000.0, clock_trust="unset")
+
+    registry = Registry(silence_after=timedelta(minutes=15))
+    store.rehydrate(registry)
+    assert registry.trap(7).capture is not None  # sanity: the fixture seeds a real capture
+
+    c = TestClient(create_app(registry=registry, store=store))
+    response = c.post("/api/traps/7/acknowledge")
+    assert response.status_code == 200
+    assert c.get("/api/traps").json()[0]["capture"] is None  # cleared in memory too
+
+    store.close()
+
+    reopened = Store(db_path)
+    fresh_registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(fresh_registry)
+    reopened.close()
+
+    # No trap is even created by rehydration here (neither a heartbeat nor
+    # an unacknowledged capture exists for node 7 anymore) -- which is
+    # itself the proof: querying through the real route shows nothing left
+    # to attend to.
+    rows = TestClient(create_app(fresh_registry)).get("/api/traps").json()
+    assert all(row["capture"] is None for row in rows)
+
+
+# --- 13.3/13.4: ARM/DISARM are recorded, not only applied in memory --------
+
+
+def test_arm_and_disarm_are_recorded_as_operator_events(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    c = TestClient(create_app(store=store))
+
+    assert c.post("/api/traps/7/arm").status_code == 200
+    assert c.post("/api/traps/7/disarm").status_code == 200
+
+    armed = store.latest(7, OPERATOR_ARM)
+    disarmed = store.latest(7, OPERATOR_DISARM)
+    assert armed is not None
+    assert disarmed is not None
+    assert armed.source == "operator"
+    assert disarmed.source == "operator"
+
+
+def test_operator_routes_still_work_with_no_store_configured() -> None:
+    """Backward compatibility: every route-level test above this one calls
+    `create_app` with no `store` at all -- an operator action must stay
+    2xx and in-memory-only, the same degraded-but-honest shape `/api/export`
+    already reports with a 503 rather than a crash.
+    """
+    c, _ = client()
+    assert c.post("/api/traps/7/arm").status_code == 200
+    assert c.post("/api/traps/7/disarm").status_code == 200
+    assert c.post("/api/traps/7/acknowledge").status_code == 200
+
+
+# --- 13.5/13.6: PUT /targets persists the exact bytes, not just the version
+
+
+def test_the_submitted_tags_are_stored_not_just_the_version(tmp_path: Path) -> None:
+    """trap-commands/spec.md's target-list requirement is only honest once
+    the bytes an operator actually typed are durable -- before this slice,
+    the route validated them, bumped `targets_version`, and threw them away.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    c = TestClient(create_app(store=store))
+
+    response = c.put("/api/traps/5/targets", json={"tags": ["0384199C87EC06", "AABBCCDDEE0011"]})
+    assert response.status_code == 200
+    version = response.json()["desired_targets_version"]
+
+    store.close()
+    reopened = Store(db_path)
+    row = reopened.latest(5, OPERATOR_SET_TARGETS)
+    reopened.close()
+
+    assert row is not None
+    assert row.fields["targets_version"] == version
+    assert row.fields["tags"] == ["0384199c87ec06", "aabbccddee0011"]
+
+
+# --- 13.11/13.12: the page shows what a trap is actually hunting -----------
+
+
+def test_the_ui_shows_the_tags_a_trap_is_actually_hunting() -> None:
+    c, _ = client()
+    response = c.put("/api/traps/5/targets", json={"tags": ["0384199C87EC06", "AABBCCDDEE0011"]})
+    assert response.status_code == 200
+
+    row = c.get("/api/traps").json()[0]
+    assert row["targets"] == ["0384199C87EC06", "AABBCCDDEE0011"]

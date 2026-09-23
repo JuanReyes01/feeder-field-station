@@ -13,6 +13,7 @@ afterwards sees it, whether they were watching at the time or not.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -44,6 +45,15 @@ class Trap:
     last_seen: datetime | None = None
     pending_command: Command | None = None
     capture: Capture | None = None
+    # S2/13.11-13.12: the tag bytes an operator last submitted for this
+    # trap, independent of whether that `SET_TARGETS` is still pending or
+    # already confirmed -- "what a trap is actually hunting" per this
+    # slice's own task list, not only "what is not yet delivered". Set by
+    # `command_set_targets`; never cleared by a heartbeat, unlike
+    # `pending_command` (S4: reported state, never assumed, does not apply
+    # here -- this is what the *station* is asking for, not what a trap
+    # has reported).
+    desired_tags: tuple[bytes, ...] | None = None
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
         if self.last_seen is None:
@@ -102,10 +112,22 @@ class Registry:
     def command_disarm(self, node_id: int, at: datetime) -> None:
         self._set_pending(node_id, Command(kind=CommandKind.DISARM))
 
-    def command_set_targets(self, node_id: int, targets_version: int, at: datetime) -> None:
+    def command_set_targets(
+        self,
+        node_id: int,
+        targets_version: int,
+        at: datetime,
+        tags: Sequence[bytes] = (),
+    ) -> None:
+        """``tags`` defaults to empty for backward compatibility with
+        callers that only ever exercised the version-reconciliation half of
+        this model (slice 8/9's own tests) -- ``app.py``'s route (slice 13)
+        is the one real caller that has actual bytes to pass.
+        """
         self._set_pending(
             node_id, Command(kind=CommandKind.SET_TARGETS, targets_version=targets_version)
         )
+        self._traps[node_id].desired_tags = tuple(tags)
 
     def _set_pending(self, node_id: int, command: Command) -> None:
         """Shared by every `command_*` method: create the trap on first
@@ -166,6 +188,14 @@ class Registry:
                         if trap.pending_command is not None
                         and trap.pending_command.kind is CommandKind.SET_TARGETS
                         else None
+                    ),
+                    # 13.11/13.12: what the station is asking this trap to
+                    # hunt, not only whether an edit is still pending --
+                    # uppercase to match `capture.tag`'s own hex rendering.
+                    "targets": (
+                        [tag.hex().upper() for tag in trap.desired_tags]
+                        if trap.desired_tags
+                        else []
                     ),
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
                     "capture": (

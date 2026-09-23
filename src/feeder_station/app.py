@@ -12,7 +12,7 @@ import asyncio
 import json
 import re
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +28,13 @@ from feeder_station.adapters.serial_gateway import SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.adapters.workers import WorkerStatus, start_workers
 from feeder_station.config import StationConfig
+from feeder_station.domain.events import (
+    OPERATOR_ARM,
+    OPERATOR_CAPTURE_ACKNOWLEDGED,
+    OPERATOR_DISARM,
+    OPERATOR_SET_TARGETS,
+    StationEvent,
+)
 from feeder_station.domain.payloads import TAG_BYTES
 from feeder_station.domain.traps import Registry
 
@@ -136,6 +143,49 @@ class Broadcaster:
             # blocked on: the state stays correct in the next page load.
             with suppress(asyncio.QueueFull):
                 queue.put_nowait(payload)
+
+
+def _record_operator_event(
+    store: Store | None,
+    clock: Clock,
+    *,
+    node_id: int,
+    msg_type: int,
+    fields: Mapping[str, object] | None = None,
+) -> None:
+    """The durable half of every operator action (event-store spec.md,
+    "Capture persists until acknowledged": acknowledgement **MUST be a
+    store write, not merely an in-memory flag** -- the same discipline
+    this slice applies to arm, disarm and edit-targets too, not only
+    acknowledge).
+
+    Called before the registry changes and before the SSE publish -- the
+    same S9 ordering `adapters/ingest.py` holds for an inbound frame
+    (decode -> write+fsync -> ACK -> registry -> publish), mirrored for the
+    outbound direction: a route must never announce "done" over SSE for
+    something not yet durable.
+
+    A no-op when this station has no store configured -- the identical
+    degraded-but-honest shape `/api/export` already reports with a 503
+    rather than a crash. Every route calling this stays 2xx either way: a
+    `--no-gateway`, store-less station (or any pre-slice-13 test's bare
+    `create_app()`) simply cannot promise a durability it has nowhere to
+    put, and an operator working the interface in that mode still needs
+    arm/disarm/acknowledge/edit-targets to work in memory.
+    """
+    if store is None:
+        return
+    event = StationEvent(
+        source="operator",
+        node_id=node_id,
+        msg_type=msg_type,
+        msg_id=None,
+        node_epoch=None,
+        tag=None,
+        fields=fields or {},
+        payload=None,
+    )
+    store.append(event, received_epoch=clock.now().timestamp(), clock_trust=clock.trust().value)
 
 
 def _worker_health(thread: threading.Thread | None, status: WorkerStatus | None) -> dict[str, Any]:
@@ -254,6 +304,9 @@ def create_app(
     @app.post("/api/traps/{node_id}/arm")
     def arm(node_id: int) -> dict[str, Any]:
         with app.state.registry_lock:
+            _record_operator_event(
+                app.state.store, app.state.clock, node_id=node_id, msg_type=OPERATOR_ARM
+            )
             app.state.registry.command_arm(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "pending_command": "arm"}
@@ -261,13 +314,25 @@ def create_app(
     @app.post("/api/traps/{node_id}/disarm")
     def disarm(node_id: int) -> dict[str, Any]:
         with app.state.registry_lock:
+            _record_operator_event(
+                app.state.store, app.state.clock, node_id=node_id, msg_type=OPERATOR_DISARM
+            )
             app.state.registry.command_disarm(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "pending_command": "disarm"}
 
     @app.post("/api/traps/{node_id}/acknowledge")
     def acknowledge(node_id: int) -> dict[str, Any]:
+        # event-store spec.md, "Capture persists until acknowledged":
+        # acknowledgement MUST be a store write, not merely an in-memory
+        # flag -- written before the registry changes (13.1/13.2).
         with app.state.registry_lock:
+            _record_operator_event(
+                app.state.store,
+                app.state.clock,
+                node_id=node_id,
+                msg_type=OPERATOR_CAPTURE_ACKNOWLEDGED,
+            )
             app.state.registry.acknowledge(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "acknowledged": True}
@@ -277,6 +342,10 @@ def create_app(
         # The desired version is computed from the trap's own last *reported*
         # version (S4), never an operator-supplied number -- an unknown node
         # (never yet heard from) starts at 1, same as any first command.
+        # `TargetsRequest`'s own validator already guarantees every tag is
+        # exactly `TAG_BYTES * 2` hex characters, so `bytes.fromhex` here
+        # cannot raise.
+        tags = [bytes.fromhex(tag) for tag in body.tags]
         with app.state.registry_lock:
             try:
                 current_version = app.state.registry.trap(node_id).targets_version
@@ -284,7 +353,24 @@ def create_app(
                 current_version = None
             next_version = (current_version or 0) + 1
 
-            app.state.registry.command_set_targets(node_id, targets_version=next_version, at=now())
+            # trap-commands spec.md: nothing anywhere stored what a trap is
+            # hunting before this slice -- `encode_set_targets` had no
+            # caller. The exact bytes, not only the version, are now a
+            # store row `adapters/command_sender.py` reads back to build a
+            # real frame (13.5-13.8).
+            _record_operator_event(
+                app.state.store,
+                app.state.clock,
+                node_id=node_id,
+                msg_type=OPERATOR_SET_TARGETS,
+                fields={
+                    "targets_version": next_version,
+                    "tags": [tag.hex() for tag in tags],
+                },
+            )
+            app.state.registry.command_set_targets(
+                node_id, targets_version=next_version, at=now(), tags=tags
+            )
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
             "node_id": node_id,

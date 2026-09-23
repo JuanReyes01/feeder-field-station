@@ -432,7 +432,10 @@ CI proxy: 12.3's killed-process-then-restart test; named outstanding in the veri
 
 ## Next
 
-`sdd-apply`, starting PR 1. Each PR is stacked on the previous one's merge to main.
+All 13 slices are implemented and green (`uv run pytest` → 200 passed, `ruff` clean, `mypy --strict`
+on `src/` clean). `sdd-verify`, then `sdd-archive`. The design.md section 6 rehydration gap flagged
+at the end of slice 13 above (desired-but-unconfirmed `SET_TARGETS` state is not replayed at boot) is
+the one known open item for verify to weigh.
 
 ---
 
@@ -454,23 +457,56 @@ A feature that is visibly absent gets reported. One that *looks* like it worked 
 
 Traces: S1, S2, S3, S9.
 
-- [ ] 13.1 RED: `test_acknowledging_a_capture_survives_a_restart_through_the_route` — POST the real
+- [x] 13.1 RED: `test_acknowledging_a_capture_survives_a_restart_through_the_route` — POST the real
       route, rebuild the app from the same store, the capture stays acknowledged
-- [ ] 13.2 GREEN: the acknowledge route writes to the store before it touches the registry
-- [ ] 13.3 RED: `test_arm_and_disarm_are_recorded_as_operator_events`
-- [ ] 13.4 GREEN: both routes append their operator event
-- [ ] 13.5 RED: `test_the_submitted_tags_are_stored_not_just_the_version` — PUT a list, reopen the
+- [x] 13.2 GREEN: the acknowledge route writes to the store before it touches the registry
+- [x] 13.3 RED: `test_arm_and_disarm_are_recorded_as_operator_events`
+- [x] 13.4 GREEN: both routes append their operator event
+- [x] 13.5 RED: `test_the_submitted_tags_are_stored_not_just_the_version` — PUT a list, reopen the
       store, the exact bytes are still there against that version
-- [ ] 13.6 GREEN: persist the desired tag list per node, versioned
-- [ ] 13.7 RED: `test_set_targets_frames_carry_the_stored_tags` — the sender emits real chunked
+- [x] 13.6 GREEN: persist the desired tag list per node, versioned
+- [x] 13.7 RED: `test_set_targets_frames_carry_the_stored_tags` — the sender emits real chunked
       frames from stored content through `encode_set_targets`, not an empty list
-- [ ] 13.8 GREEN: the command sender reads the stored list and transmits it
-- [ ] 13.9 RED: `test_a_list_longer_than_one_frame_is_delivered_whole` — 40 tags, both frames, and
+- [x] 13.8 GREEN: the command sender reads the stored list and transmits it
+- [x] 13.9 RED: `test_a_list_longer_than_one_frame_is_delivered_whole` — 40 tags, both frames, and
       delivered only once the node reports the version
-- [ ] 13.10 GREEN: drive the multi-frame path from storage
-- [ ] 13.11 RED: `test_the_ui_shows_the_tags_a_trap_is_actually_hunting`
-- [ ] 13.12 GREEN: expose the stored list in `view()` and render it
+- [x] 13.10 GREEN: drive the multi-frame path from storage
+- [x] 13.11 RED: `test_the_ui_shows_the_tags_a_trap_is_actually_hunting`
+- [x] 13.12 GREEN: expose the stored list in `view()` and render it
 
 Done: an operator action survives a restart and reaches a trap; the page shows what the trap holds.
-PR boundary: store schema, the four routes, `Command`/sender, the UI read path.
-Hardware gate: real delivery needs the firmware's `station_link`, which does not exist.
+PR boundary: store schema, the four routes, `Command`/sender, the UI read path. No schema migration
+was actually needed — `adapters/store.py::Store.append`/`latest` were already generic enough to carry
+`OPERATOR_ARM`/`OPERATOR_DISARM`/`OPERATOR_SET_TARGETS` rows with no new columns; the tag list lives
+in `fields` as JSON (hex strings), the same "bytes and the reading of them" shape (DD4) every other
+event already uses.
+Hardware gate: real delivery needs the firmware's `station_link`, which does not exist — named
+plainly in `adapters/command_sender.py`'s own module docstring, not only here.
+
+Also touched, necessarily, beyond the PR boundary line above: `domain/traps.py` (`Trap.desired_tags`,
+`Registry.command_set_targets(..., tags=...)`, a `"targets"` key in `view()`) and
+`adapters/workers.py` (one-line: `send_due_commands(..., store=store, ...)`, since the sender now
+needs the store to read tags back). Both are the "Command/sender" and "UI read path" halves of the
+PR boundary, not scope creep — `domain/commands.py` itself needed no change: the tag list lives on
+`Trap`, not on the pure `Command` value, so `domain/commands.py` and `domain/events.py` stay exactly
+as slice 8/4 left them.
+
+Full run: `uv run pytest` → 200 passed (192 baseline + 8 new: 4 in `tests/test_app.py`, 4 net in
+`tests/adapters/test_command_sender.py` — 1 obsolete pre-slice-13 test removed, 5 added). `uv run
+ruff check .` → clean. `uv run ruff format --check .` → clean on every file touched this slice; the
+same 5 pre-existing-drift files from slice 12 (`design.md`, `payloads.py`, `test_ingest.py`,
+`test_serial_gateway.py`, `test_events.py`, `test_traps.py`) remain untouched, confirmed via `git
+diff --stat` (empty). `uv run mypy src/` → clean, 22 files. `uv build` → succeeds.
+
+Deviation flagged, not silently resolved: the "UI shows what a trap is actually hunting" (13.11/13.12)
+needed `Trap` to hold the desired tag list in memory *independent of* `pending_command` (which clears
+once delivery is confirmed) — design.md section 6's own rehydration prose names a third replay step,
+"latest operator/arm|disarm|set_targets → the desired state", that `Store.rehydrate()` still does not
+implement (flagged already in this slice's own `_rehydrate_capture`/`_rehydrate_heartbeat` docstring
+history, unchanged since slice 4). Concretely: `Trap.desired_tags` and a re-armed `pending_command`
+for a not-yet-confirmed `SET_TARGETS` are NOT rebuilt after a real process restart today — only
+13.1/13.2's acknowledge-survives-restart path was in this slice's explicit task list, and that path
+was already carried by `_rehydrate_capture`, written anticipating this slice back in slice 4. A
+restart between an operator's edit and the trap confirming it currently loses that pending edit
+in-memory (the store row survives; nothing replays it into the registry at boot). Out of scope for
+this batch per the literal 13.1-13.12 task list; flagged here for `sdd-verify` and any future slice.
