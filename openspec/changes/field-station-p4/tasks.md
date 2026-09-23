@@ -334,8 +334,9 @@ them up, so the whole change could finish green with a station that serves HTTP 
 a trap. These tasks close that, and they come first in this slice because the systemd unit is
 worthless without them.
 
-**THREE drivers are missing, not two.** Slice 7 left `run_rotation_round()` and slice 8 left
-`due_for_resend()`/`sent()` as tested domain logic with nothing calling them, and the gateway reader
+**FOUR drivers are missing.** Slice 7 left `run_rotation_round()`, slice 8 left
+`due_for_resend()`/`sent()`, slice 9 left `attempt_time_sync()` — all tested logic with nothing
+calling it — and the gateway reader
 has never been started either. All three belong here.
 
 - [ ] 12.0a RED: `test_the_app_starts_its_background_workers` — with a fake port and a fake clock,
