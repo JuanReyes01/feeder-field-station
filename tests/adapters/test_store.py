@@ -21,7 +21,7 @@ import pytest
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.domain import payloads
-from feeder_station.domain.events import OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
+from feeder_station.domain.events import OPERATOR_ARM, OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
 from feeder_station.domain.traps import Registry, TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -586,6 +586,51 @@ def test_a_skipped_row_is_logged_at_error_with_the_node_id_and_a_traceback(
             payload=b"",
         ),
         received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    with caplog.at_level(logging.DEBUG, logger="feeder_station.adapters.store"):
+        store.rehydrate(registry)
+
+    skip_records = [r for r in caplog.records if "skipping an unreadable row" in r.getMessage()]
+    assert len(skip_records) == 1
+    record = skip_records[0]
+    assert record.levelno == logging.ERROR  # not downgraded to DEBUG
+    assert "7" in record.getMessage()  # the node id -- not dropped
+    assert record.exc_info is not None  # the traceback -- not dropped
+
+
+def test_a_skipped_desired_command_row_is_logged_at_error_with_the_node_id_and_a_traceback(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """WARNING 3 (verify-report-batch2.md): the test above only ever
+    drives the state-race loop's own skip log (`store.py`, inside
+    `for state_step in (...)`) -- `_rehydrate_desired_command`'s own skip
+    log (a separate `try/except` around it, later in `rehydrate()`) emits
+    the exact same message text, so a fixture that never corrupts an
+    operator-sourced row never proves that second site is pinned.
+    Measured: downgrading only that second site to `logger.debug` left the
+    whole 748-test suite green. Corrupt an `OPERATOR_ARM` row's
+    `received_epoch` the same way CRITICAL A's own `OverflowError` fixture
+    does, with no heartbeat to satisfy the command, so
+    `_rehydrate_desired_command` is the only step that raises for this
+    node.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=7,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1e20,  # unreadable: OverflowError inside _epoch_to_datetime
         clock_trust="unset",
     )
     registry = Registry(silence_after=timedelta(minutes=15))

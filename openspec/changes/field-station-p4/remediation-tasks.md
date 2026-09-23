@@ -322,6 +322,14 @@ reports when it gives up on something.
   **Batch 2b**: `caplog` assertions added in `tests/adapters/test_store.py` (level, node id, `exc_info`)
   and `tests/adapters/test_ingest.py` (level, the underlying exception's own text). Both M7/M9-shaped
   mutations re-run by hand and killed.
+  **Correction (verify-report-batch2.md, WARNING 3): "per log site" closed 2 of 3.** `rehydrate()` has
+  *two* skip-log call sites with identical message text (the state-race loop, and
+  `_rehydrate_desired_command`'s own `try/except`); the Batch 2b fixture only ever drove the first, so
+  a mutation downgrading only the second survived. `ingest.py`'s drop log catches three exception
+  types (`FrameError`, `PayloadError`, `UninterpretableFrame`) in one `except`; the fixture only ever
+  drove `FrameError`, so a mutation special-casing it and downgrading the other two survived. Closed
+  in Batch 2c: one more `caplog` test per gap (a corrupted `OPERATOR_ARM` row for the second store.py
+  site; a too-short HEARTBEAT payload, raising `PayloadError`, for the ingest.py site).
 
 **Verification (after Batch 2, before Batch 3 starts)**: `uv run pytest`, `uv run ruff check .`,
 `uv run mypy src`. Re-run the report's own four-ordering repro plus the never-heard-node repro by

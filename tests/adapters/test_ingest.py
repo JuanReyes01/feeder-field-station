@@ -280,3 +280,43 @@ def test_a_dropped_frame_is_logged_at_warning_with_the_exception(
     assert record.levelno == logging.WARNING  # not downgraded to DEBUG
     # the exception itself, not dropped -- FrameError's own message for 3 bytes
     assert "shorter than" in record.getMessage()
+
+
+def test_a_payload_error_drop_is_also_logged_at_warning_with_the_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WARNING 3 (verify-report-batch2.md): the test above only ever
+    drives a `FrameError` (a 3-byte frame, too short for a header).
+    `ingest_frame` catches `FrameError`, `PayloadError` and
+    `UninterpretableFrame` in the same `except` and logs them identically
+    -- but nothing before this test ever drove the other two branches, so
+    a mutation that special-cases `FrameError` at WARNING and drops
+    everything else to `logger.debug` still passed the whole suite. A
+    syntactically valid frame envelope carrying a HEARTBEAT payload short
+    of the 16 bytes `decode_heartbeat` requires passes `frames.decode`
+    (the envelope itself is fine) and raises `PayloadError` inside
+    `interpret()`.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    short_heartbeat = encode(
+        Frame(msg_type=payloads.HEARTBEAT, node_id=3, msg_id=1, payload=bytes(5))
+    )
+
+    with caplog.at_level(logging.WARNING, logger="feeder_station.adapters.ingest"):
+        ingest_frame(
+            short_heartbeat,
+            store=_StubStore(),
+            ack_port=_SpyAckPort(),
+            registry=registry,
+            publish=lambda event: None,
+            received_epoch=RECEIVED_EPOCH,
+            clock_trust="rtc",
+        )
+
+    drop_records = [r for r in caplog.records if "dropped an undecodable frame" in r.getMessage()]
+    assert len(drop_records) == 1
+    record = drop_records[0]
+    assert record.levelno == logging.WARNING  # not downgraded to DEBUG for this exception type
+    # PayloadError's own message, not dropped -- "HEARTBEAT payload of 5 bytes, expected exactly 16"
+    assert "HEARTBEAT" in record.getMessage()
+    assert "5 bytes" in record.getMessage()
