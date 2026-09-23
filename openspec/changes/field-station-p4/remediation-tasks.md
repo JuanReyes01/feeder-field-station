@@ -243,15 +243,18 @@ present in `node_cursor` (which is populated exclusively by node-sourced events)
 re-sending anything"); `trap-commands/spec.md` "Target-list delivery with version reconciliation"
 (resend continues until confirmed — including across a restart); S1, S2.
 
-- [ ] 2.5 RED — new test (suggested home: `tests/test_cli.py`, alongside 2.1's boot harness): boot 1,
+- [x] 2.5 RED — new test (suggested home: `tests/test_cli.py`, alongside 2.1's boot harness): boot 1,
   `POST /arm` (or `PUT /targets`) a node id the station has never received a frame from, confirm it
   is pending via `/api/traps`, restart through `build_app`, assert the node and its pending command
   are still present in boot 2's `/api/traps` — not absent, as the report measured.
-- [ ] 2.6 GREEN — `src/feeder_station/adapters/store.py::_known_node_ids`: derive the roster from
+- [x] 2.6 GREEN — `src/feeder_station/adapters/store.py::_known_node_ids`: derive the roster from
   `SELECT DISTINCT node_id FROM event` (simplest correct fix per the report), or union `node_cursor`
   with the distinct `node_id`s of operator-sourced rows if a narrower query is preferred. Either way,
   `rehydrate()`'s loop must visit a commanded-but-never-heard node.
-- [ ] 2.7 GREEN — `openspec/changes/field-station-p4/design.md`, line ~288: amend "For each `node_id`
+  **Batch 2b**: took the union option (narrower), specifically so
+  `test_boot_survives_a_broken_node_roster_query` (CRITICAL A) keeps proving the roster query itself
+  sits inside `rehydrate()`'s guard without modification.
+- [x] 2.7 GREEN — `openspec/changes/field-station-p4/design.md`, line ~288: amend "For each `node_id`
   in `node_cursor`" to match 2.6's actual roster derivation. This is the one design.md edit that is
   **in scope for this batch**, not deferred to Appendix A — the report ties it directly to CRITICAL 6
   ("design.md §6 step 3 as written applies to... `node_cursor`, so the design shares the defect"). Do
@@ -276,18 +279,28 @@ reports when it gives up on something.
   make "unknown" representable: a state the interface can render as unknown beats a default that
   renders as safe. RED test first, driving a corrupt heartbeat row for a node that also has a good
   capture row, asserting the view never shows `idle` for a node whose real last report was `FAULT`.
-- [ ] 2.9 **WARNING K(b) — one bad row and a lost registry must not look identical.** `/health`
+- [x] 2.9 **WARNING K(b) — one bad row and a lost registry must not look identical.** `/health`
   reporting `rehydration_errors: 1` is byte-for-byte the same for "1 unreadable row out of 20 healthy
   nodes" (`/api/traps` returns 20) and "the roster query itself died, registry empty" (`/api/traps`
   returns 0), `ok: true` in both. The second case used to crash loudly; Batch 1 made it silent, which
   is the same trade WARNING C caught on the ingest path. Distinguish them — a failure that loses the
   whole registry is not an error count, it is a degraded boot, and `/health` has to say so.
-- [ ] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
+  **Batch 2b**: `Store.roster_lost` (own field, reset per rehydration pass, set only in the roster-query
+  except branch), surfaced as `/health.roster_lost` and folded into `ok` — the same "fold connected
+  into ok" precedent `link_ok` already sets. **Also folded in WARNING C** (verify-report-batch2a.md,
+  WARNING J's own residual): a node's *newest* state row unreadable, an older readable one wins the
+  race and displayed as current with nothing saying so. `Trap.state_may_be_stale`, set by `rehydrate()`
+  when the winning fact had an unreadable sibling, surfaced in `/api/traps`, cleared by the node's next
+  live report.
+- [x] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
   downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
   the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the
   `except Exception` mitigation is pinned five ways; the *logged with its node id* half is pinned by
   nobody — and logging is the entire reason the broad catch was acceptable. Add `caplog` assertions
   for both.
+  **Batch 2b**: `caplog` assertions added in `tests/adapters/test_store.py` (level, node id, `exc_info`)
+  and `tests/adapters/test_ingest.py` (level, the underlying exception's own text). Both M7/M9-shaped
+  mutations re-run by hand and killed.
 
 **Verification (after Batch 2, before Batch 3 starts)**: `uv run pytest`, `uv run ruff check .`,
 `uv run mypy src`. Re-run the report's own four-ordering repro plus the never-heard-node repro by
