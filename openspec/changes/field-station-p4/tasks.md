@@ -334,9 +334,13 @@ them up, so the whole change could finish green with a station that serves HTTP 
 a trap. These tasks close that, and they come first in this slice because the systemd unit is
 worthless without them.
 
-- [ ] 12.0a RED: `test_the_app_starts_the_gateway_and_scheduler_threads` — with a fake port and a
-      fake clock, starting the app runs a real rotation round and ingests a frame end to end
-- [ ] 12.0b GREEN: the lifespan starts both threads and stops them on shutdown; a thread that dies
+**THREE drivers are missing, not two.** Slice 7 left `run_rotation_round()` and slice 8 left
+`due_for_resend()`/`sent()` as tested domain logic with nothing calling them, and the gateway reader
+has never been started either. All three belong here.
+
+- [ ] 12.0a RED: `test_the_app_starts_its_background_workers` — with a fake port and a fake clock,
+      starting the app ingests a frame, runs a rotation round, and resends a due command, end to end
+- [ ] 12.0b GREEN: the lifespan starts them and stops them on shutdown; a thread that dies
       is reported in `/health` rather than silently leaving the station deaf
 - [ ] 12.0c RED: `test_a_dead_gateway_thread_is_visible_in_health` — kill the thread, `/health` says so
 - [ ] 12.0d GREEN: supervise both threads from the lifespan
