@@ -123,14 +123,14 @@ S7, S9 (`docs/requirements.md`).
   existed, or any future row the decode boundary did not anticipate). Assert the app **boots**,
   `/health` responds `200`, and `/health` reports a non-zero rehydration-errors count for that node —
   not a `ValueError` escaping the lifespan.
-- [ ] 1.4 GREEN — `src/feeder_station/adapters/store.py::rehydrate`: wrap each node's three replay
+- [x] 1.4 GREEN — `src/feeder_station/adapters/store.py::rehydrate`: wrap each node's three replay
   steps in a `try/except` that skips and counts an unreadable row rather than propagating, the same
   best-effort discipline `adapters/ingest.py::_apply_to_registry` already has for the live path.
   Return or store the skip count where `app.py`'s lifespan can reach it.
 - [ ] 1.5 GREEN — `src/feeder_station/app.py::health()`: add a `rehydration_errors` (or equivalent)
   field to the response, sourced from 1.4's count, following the same "surface it, don't hide it"
   convention the `link` block already sets for decode errors.
-- [ ] 1.6 REFACTOR — update `rehydrate`'s own docstring (already mid-edit per the CRITICAL-1/2
+- [x] 1.6 REFACTOR — update `rehydrate`'s own docstring (already mid-edit per the CRITICAL-1/2
   history) to describe the skip-and-count contract; do not touch `design.md` here — that line is
   fine as written and out of scope for this batch.
 

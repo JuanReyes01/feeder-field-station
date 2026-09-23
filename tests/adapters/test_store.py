@@ -303,6 +303,55 @@ def test_rehydrate_does_not_resurface_an_already_acknowledged_capture(tmp_path: 
     assert 4 not in {trap.node_id for trap in registry.traps()}
 
 
+# --- CRITICAL 2 (sdd-verify, field-station-p4): rehydrate is total ----------
+
+
+def test_rehydrate_skips_and_counts_an_unreadable_row_without_blocking_other_nodes(
+    tmp_path: Path,
+) -> None:
+    """The rule, not the example: an unreadable row must be skipped and
+    counted (not merely "not crash the whole boot") *and* it must not cost
+    any other node its own, perfectly readable state. `state=7` is written
+    directly through `Store.append`, bypassing `payloads.decode_heartbeat`'s
+    now-fixed decode boundary (task 1.2) — the row shape a pre-1.2 bit-flip,
+    or any future row the boundary did not anticipate, would still produce.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    corrupt = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.HEARTBEAT,
+        msg_id=1,
+        node_epoch=None,
+        tag=None,
+        fields={"state": 7, "battery_mv": 4000, "targets_version": 1},  # 7: no known TrapState
+        payload=b"",
+    )
+    store.append(corrupt, received_epoch=1000.0, clock_trust="unset")
+    healthy = StationEvent(
+        source="node",
+        node_id=9,
+        msg_type=payloads.HEARTBEAT,
+        msg_id=1,
+        node_epoch=None,
+        tag=None,
+        fields={"state": 1, "battery_mv": 4100, "targets_version": 1},  # 1 -> ARMED
+        payload=b"",
+    )
+    store.append(healthy, received_epoch=1001.0, clock_trust="unset")
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened.rehydrate(registry)  # must not raise
+
+    assert reopened.rehydration_errors == 1
+    assert 7 not in {trap.node_id for trap in registry.traps()}  # the unreadable row, skipped
+    assert registry.trap(9).state is TrapState.ARMED  # another node's row, unaffected
+
+
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------
 
 

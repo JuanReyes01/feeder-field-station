@@ -230,6 +230,12 @@ class Store:
         self._local = threading.local()
         self._opened_connections: list[sqlite3.Connection] = []
         self._opened_connections_lock = threading.Lock()
+        # CRITICAL 2 (sdd-verify, field-station-p4): the running count of
+        # rows `rehydrate()` could not read, reset at the start of each
+        # rehydration pass. Mirrors `SerialGateway.link_state.decode_errors`
+        # -- an attribute on the owning adapter, not a value threaded back
+        # through a return the caller might discard.
+        self.rehydration_errors = 0
         _ensure_schema(self._conn)
 
     @property
@@ -464,11 +470,44 @@ class Store:
         production caller at all before that wiring existed; every test
         that exercised it fed an already-populated registry to
         ``create_app`` by hand instead.
+
+        **Skip-and-count, never raise (CRITICAL 2, sdd-verify
+        field-station-p4).** Each of a node's three replay steps runs
+        under its own ``try``: a row this method cannot interpret —
+        ``payloads.decode_heartbeat``/``decode_captured`` already reject an
+        out-of-range ``state``/``state_after`` byte at write time (task
+        1.2), but an older row written before that check existed, or any
+        future row the check did not anticipate, can still be sitting in
+        ``station.db`` — is skipped and counted in
+        :attr:`rehydration_errors` instead of propagating out of this
+        method. The same best-effort discipline
+        ``adapters/ingest.py::_apply_to_registry`` already applies to the
+        live path: one bad row must never cost every other node its state,
+        and it must never cost the station its boot. A restart that cannot
+        read one row must still be a restart — ``event-store/spec.md``'s
+        "Registry rehydration at boot" requirement, and
+        ``station-deployment/spec.md``'s S7 ("starts by itself... a power
+        cut must not need a person"), which a rehydration-time crash loop
+        directly violates.
         """
+        self.rehydration_errors = 0
         for node_id in self._known_node_ids():
-            self._rehydrate_heartbeat(node_id, registry)
-            self._rehydrate_capture(node_id, registry)
-            self._rehydrate_desired_command(node_id, registry)
+            for step in (
+                self._rehydrate_heartbeat,
+                self._rehydrate_capture,
+                self._rehydrate_desired_command,
+            ):
+                try:
+                    step(node_id, registry)
+                except ValueError:
+                    # `ValueError` covers both `payloads.PayloadError` (a
+                    # future row this method itself decodes) and
+                    # `trap_state_from_wire`'s own raise for a
+                    # pre-existing out-of-range row — the same family
+                    # `_require_len` et al. already raise for a malformed
+                    # payload (task 1.2's decode-error type, reused here
+                    # rather than invented fresh).
+                    self.rehydration_errors += 1
 
     def _known_node_ids(self) -> list[int]:
         rows = self._conn.execute("SELECT node_id FROM node_cursor ORDER BY node_id").fetchall()
