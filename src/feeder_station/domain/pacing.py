@@ -59,7 +59,9 @@ def start(*, capacity: float, frames_per_s: float, now: float) -> TokenBucket:
     the budget is about the *sustained* rate, and the first frame after
     boot must not be penalised for the process having just started.
     """
-    return TokenBucket(capacity=capacity, frames_per_s=frames_per_s, tokens=capacity, last_refill_at=now)
+    return TokenBucket(
+        capacity=capacity, frames_per_s=frames_per_s, tokens=capacity, last_refill_at=now
+    )
 
 
 def try_consume(bucket: TokenBucket, *, now: float) -> tuple[TokenBucket, bool]:

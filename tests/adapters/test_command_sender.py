@@ -41,6 +41,39 @@ class _SpyGateway:
         return self._accept
 
 
+class _AllowAllBudget:
+    """A `TransmitBudget` double that never refuses -- every test in this
+    file except the CRITICAL 3 ones below is about command-sending
+    correctness, not the shared station-wide budget; this keeps them
+    decoupled from it, the same way `heartbeat_interval` is overridden in
+    `tests/adapters/test_workers.py` to decouple pacing tests from
+    unrelated wiring tests.
+    """
+
+    def try_send(self) -> bool:
+        return True
+
+
+class _CountingBudget:
+    """A `TransmitBudget` double that allows exactly `capacity` sends, then
+    refuses -- proves `send_due_commands` checks the budget once per trap
+    actually attempted, not once per call (CRITICAL 3, sdd-verify
+    field-station-p4): a single call sweeping ten due commands must not
+    write more than the budget allows in that one pass.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._remaining = capacity
+        self.calls = 0
+
+    def try_send(self) -> bool:
+        self.calls += 1
+        if self._remaining <= 0:
+            return False
+        self._remaining -= 1
+        return True
+
+
 @dataclass
 class _FakeRow:
     """The one shape `send_due_commands` reads off a stored row: its
@@ -93,7 +126,12 @@ def test_a_never_sent_arm_command_is_sent_and_marked() -> None:
     store = _FakeStore()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == [7]
@@ -112,7 +150,12 @@ def test_a_never_sent_arm_command_is_sent_and_marked() -> None:
     # again with the identical `now` must NOT resend (due_for_resend is
     # false until the backoff elapses).
     again = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
     assert again == []
     assert len(gateway.written) == 1
@@ -125,7 +168,12 @@ def test_a_disarm_command_is_sent_with_no_payload() -> None:
     store = _FakeStore()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == [3]
@@ -142,11 +190,23 @@ def test_a_command_not_yet_due_is_skipped() -> None:
     registry.command_arm(7, at=NOW)
     gateway = _SpyGateway()
     store = _FakeStore()
-    send_due_commands(registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400)
+    send_due_commands(
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
+    )
 
     half_a_second_later = NOW + timedelta(milliseconds=500)
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=half_a_second_later, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=half_a_second_later,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == []
@@ -160,7 +220,12 @@ def test_a_trap_with_no_pending_command_is_skipped() -> None:
     store = _FakeStore()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == []
@@ -178,7 +243,12 @@ def test_a_failed_write_does_not_advance_the_resend_backoff() -> None:
     store = _FakeStore()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == []
@@ -202,7 +272,12 @@ def test_set_targets_frames_carry_the_stored_tags() -> None:
     gateway = _SpyGateway()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == [9]
@@ -229,7 +304,12 @@ def test_set_targets_with_nothing_stored_yet_is_not_sent() -> None:
     gateway = _SpyGateway()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == []
@@ -245,7 +325,12 @@ def test_a_failed_set_targets_write_does_not_advance_the_backoff() -> None:
     gateway = _SpyGateway(accept=False)
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == []
@@ -264,7 +349,12 @@ def test_a_list_longer_than_one_frame_is_delivered_whole() -> None:
     gateway = _SpyGateway()
 
     sent_to = send_due_commands(
-        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400
+        registry,
+        store=store,
+        gateway=gateway,
+        now=NOW,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
     )
 
     assert sent_to == [9]
@@ -282,3 +372,39 @@ def test_a_list_longer_than_one_frame_is_delivered_whole() -> None:
     # Delivered from the version match alone -- the station never tracked
     # which half of the split list arrived separately.
     assert registry.trap(9).pending_command is None
+
+
+# --- CRITICAL 3 (sdd-verify field-station-p4): a shared budget bounds a
+# --- single sweep, not just how often the sweep itself is called ----------
+
+
+def test_a_shared_budget_caps_how_many_due_commands_one_sweep_sends() -> None:
+    """verify-report-2.md, CRITICAL 3: ten traps holding an unconfirmed ARM
+    measured 0.3158 frames/s -- 11.68% airtime occupancy against a ~1%
+    budget -- because `send_due_commands` had no pacing of its own beyond
+    each command's individual backoff, and a single call iterates every
+    due trap in one pass. Gating the call frequency alone (e.g. only
+    calling this function once per budget refill) would not have been
+    enough: this proves the budget is spent per trap *inside* one sweep,
+    the only granularity that actually bounds a ten-trap burst.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    for node_id in range(10):
+        registry.command_arm(node_id, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+    budget = _CountingBudget(capacity=3)
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=budget
+    )
+
+    assert len(sent_to) == 3
+    assert len(gateway.written) == 3
+    # The seven refused traps must stay pending and unattempted -- sent()
+    # never ran for them, so due_for_resend() re-offers them next sweep
+    # instead of silently losing seven of the ten ARM commands.
+    for node_id in range(10):
+        if node_id not in sent_to:
+            assert registry.trap(node_id).pending_command is not None
+            assert registry.trap(node_id).pending_command.attempts == 0  # type: ignore[union-attr]

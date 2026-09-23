@@ -90,9 +90,7 @@ def test_channel_budget_frames_per_s_defaults_to_the_messages_md_budget() -> Non
 
 
 def test_env_overrides_the_channel_budget() -> None:
-    config = StationConfig.load(
-        argv=[], env={"FEEDER_STATION_CHANNEL_BUDGET_FRAMES_PER_S": "5.0"}
-    )
+    config = StationConfig.load(argv=[], env={"FEEDER_STATION_CHANNEL_BUDGET_FRAMES_PER_S": "5.0"})
 
     assert config.channel_budget_frames_per_s == 5.0
 

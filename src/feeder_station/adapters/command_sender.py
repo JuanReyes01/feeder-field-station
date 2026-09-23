@@ -56,6 +56,20 @@ class CommandGateway(Protocol):
     def write_frame(self, raw_frame: bytes) -> bool: ...
 
 
+class TransmitBudget(Protocol):
+    """The one call this module needs from ``adapters/workers.py``'s
+    shared station-wide pacer (CRITICAL 3, sdd-verify field-station-p4).
+
+    Required, not optional -- WARNING 13's own lesson, applied here: a
+    defaultable parameter that silently changes behaviour under test (or
+    in production, for a future caller that forgets it) is the wrong
+    default. A caller with no budget object to hand it must construct one,
+    not skip the check.
+    """
+
+    def try_send(self) -> bool: ...
+
+
 class _FieldsRow(Protocol):
     """The one attribute this module needs off a stored row --
     ``adapters/store.py::StoredEvent`` satisfies this structurally, and a
@@ -155,6 +169,7 @@ def send_due_commands(
     gateway: CommandGateway,
     now: datetime,
     arm_duration_s: float,
+    budget: TransmitBudget,
 ) -> list[int]:
     """One pass over every trap with a pending command due for resend.
 
@@ -163,11 +178,21 @@ def send_due_commands(
     capped backoff ``due_for_resend()`` reads next time -- is only called
     when the write(s) to the gateway actually succeeded; a dropped write
     must not look, to the backoff schedule, like a send that happened.
+
+    **CRITICAL 3 (sdd-verify field-station-p4):** ``budget`` is checked
+    once per trap actually due, *inside* this loop -- not once for the
+    whole call -- because a single sweep can cover every trap in the
+    roster in one pass (verify-report-2.md measured ten traps, all
+    unconfirmed, driving 11.68% real airtime occupancy this way). A trap
+    refused a token stays pending, unattempted, and due again on a later
+    sweep; it is never dropped.
     """
     sent_to: list[int] = []
     for trap in registry.traps():
         command = trap.pending_command
         if command is None or not command.due_for_resend(now):
+            continue
+        if not budget.try_send():
             continue
 
         if command.kind is CommandKind.SET_TARGETS:
