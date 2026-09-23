@@ -70,6 +70,27 @@ def _require_min_len(payload: bytes, minimum: int, name: str) -> None:
         raise PayloadError(f"{name} payload of {len(payload)} bytes, expected at least {minimum}")
 
 
+# HEARTBEAT.state and CAPTURED.state_after: the 4-value enum payloads.py's
+# own field comments already document as an assumption (0-3, matching
+# TrapState's declaration order in adapters/store.py's `_WIRE_STATE_ORDER`).
+# CRITICAL 2 (sdd-verify, field-station-p4): before this, nothing validated
+# the byte here, so a single flipped bit -- COBS is framing, not a checksum,
+# per domain/serial_framing.py's own docstring -- rode all the way to the
+# store and only failed when `adapters/store.py::trap_state_from_wire` tried
+# to interpret it back out of a durably-committed row, inside the boot
+# lifespan, with nothing to catch it. Rejecting it here, at the decode
+# boundary, keeps a bad byte out of the store the same way a truncated
+# payload already never reaches it.
+_VALID_STATE_VALUES = range(4)
+
+
+def _require_valid_state(value: int, field_name: str, payload_name: str) -> None:
+    if value not in _VALID_STATE_VALUES:
+        raise PayloadError(
+            f"{payload_name} {field_name} byte {value} has no known TrapState (expected 0-3)"
+        )
+
+
 @dataclass(frozen=True)
 class Hello:
     fw_version: tuple[int, int, int]
@@ -112,8 +133,10 @@ def decode_heartbeat(payload: bytes) -> Heartbeat:
     # "Timestamps are UTC seconds since the Unix epoch, uint32".
     # targets_version, reads_today: 2 bytes LE each — assumption, as in HELLO.
     _require_len(payload, 16, "HEARTBEAT")
+    state = payload[0]
+    _require_valid_state(state, "state", "HEARTBEAT")
     return Heartbeat(
-        state=payload[0],
+        state=state,
         battery_mv=payload[1] | (payload[2] << 8),
         clock_epoch=(payload[3] | (payload[4] << 8) | (payload[5] << 16) | (payload[6] << 24)),
         clock_source=payload[7],
@@ -159,11 +182,13 @@ def decode_captured(payload: bytes) -> Captured:
     # tag[7]: pinned. epoch: 4 bytes LE uint32 — pinned (Timestamps convention).
     # state_after: 1 byte — assumption; same small enum as HEARTBEAT.state.
     _require_len(payload, 12, "CAPTURED")
+    state_after = payload[11]
+    _require_valid_state(state_after, "state_after", "CAPTURED")
     tag = payload[0:7]
     return Captured(
         tag=tag,
         epoch=(payload[7] | (payload[8] << 8) | (payload[9] << 16) | (payload[10] << 24)),
-        state_after=payload[11],
+        state_after=state_after,
     )
 
 

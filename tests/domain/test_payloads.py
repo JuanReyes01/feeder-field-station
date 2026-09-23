@@ -187,6 +187,58 @@ def test_a_fault_payload_with_zero_bytes_is_rejected() -> None:
         payloads.decode_fault(b"")
 
 
+# --- CRITICAL 2 (sdd-verify, field-station-p4): an out-of-range state byte
+# must never reach the store -- it has to be rejected at the decode boundary
+# like any other malformed payload. Parametrized over a boundary value just
+# past the valid range (4), the far boundary a single bit-flip can produce
+# (255), and a mid-range value (130) that a special case keyed on the
+# report's own example (state=7) would not catch -- the rule under test is
+# "every byte outside 0-3", not "byte 7".
+
+
+@pytest.mark.parametrize("bad_state", [4, 7, 130, 255])
+def test_decode_heartbeat_rejects_an_out_of_range_state_byte(bad_state: int) -> None:
+    raw = bytes(
+        [
+            bad_state,  # state: out of TrapState's 0-3 range
+            0xA8,
+            0x0A,  # battery_mv, little endian: 2728
+            0x04,
+            0x03,
+            0x02,
+            0x01,  # clock_epoch, little endian: 0x01020304
+            0x01,  # clock_source: rtc
+            0x09,
+            0x00,  # targets_version, little endian: 9
+            0x05,
+            0x00,  # reads_today, little endian: 5
+            0x08,
+            0x07,
+            0x06,
+            0x05,  # last_read_epoch, little endian: 0x05060708
+        ]
+    )
+
+    with pytest.raises(PayloadError):
+        payloads.decode_heartbeat(raw)
+
+
+@pytest.mark.parametrize("bad_state_after", [4, 7, 130, 255])
+def test_decode_captured_rejects_an_out_of_range_state_after_byte(bad_state_after: int) -> None:
+    raw = bytes(TAG) + bytes(
+        [
+            0x11,
+            0x10,
+            0x0F,
+            0x0E,  # epoch, little endian: 0x0E0F1011
+            bad_state_after,  # state_after: out of TrapState's 0-3 range
+        ]
+    )
+
+    with pytest.raises(PayloadError):
+        payloads.decode_captured(raw)
+
+
 def test_encodes_an_arm_payload() -> None:
     result = payloads.encode_arm(expires_epoch=0x01020304)
 

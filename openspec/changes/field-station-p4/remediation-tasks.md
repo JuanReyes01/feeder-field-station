@@ -108,12 +108,12 @@ reaches the store at all.
 station over one row); `station-deployment/spec.md` "Starts by itself after a power cut (S7)";
 S7, S9 (`docs/requirements.md`).
 
-- [ ] 1.1 RED — `tests/domain/test_payloads.py`: parametrized test asserting `decode_heartbeat`
+- [x] 1.1 RED — `tests/domain/test_payloads.py`: parametrized test asserting `decode_heartbeat`
   rejects every `state` byte outside `0–3` the same way `_require_len` rejects a truncated payload
   (raises the module's existing decode-error type, not a bare `ValueError` that later explodes
   elsewhere); same for `decode_captured`'s `state_after` byte. Cover the boundary values (`4`, `255`)
   and at least one mid-range invalid value, not just the report's example (`7`).
-- [ ] 1.2 GREEN — `src/feeder_station/domain/payloads.py`: validate `state`/`state_after` inside
+- [x] 1.2 GREEN — `src/feeder_station/domain/payloads.py`: validate `state`/`state_after` inside
   `decode_heartbeat`/`decode_captured`, raising the same decode-error class `frames.decode`/
   `interpret()` already use for a corrupt frame, so the existing `decode_errors` counter (surfaced in
   `/health`'s `link` block) picks it up for free — no new counter needed at this layer.
