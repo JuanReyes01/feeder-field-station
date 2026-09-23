@@ -552,6 +552,20 @@ class Store:
             # CRITICAL 1: the winner is the most recent REPORT of any kind,
             # not "the heartbeat, always". WARNING J: no winner leaves
             # `state` at `None`, never a fabricated `IDLE`.
+            #
+            # WARNING A (sdd-verify field-station-p4 batch 2a): "most recent"
+            # is deliberately store ARRIVAL (`seq`), never the node's own
+            # `node_epoch` (persisted, never read here) -- pinned by
+            # test_a_backlog_replayed_report_does_not_win_the_state_race_by_
+            # the_nodes_own_older_clock. GET_BACKLOG replays what a node
+            # buffered while the link was down, so a late-arriving stale
+            # report is a designed-for case; trusting `node_epoch` would mean
+            # trusting a clock `clock_trust.py` exists because the station
+            # may not, pre-sync (S12) -- the same reasoning `DEDUP_WINDOW`'s
+            # comment gives for count-bounded, not time-bounded, dedup.
+            # Switching to `node_epoch` is a real option but a bigger one: it
+            # would have to reckon with per-event `clock_trust`, not a
+            # one-line key swap.
             if facts:
                 winner = max(facts, key=lambda fact: fact.seq)
                 registry.restore_reported_state(node_id, winner.state, at=winner.at)

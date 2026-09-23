@@ -133,13 +133,32 @@ def _apply_to_registry(registry: Registry, event: StationEvent, at: datetime) ->
     if event.msg_type == payloads.HEARTBEAT:
         _apply_heartbeat(registry, event, at)
     elif event.msg_type == payloads.CAPTURED:
-        if event.tag is not None:
-            registry.captured(node_id=event.node_id, tag=event.tag, at=at)
+        _apply_captured(registry, event, at)
     elif event.msg_type == payloads.FAULT:
         registry.fault(event.node_id, at=at)
     # HELLO, VISIT and a node's own ACK carry nothing this slice's registry
     # model represents yet — the same "not every event type touches the
     # registry" precedent adapters/store.py's own rehydrate() already sets.
+
+
+def _apply_captured(registry: Registry, event: StationEvent, at: datetime) -> None:
+    """CRITICAL A / WARNING 7 (sdd-verify field-station-p4 batch 2a):
+    ``state_after`` was decoded but discarded here — ``registry.captured()``
+    hardcoded ``FIRED`` instead of reading it. The ``isinstance`` guard
+    mirrors :func:`_apply_heartbeat`'s own defensive check; ``decode_captured``
+    already validates ``state_after`` into range, so it should not trigger.
+    """
+    if event.tag is None:
+        return
+    state_after = event.fields.get("state_after")
+    if not isinstance(state_after, int):
+        return
+    registry.captured(
+        node_id=event.node_id,
+        tag=event.tag,
+        state=trap_state_from_wire(state_after),
+        at=at,
+    )
 
 
 def _apply_heartbeat(registry: Registry, event: StationEvent, at: datetime) -> None:

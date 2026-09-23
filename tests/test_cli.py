@@ -22,8 +22,8 @@ from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store
 from feeder_station.cli import build_app
 from feeder_station.config import StationConfig
-from feeder_station.domain import payloads
-from feeder_station.domain.events import OPERATOR_SET_TARGETS, StationEvent
+from feeder_station.domain import frames, payloads
+from feeder_station.domain.events import OPERATOR_SET_TARGETS, StationEvent, interpret
 from feeder_station.domain.traps import Registry
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -333,6 +333,70 @@ def test_rehydrated_registry_matches_the_live_registry_for_every_ordering(
             f"{case_id}: {field} diverges -- live={live_row[field]!r} "
             f"rehydrated={rehydrated_row[field]!r}"
         )
+
+
+# --- CRITICAL A (verify-report-batch2a.md): the ordering axis above holds
+# `state_after` fixed at 2 (FIRED) in all five logs -- the one value where
+# the old hardcoded live `FIRED` and the rehydrated `state_after`-sourced
+# fact coincide. This varies the *content* axis instead, ordering fixed at
+# "CAPTURED is the node's only report". Kept separate from
+# `_REHYDRATION_ORDERINGS` rather than crossed with it: only one of the
+# five orderings there ever has CAPTURED win the race, so crossing all
+# five against four `state_after` values would add cases where the
+# content axis has no effect, proving nothing this smaller test does not
+# already prove. Built from real wire bytes (`frames.encode` ->
+# `frames.decode` -> `events.interpret`), matching verify-report-batch2a.md's
+# own Part 1.2 re-measurement methodology. ------------------------------
+
+_CRITICAL_A_NODE = 21
+
+
+@pytest.mark.parametrize(
+    ("state_after", "expected_state"),
+    [(0, "idle"), (1, "armed"), (2, "fired"), (3, "fault")],
+)
+def test_rehydrated_registry_matches_the_live_registry_for_every_captured_state_after(
+    tmp_path: Path, state_after: int, expected_state: str
+) -> None:
+    """CRITICAL A (verify-report-batch2a.md): before this fix, the live
+    `Registry.captured()` hardcoded `FIRED` regardless of what the node
+    reported, while the rehydrated `_rehydrate_capture` already read
+    `state_after` (WARNING 7) -- the same log produced two different
+    answers depending on whether the station had restarted. Only
+    `state_after=2` ever agreed by coincidence, exactly why the ordering
+    cases above never noticed.
+    """
+    payload = TAG + bytes([0x00, 0x00, 0x00, 0x00, state_after])  # epoch=0 + state_after
+    raw_frame = frames.encode(
+        frames.Frame(
+            msg_type=payloads.CAPTURED, node_id=_CRITICAL_A_NODE, msg_id=1, payload=payload
+        )
+    )
+    event = interpret(frames.decode(raw_frame))
+
+    now = datetime.now(UTC)
+    received_epoch = now.timestamp()
+    at = datetime.fromtimestamp(received_epoch, tz=UTC)
+
+    live_registry = Registry(silence_after=timedelta(minutes=15))
+    _apply_to_registry(live_registry, event, at=at)
+
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(event, received_epoch=received_epoch, clock_trust="ntp")
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rehydrated_rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+
+    live_row = live_registry.view(now=now)[0]
+    rehydrated_row = rehydrated_rows[_CRITICAL_A_NODE]
+
+    # Both must honor state_after -- which also proves they agree with each
+    # other, the CRITICAL 1 invariant this file exists to hold.
+    assert live_row["state"] == expected_state, f"live: got {live_row['state']!r}"
+    assert rehydrated_row["state"] == expected_state, f"rehydrated: got {rehydrated_row['state']!r}"
 
 
 # --- CRITICAL 2 (sdd-verify, field-station-p4): a corrupt stored row must

@@ -72,9 +72,9 @@ class _OrderedRegistry(Registry):
         super().__init__(silence_after=timedelta(minutes=15))
         self._calls = calls
 
-    def captured(self, node_id: int, tag: bytes, at: datetime):
+    def captured(self, node_id: int, tag: bytes, state: TrapState, at: datetime):
         self._calls.append("registry.captured")
-        return super().captured(node_id, tag, at)
+        return super().captured(node_id, tag, state, at)
 
 
 def _captured_frame(node_id: int = 7, msg_id: int = 1) -> bytes:

@@ -12,9 +12,10 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.domain import payloads
 from feeder_station.domain.events import OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
@@ -308,6 +309,14 @@ def test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_fired(
     answer instead of reading the field is caught (verified by hand: a
     `state=TrapState.FIRED` hardcode in `_rehydrate_capture` survives
     every other test in this suite and is killed only by this one).
+
+    CRITICAL A (verify-report-batch2a.md): **before that fix, this test
+    asserted only the rehydrated half** (`ARMED`) -- correct alone, but
+    never checked against the live path, whose `Registry.captured()`
+    hardcoded `FIRED` for this exact log; the test pinned one side of a
+    divergence it never looked at. **After: both paths are asserted and
+    both must read `ARMED`** -- CRITICAL 1's own rule (rehydrated equals
+    live), extended from the ordering axis to CRITICAL A's content axis.
     """
     db_path = tmp_path / "station.db"
     store = Store(db_path)
@@ -328,8 +337,80 @@ def test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_fired(
     registry = Registry(silence_after=timedelta(minutes=15))
     reopened.rehydrate(registry)
 
+    live_registry = Registry(silence_after=timedelta(minutes=15))
+    _apply_to_registry(live_registry, capture, at=datetime.fromtimestamp(1000.0, tz=UTC))
+
     trap = registry.trap(7)
+    live_trap = live_registry.trap(7)
     assert trap.state is TrapState.ARMED  # state_after's own value, never a hardcoded FIRED
+    assert live_trap.state is TrapState.ARMED  # CRITICAL A: the live path must read it too
+
+
+def test_a_backlog_replayed_report_does_not_win_the_state_race_by_the_nodes_own_older_clock(
+    tmp_path: Path,
+) -> None:
+    """WARNING A (verify-report-batch2a.md): the state race in
+    `rehydrate()`'s `max(facts, key=lambda fact: fact.seq)` is decided by
+    **store arrival**, never the node's own self-reported `node_epoch`
+    (persisted, never read by the race). Pinned deliberately: `GET_BACKLOG`
+    lets a node replay whatever it buffered while the link was down
+    (`radio-gateway/spec.md`), so a stale report arriving late is
+    designed-for, not exotic.
+
+    Here the node raised a `FAULT` at its own clock-time 18:37:20 but could
+    not send it until the link came back, by which point it had already
+    sent a live `HEARTBEAT` (`armed`) at 18:45:20 -- eight minutes *later*
+    by its own clock. The `FAULT` still arrives at the station last
+    (`received_epoch`/`seq` both newer) once the backlog is pulled.
+
+    Trusting `node_epoch` would mean trusting a clock `clock_trust.py`
+    exists precisely because the station may not, pre-sync (S12) -- the
+    same "must not depend on the clock" reasoning `DEDUP_WINDOW`'s own
+    comment already gives for count-bounded, not time-bounded, dedup.
+    Switching to `node_epoch` is a real option but a bigger one (it would
+    have to reckon with per-event `clock_trust`), not a one-line key swap
+    -- so arrival is the decision made and pinned here, not deferred
+    silently.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+
+    heartbeat = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.HEARTBEAT,
+        msg_id=1,
+        node_epoch=1_000_000,  # the node's own clock: 18:45:20 in the report's own scenario
+        tag=None,
+        fields={"state": 1, "battery_mv": 3900, "targets_version": 2},  # 1 -> ARMED
+        payload=b"",
+    )
+    store.append(heartbeat, received_epoch=2000.0, clock_trust="rtc")
+
+    fault = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.FAULT,
+        msg_id=2,
+        node_epoch=999_520,  # 8 minutes OLDER than the heartbeat above, by the node's own clock
+        tag=None,
+        fields={"code": 1, "detail": ""},
+        payload=b"",
+    )
+    # Buffered on the node while the link was down, pulled later by
+    # GET_BACKLOG -- arrives at the station (seq/received_epoch) after the
+    # heartbeat above, even though the node raised it first.
+    store.append(fault, received_epoch=2060.0, clock_trust="rtc")
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    # Arrival wins: FAULT arrived last (seq 2, received 2060.0), even though
+    # by the node's own node_epoch the HEARTBEAT (armed) is the newer report.
+    assert trap.state is TrapState.FAULT
 
 
 def test_rehydrate_reflects_a_heartbeat_when_no_capture_exists(tmp_path: Path) -> None:

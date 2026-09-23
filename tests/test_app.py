@@ -95,7 +95,7 @@ def test_a_capture_is_visible_to_a_browser_that_arrives_later() -> None:
     c, registry = client()
     from feeder_station.app import now
 
-    registry.captured(node_id=7, tag=TAG, at=now())
+    registry.captured(node_id=7, tag=TAG, state=TrapState.FIRED, at=now())
 
     rows = c.get("/api/traps").json()
     assert rows[0]["capture"]["tag"] == "0384199C87EC06"
@@ -269,7 +269,7 @@ def test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx() -> None:
     assert c.post("/api/traps/7/disarm").status_code // 100 == 2
     assert c.put("/api/traps/7/targets", json={"tags": ["0384199C87EC06"]}).status_code // 100 == 2
 
-    registry.captured(node_id=7, tag=TAG, at=now())
+    registry.captured(node_id=7, tag=TAG, state=TrapState.FIRED, at=now())
     assert c.post("/api/traps/7/acknowledge").status_code // 100 == 2
 
 
@@ -734,10 +734,14 @@ def test_acknowledging_a_capture_survives_a_restart_through_the_route(tmp_path: 
     reopened.rehydrate(fresh_registry)
     reopened.close()
 
-    # No trap is even created by rehydration here (neither a heartbeat nor
-    # an unacknowledged capture exists for node 7 anymore) -- which is
-    # itself the proof: querying through the real route shows nothing left
-    # to attend to.
+    # WARNING D (verify-report-batch2a.md): a trap for node 7 IS created by
+    # rehydration here -- the acknowledged CAPTURED row still supplies the
+    # winning state fact (CRITICAL 1: a CAPTURED is a report, made by the
+    # node, about itself, independent of whether it was later
+    # acknowledged). The proof is narrower than "nothing left": it is that
+    # acknowledging cleared the *capture object* durably, not merely the
+    # in-memory flag -- `Registry.acknowledge()`'s own scope (traps.py) is
+    # `trap.capture = None` alone, never `state`.
     rows = TestClient(create_app(fresh_registry)).get("/api/traps").json()
     assert all(row["capture"] is None for row in rows)
 

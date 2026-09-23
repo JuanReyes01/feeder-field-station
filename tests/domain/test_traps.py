@@ -137,7 +137,7 @@ def test_a_capture_stays_until_someone_acknowledges_it() -> None:
     registry = Registry(silence_after=timedelta(minutes=5))
     registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
 
-    registry.captured(node_id=7, tag=TAG, at=NOW + timedelta(minutes=1))
+    registry.captured(node_id=7, tag=TAG, state=TrapState.FIRED, at=NOW + timedelta(minutes=1))
 
     much_later = NOW + timedelta(hours=6)
     capture = registry.trap(7).capture

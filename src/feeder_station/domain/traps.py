@@ -159,9 +159,18 @@ class Registry:
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.pending_command = command
 
-    def captured(self, node_id: int, tag: bytes, at: datetime) -> Capture:
+    def captured(self, node_id: int, tag: bytes, state: TrapState, at: datetime) -> Capture:
+        """``state`` is the node's own reported ``state_after`` (CRITICAL A,
+        sdd-verify field-station-p4 batch 2a), applied the same way
+        :meth:`heartbeat` already applies its own ``state`` argument -- a
+        CAPTURED is a report about itself (S4), not always ``FIRED``
+        (``state_after=0`` means it fired and is idle again). A hardcoded
+        ``FIRED`` here is the exact assumption this module's own docstring
+        (S4) rules out, and previously disagreed with
+        :meth:`restore_reported_state`'s rehydrated answer for the same log.
+        """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
-        trap.state = TrapState.FIRED
+        trap.state = state
         trap.last_seen = at
         trap.capture = Capture(tag=tag, at=at)
         return trap.capture
@@ -175,12 +184,15 @@ class Registry:
         which may be this very same CAPTURED row, or a different one
         entirely), never by the order replay steps happen to run in.
 
-        ``captured()`` itself is unchanged and still used as-is by the live
-        ingest path (``adapters/ingest.py``), where a CAPTURED frame really
-        is the trap's own latest report arriving in real time — only a
-        *replayed* one, arriving in whatever order the log happens to hold
-        it, must not be allowed to regress a fresher report already
-        rehydrated first.
+        ``captured()`` is still the one the live ingest path calls
+        (``adapters/ingest.py``), where a CAPTURED frame really is the
+        trap's own latest report arriving in real time — only a *replayed*
+        one, arriving in whatever order the log happens to hold it, must
+        not be allowed to regress a fresher report already rehydrated
+        first. As of CRITICAL A, ``captured()`` also reads the reported
+        ``state`` rather than assuming ``FIRED`` — the two paths agree on
+        *what* a CAPTURED means; this method's job stays the narrower *when*
+        one may overwrite ``state``/``last_seen``.
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.capture = Capture(tag=tag, at=at)
