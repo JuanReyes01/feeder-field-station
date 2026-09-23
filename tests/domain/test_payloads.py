@@ -10,6 +10,7 @@ import pytest
 
 from feeder_station.domain import payloads
 from feeder_station.domain.payloads import PayloadError
+from feeder_station.domain.traps import TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
 
@@ -187,16 +188,17 @@ def test_a_fault_payload_with_zero_bytes_is_rejected() -> None:
         payloads.decode_fault(b"")
 
 
-# --- CRITICAL 2 (sdd-verify, field-station-p4): an out-of-range state byte
-# must never reach the store -- it has to be rejected at the decode boundary
-# like any other malformed payload. Parametrized over a boundary value just
-# past the valid range (4), the far boundary a single bit-flip can produce
-# (255), and a mid-range value (130) that a special case keyed on the
-# report's own example (state=7) would not catch -- the rule under test is
-# "every byte outside 0-3", not "byte 7".
+# --- CRITICAL 2 / WARNING B (sdd-verify, field-station-p4): an out-of-range
+# state byte must never reach the store. WARNING B (verify-report-batch1.md):
+# a hand-picked list like `[4, 7, 130, 255]` proves the examples, not the
+# rule -- a mutation that special-cased exactly those four values stayed
+# green. Reject is now every byte `TrapState` doesn't have, derived, not
+# listed by hand; accept (below) is every byte it does -- closing the gap
+# the report named: nothing anywhere asserted a valid `state=2`/`state=3`
+# heartbeat actually decodes.
 
 
-@pytest.mark.parametrize("bad_state", [4, 7, 130, 255])
+@pytest.mark.parametrize("bad_state", range(len(TrapState), 256))
 def test_decode_heartbeat_rejects_an_out_of_range_state_byte(bad_state: int) -> None:
     raw = bytes(
         [
@@ -223,7 +225,7 @@ def test_decode_heartbeat_rejects_an_out_of_range_state_byte(bad_state: int) -> 
         payloads.decode_heartbeat(raw)
 
 
-@pytest.mark.parametrize("bad_state_after", [4, 7, 130, 255])
+@pytest.mark.parametrize("bad_state_after", range(len(TrapState), 256))
 def test_decode_captured_rejects_an_out_of_range_state_after_byte(bad_state_after: int) -> None:
     raw = bytes(TAG) + bytes(
         [
@@ -237,6 +239,37 @@ def test_decode_captured_rejects_an_out_of_range_state_after_byte(bad_state_afte
 
     with pytest.raises(PayloadError):
         payloads.decode_captured(raw)
+
+
+@pytest.mark.parametrize("state", range(len(TrapState)))
+def test_decode_heartbeat_accepts_every_valid_state_value(state: int) -> None:
+    raw = bytes(
+        [
+            state,
+            0xA8,
+            0x0A,
+            0x04,
+            0x03,
+            0x02,
+            0x01,
+            0x01,
+            0x09,
+            0x00,
+            0x05,
+            0x00,
+            0x08,
+            0x07,
+            0x06,
+            0x05,
+        ]
+    )
+    assert payloads.decode_heartbeat(raw).state == state
+
+
+@pytest.mark.parametrize("state_after", range(len(TrapState)))
+def test_decode_captured_accepts_every_valid_state_after_value(state_after: int) -> None:
+    raw = bytes(TAG) + bytes([0x11, 0x10, 0x0F, 0x0E, state_after])
+    assert payloads.decode_captured(raw).state_after == state_after
 
 
 def test_encodes_an_arm_payload() -> None:

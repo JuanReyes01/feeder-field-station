@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .frames import PAYLOAD_MAX
+from .traps import TrapState
 
 # Uplink message types (docs/protocol/messages.md, "Uplink, node to station").
 HELLO = 0x01
@@ -70,18 +71,14 @@ def _require_min_len(payload: bytes, minimum: int, name: str) -> None:
         raise PayloadError(f"{name} payload of {len(payload)} bytes, expected at least {minimum}")
 
 
-# HEARTBEAT.state and CAPTURED.state_after: the 4-value enum payloads.py's
-# own field comments already document as an assumption (0-3, matching
-# TrapState's declaration order in adapters/store.py's `_WIRE_STATE_ORDER`).
-# CRITICAL 2 (sdd-verify, field-station-p4): before this, nothing validated
-# the byte here, so a single flipped bit -- COBS is framing, not a checksum,
-# per domain/serial_framing.py's own docstring -- rode all the way to the
-# store and only failed when `adapters/store.py::trap_state_from_wire` tried
-# to interpret it back out of a durably-committed row, inside the boot
-# lifespan, with nothing to catch it. Rejecting it here, at the decode
-# boundary, keeps a bad byte out of the store the same way a truncated
-# payload already never reaches it.
-_VALID_STATE_VALUES = range(4)
+# HEARTBEAT.state and CAPTURED.state_after: matches TrapState's declaration
+# order in adapters/store.py's `_WIRE_STATE_ORDER`. WARNING B (sdd-verify
+# field-station-p4 batch 1): derived from `len(TrapState)`, not a
+# hand-written `range(4)` -- a hardcoded literal stayed green through a
+# mutation that shrank it to `range(3)`, silently rejecting a valid
+# `state=3` (FAULT) heartbeat. A future TrapState member now widens this
+# automatically instead of drifting out of sync in silence.
+_VALID_STATE_VALUES = range(len(TrapState))
 
 
 def _require_valid_state(value: int, field_name: str, payload_name: str) -> None:
