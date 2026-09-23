@@ -11,6 +11,7 @@ import random
 import sqlite3
 import subprocess
 import sys
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -62,6 +63,40 @@ def test_a_freshly_reopened_connection_also_has_the_full_pragma_set(tmp_path: Pa
 
     assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+# --- 12.0b: one connection per thread, not one shared across all of them ------
+
+
+def test_a_second_thread_gets_its_own_connection_not_the_first_threads(tmp_path: Path) -> None:
+    """design.md section 7's own concurrency table: "SQLite connections |
+    One per thread, created lazily... `check_same_thread` exists for a
+    reason." Before slice 12, exactly one thread (whichever constructed
+    the `Store`) ever called into it. Slice 12 is the first to hand the
+    same `Store` to more than one thread (the gateway thread, the
+    scheduler thread, and the existing HTTP threadpool) -- this is the
+    regression proof: a second thread must be able to `append()` at all,
+    which sqlite3's own `check_same_thread` default would otherwise refuse
+    outright for a naively-shared single connection.
+    """
+    store = Store(tmp_path / "station.db")
+    store.append(_node_event(node_id=1, msg_id=1), received_epoch=1.0, clock_trust="unset")
+
+    errors: list[BaseException] = []
+
+    def _append_from_another_thread() -> None:
+        try:
+            store.append(_node_event(node_id=2, msg_id=1), received_epoch=2.0, clock_trust="unset")
+        except BaseException as exc:  # noqa: BLE001 -- the test asserts on this directly
+            errors.append(exc)
+
+    thread = threading.Thread(target=_append_from_another_thread)
+    thread.start()
+    thread.join(timeout=5.0)
+
+    assert not errors, errors
+    assert store.cursor(1) is not None
+    assert store.cursor(2) is not None
 
 
 # --- 4.7/4.8: write and fsync precede acknowledgement -------------------------

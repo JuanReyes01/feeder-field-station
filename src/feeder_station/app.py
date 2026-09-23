@@ -11,17 +11,22 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
+from feeder_station.adapters.export import export_station
+from feeder_station.adapters.serial_gateway import SerialGateway
+from feeder_station.adapters.store import Store
+from feeder_station.adapters.workers import WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain.payloads import TAG_BYTES
 from feeder_station.domain.traps import Registry
@@ -40,6 +45,17 @@ _TAG_HEX_PATTERN = re.compile(rf"[0-9A-Fa-f]{{{TAG_BYTES * 2}}}")
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+class ExportRequest(BaseModel):
+    """11.10: the operator-facing half of ``export_station()`` (slice 11) —
+    the destination is a path the runbook (``docs/deploy.md``) tells an
+    operator to point at a mounted drive; this route does not enumerate
+    mount points itself (design.md's own "the UI offers mount points"
+    remains a follow-up, not this slice's scope).
+    """
+
+    dest_root: str
 
 
 class TargetsRequest(BaseModel):
@@ -122,10 +138,24 @@ class Broadcaster:
                 queue.put_nowait(payload)
 
 
+def _worker_health(thread: threading.Thread | None, status: WorkerStatus | None) -> dict[str, Any]:
+    """One entry of ``/health``'s ``workers`` field (12.0c). ``enabled`` is
+    ``False`` exactly when no ``store``/``gateway`` was ever passed to
+    ``create_app`` — the pre-slice-12 shape every earlier test still uses —
+    in which case there is no thread to be dead, so it never counts
+    against ``ok``.
+    """
+    if thread is None or status is None:
+        return {"enabled": False, "alive": False, "last_error": None}
+    return {"enabled": True, "alive": thread.is_alive(), "last_error": status.last_error}
+
+
 def create_app(
     registry: Registry | None = None,
     config: StationConfig | None = None,
     clock: Clock | None = None,
+    store: Store | None = None,
+    gateway: SerialGateway | None = None,
 ) -> FastAPI:
     resolved_config = config or StationConfig.load()
     resolved_clock: Clock = clock or StationClock()
@@ -135,44 +165,110 @@ def create_app(
         # DD11: the loop only exists once the app actually starts serving —
         # capture it here, not at construction time.
         app.state.broadcaster.bind_loop(asyncio.get_running_loop())
-        yield
+
+        # 12.0a/12.0b: nothing before this slice ever started a thread. The
+        # gateway is off by default (design.md section 7) so every test
+        # that never passes `store`/`gateway` keeps running this lifespan
+        # with no threads and no hardware, exactly as before.
+        threads: list[threading.Thread] = []
+        if store is not None and gateway is not None:
+            gateway_thread, gateway_status, scheduler_thread, scheduler_status = start_workers(
+                store=store,
+                gateway=gateway,
+                registry=app.state.registry,
+                registry_lock=app.state.registry_lock,
+                publish=app.state.broadcaster.publish,
+                clock=resolved_clock,
+                config=resolved_config,
+                stop=app.state.stop_event,
+            )
+            app.state.gateway_thread = gateway_thread
+            app.state.gateway_status = gateway_status
+            app.state.scheduler_thread = scheduler_thread
+            app.state.scheduler_status = scheduler_status
+            threads = [gateway_thread, scheduler_thread]
+            for thread in threads:
+                thread.start()
+
+        try:
+            yield
+        finally:
+            # design.md section 7's "Shutdown" row: stop flags, join both
+            # threads with a timeout, `PRAGMA optimize`, close -- in that
+            # order, so `store.close()` never races a thread still reading
+            # or writing through its own connection.
+            app.state.stop_event.set()
+            for thread in threads:
+                thread.join(timeout=5.0)
+            if store is not None:
+                store.optimize()
+                store.close()
 
     app = FastAPI(title="CICG field station", lifespan=lifespan)
     app.state.registry = registry or Registry(silence_after=resolved_config.silence_after)
     app.state.broadcaster = Broadcaster()
     app.state.clock = resolved_clock
+    app.state.config = resolved_config
+    app.state.store = store
+    app.state.gateway = gateway
+    # design.md section 7's concurrency table, "Registry" row: "One
+    # threading.Lock, owned by the shell... because domain/ stays free of
+    # concurrency primitives." Before this slice, exactly one thread (the
+    # HTTP threadpool) ever touched the registry; this slice gives it two
+    # more callers (the gateway and scheduler threads), so this lock stops
+    # being theoretical.
+    app.state.registry_lock = threading.Lock()
+    app.state.stop_event = threading.Event()
+    app.state.gateway_thread = None
+    app.state.gateway_status = None
+    app.state.scheduler_thread = None
+    app.state.scheduler_status = None
 
     @app.get("/health")
     def health() -> dict[str, Any]:
         # S12/D7 (spec.md, "Clock trust states"): the operator UI's "clock
         # unset" banner and every scheduled TIME_SYNC read this same value —
         # never a separate, potentially-stale cache of it.
+        workers = {
+            "gateway": _worker_health(app.state.gateway_thread, app.state.gateway_status),
+            "scheduler": _worker_health(app.state.scheduler_thread, app.state.scheduler_status),
+        }
+        # 12.0c: a worker that was started but is no longer alive must flip
+        # `ok` -- the whole point is that this must be visible without an
+        # operator having to know to look at a separate field. A worker
+        # never enabled (no gateway configured) never counts against it.
+        workers_ok = all(not w["enabled"] or w["alive"] for w in workers.values())
         return {
-            "ok": True,
+            "ok": workers_ok,
             "clock": now().isoformat(),
             "clock_trust": app.state.clock.trust().value,
+            "workers": workers,
         }
 
     @app.get("/api/traps")
     def traps() -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = app.state.registry.view(now=now())
+        with app.state.registry_lock:
+            rows: list[dict[str, Any]] = app.state.registry.view(now=now())
         return rows
 
     @app.post("/api/traps/{node_id}/arm")
     def arm(node_id: int) -> dict[str, Any]:
-        app.state.registry.command_arm(node_id, at=now())
+        with app.state.registry_lock:
+            app.state.registry.command_arm(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "pending_command": "arm"}
 
     @app.post("/api/traps/{node_id}/disarm")
     def disarm(node_id: int) -> dict[str, Any]:
-        app.state.registry.command_disarm(node_id, at=now())
+        with app.state.registry_lock:
+            app.state.registry.command_disarm(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "pending_command": "disarm"}
 
     @app.post("/api/traps/{node_id}/acknowledge")
     def acknowledge(node_id: int) -> dict[str, Any]:
-        app.state.registry.acknowledge(node_id, at=now())
+        with app.state.registry_lock:
+            app.state.registry.acknowledge(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "acknowledged": True}
 
@@ -181,19 +277,32 @@ def create_app(
         # The desired version is computed from the trap's own last *reported*
         # version (S4), never an operator-supplied number -- an unknown node
         # (never yet heard from) starts at 1, same as any first command.
-        try:
-            current_version = app.state.registry.trap(node_id).targets_version
-        except KeyError:
-            current_version = None
-        next_version = (current_version or 0) + 1
+        with app.state.registry_lock:
+            try:
+                current_version = app.state.registry.trap(node_id).targets_version
+            except KeyError:
+                current_version = None
+            next_version = (current_version or 0) + 1
 
-        app.state.registry.command_set_targets(node_id, targets_version=next_version, at=now())
+            app.state.registry.command_set_targets(node_id, targets_version=next_version, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
             "node_id": node_id,
             "pending_command": "set_targets",
             "desired_targets_version": next_version,
         }
+
+    @app.post("/api/export")
+    def export(body: ExportRequest) -> dict[str, Any]:
+        # 11.10: `export_station()` (slice 11) was fully built and tested
+        # with nothing calling it. `store` is `None` exactly when
+        # `create_app` was never given one (every pre-slice-12 test, and
+        # any deployment started with `--no-gateway` but no `--db-path`
+        # either) -- a clear 503 beats a crash or a silent no-op.
+        if app.state.store is None:
+            raise HTTPException(status_code=503, detail="no store configured for this station")
+        folder = export_station(app.state.store, body.dest_root, now=now())
+        return {"folder": str(folder)}
 
     @app.get("/api/events")
     async def events() -> StreamingResponse:

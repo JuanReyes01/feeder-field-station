@@ -85,6 +85,17 @@ def run_rotation_round(
     next node; it gets another turn on the caller's next call, not blocked
     on here (radio-gateway spec.md, "one silent node does not block the
     rotation").
+
+    Lap completion is counted by whether a node's turn just *settled*
+    (``domain/backlog.py::record_response``'s own advance condition,
+    recomputed here) — not by comparing ``schedule.position`` before and
+    after. **Regression, slice 12:** a one-node roster's position is
+    always ``0 % 1 == 0``; comparing positions never detects that lap at
+    all, and a freshly-booted station with exactly one known trap — the
+    single most common real case this slice's own scheduler thread now
+    hits — would poll it forever and never return. Ten-node behaviour
+    (this module's own existing tests) is identical either way: for more
+    than one node, "settled" and "position changed" are the same fact.
     """
     schedule = backlog.start(node_ids)
     polled: list[int] = []
@@ -96,11 +107,10 @@ def run_rotation_round(
         polled.append(node_id)
         poll_node(node_id, store=store, gateway=gateway, max_events=max_events)
 
-        prior_position = schedule.position
-        schedule = backlog.record_response(
-            schedule, heard=responded(node_id), retry_budget=retry_budget
-        )
-        if schedule.position != prior_position:
+        heard = responded(node_id)
+        settled = heard or schedule.attempts + 1 >= retry_budget
+        schedule = backlog.record_response(schedule, heard=heard, retry_budget=retry_budget)
+        if settled:
             laps_completed += 1
 
     return polled

@@ -33,9 +33,19 @@ DEFAULT_SILENCE_AFTER = timedelta(minutes=15)
 # bare literal inside adapters/scheduler.py.
 DEFAULT_BACKLOG_RETRY_BUDGET = 3
 
+# Slice 12 (auto-start-deployment): messages.md does not pin how long an
+# ARM's `expires_epoch` should hold — the same "documented assumption,
+# never a bare literal" discipline domain/payloads.py already applies to
+# unpinned field widths. `adapters/command_sender.py` is the one call site
+# that reads this; a trap the station still wants armed past this window
+# gets a fresh ARM from the same resend-until-confirmed discipline S2
+# already requires for SET_TARGETS.
+DEFAULT_ARM_DURATION = timedelta(hours=24)
+
 ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
 ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
 ENV_BACKLOG_RETRY_BUDGET = "FEEDER_STATION_BACKLOG_RETRY_BUDGET"
+ENV_ARM_DURATION_S = "FEEDER_STATION_ARM_DURATION_S"
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,7 @@ class StationConfig:
     heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL
     silence_after: timedelta = DEFAULT_SILENCE_AFTER
     backlog_retry_budget: int = DEFAULT_BACKLOG_RETRY_BUDGET
+    arm_duration: timedelta = DEFAULT_ARM_DURATION
 
     @classmethod
     def load(
@@ -64,6 +75,7 @@ class StationConfig:
         parser.add_argument("--heartbeat-interval-s", type=float, default=None)
         parser.add_argument("--silence-after-s", type=float, default=None)
         parser.add_argument("--backlog-retry-budget", type=int, default=None)
+        parser.add_argument("--arm-duration-s", type=float, default=None)
         args, _unknown = parser.parse_known_args(list(argv) if argv is not None else [])
 
         return cls(
@@ -81,6 +93,11 @@ class StationConfig:
                 args.backlog_retry_budget,
                 resolved_env.get(ENV_BACKLOG_RETRY_BUDGET),
                 DEFAULT_BACKLOG_RETRY_BUDGET,
+            ),
+            arm_duration=_resolve_seconds(
+                args.arm_duration_s,
+                resolved_env.get(ENV_ARM_DURATION_S),
+                DEFAULT_ARM_DURATION,
             ),
         )
 

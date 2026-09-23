@@ -1,0 +1,42 @@
+# CICG field station — systemd unit (slice 12, S7/S8).
+#
+# Image-agnostic on purpose: nothing here names a specific Raspberry Pi OS
+# release, a particular time-sync daemon, or a boot-partition layout. Those
+# live in docs/deploy.md instead, which names the exact image and version
+# this was actually verified against, or says so is still open.
+#
+# S8, explicit: no `Requires=`, `Wants=`, or `After=` on
+# `network-online.target` anywhere below. This site's internet is
+# intermittent (docs/requirements.md) — the station must serve /health and
+# the operator UI with no route out at all, and must never sit in
+# systemd's own boot-ordering queue waiting on a network that may not come.
+[Unit]
+Description=CICG field station — radio gateway, operator UI, event store
+After=network.target
+
+[Service]
+Type=simple
+User=feeder-station
+Group=feeder-station
+WorkingDirectory=/var/lib/feeder-station
+ExecStart=/usr/bin/env feeder-station --db-path /var/lib/feeder-station/station.db
+# S7: the whole reason `Restart=always` is safe here rather than a
+# corruption generator is S9's own fsync discipline (adapters/store.py) —
+# nothing is ever acknowledged before it is durably committed, so a crash
+# mid-write leaves the store consistent, not torn, for the next start.
+Restart=always
+RestartSec=2
+# 12.4: a clean SIGTERM path (app.py's lifespan: stop flags, join both
+# worker threads, PRAGMA optimize, close) is what makes a restart a
+# recovery, not a race against a still-writing process.
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+# Minimal, defensive sandboxing — none of it network- or image-specific.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/feeder-station
+
+[Install]
+WantedBy=multi-user.target

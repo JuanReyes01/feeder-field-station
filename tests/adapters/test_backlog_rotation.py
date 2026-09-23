@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import pty
 import select
+import threading
 import time
 from pathlib import Path
 
@@ -121,6 +122,41 @@ def test_run_rotation_round_visits_every_node_and_retries_the_silent_one(tmp_pat
     assert polled == [0, 1, 2, 3, 4, 4, 4, 5, 6, 7, 8, 9]
     assert len(gateway.written) == len(polled)
     assert {frames.decode(f).node_id for f in gateway.written} == set(node_ids)
+
+
+def test_run_rotation_round_terminates_with_a_single_silent_node(tmp_path: Path) -> None:
+    """Regression, slice 12: with exactly one node in the roster,
+    `domain/backlog.py`'s `position` never changes value even after a full
+    "lap" -- `0 % 1` is always `0`. Detecting a completed lap by comparing
+    positions before and after (as this function used to) never fires for
+    a one-node roster, so the loop never terminated -- exactly the
+    scenario a freshly-booted station with one known trap hits for real.
+    Run on its own thread with a bounded join so a reintroduced version of
+    this bug fails the assertion instead of hanging the whole suite.
+    """
+    store = Store(tmp_path / "station.db")
+    gateway = _FakeGateway()
+    result: list[int] = []
+
+    def _run() -> None:
+        result.extend(
+            run_rotation_round(
+                (5,),
+                store=store,
+                gateway=gateway,
+                responded=lambda node_id: False,
+                retry_budget=3,
+                max_events=32,
+            )
+        )
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive(), "run_rotation_round did not terminate for a single-node roster"
+    assert result == [5, 5, 5]
+    assert len(gateway.written) == 3
 
 
 # --- 7.5: the S5 scale scenario, real bytes over a real pty -------------------

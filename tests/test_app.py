@@ -16,12 +16,16 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from feeder_station import app as app_module
+from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.app import Broadcaster, create_app
 from feeder_station.config import StationConfig
-from feeder_station.domain import payloads
+from feeder_station.domain import frames, payloads
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import StationEvent
+from feeder_station.domain.frames import Frame
+from feeder_station.domain.frames import encode as encode_frame
+from feeder_station.domain.serial_framing import DELIMITER, cobs_decode, cobs_encode
 from feeder_station.domain.traps import Registry, TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -391,3 +395,195 @@ def test_static_index_html_references_no_external_asset() -> None:
     assert "http://" not in html
     assert "https://" not in html
     assert "://" not in html  # also catches protocol-relative `//cdn...` references
+
+
+# --- Slice 12: auto-start-deployment ----------------------------------------
+
+# --- 12.0a/12.0b: nothing before this slice ever started a thread ----------
+
+
+class _FakePort:
+    """A minimal ``SerialPort`` double, the same shape
+    ``tests/adapters/test_serial_gateway.py::_FakePort`` already uses: bytes
+    in, bytes out, no OS involved.
+    """
+
+    def __init__(self, *, to_read: bytes = b"") -> None:
+        self._to_read = bytearray(to_read)
+        self.written: list[bytes] = []
+
+    def read(self, size: int) -> bytes:
+        chunk = bytes(self._to_read[:size])
+        del self._to_read[: len(chunk)]
+        return chunk
+
+    def write(self, data: bytes) -> int:
+        self.written.append(bytes(data))
+        return len(data)
+
+    def close(self) -> None:
+        pass
+
+
+def _decode_written_msg_types(blocks: list[bytes]) -> set[int]:
+    """Every ``fake_port.write()`` call the gateway ever makes is exactly
+    one COBS-encoded, delimiter-terminated frame (``SerialGateway.
+    write_frame``'s own contract) -- undo that to see what was actually
+    sent.
+    """
+    types: set[int] = set()
+    for block in blocks:
+        assert block[-1] == DELIMITER
+        types.add(frames.decode(cobs_decode(block[:-1])).msg_type)
+    return types
+
+
+def test_the_app_starts_its_background_workers(tmp_path: Path) -> None:
+    """The test this slice exists to make pass (tasks.md, slice 12): with
+    a fake port and a fake clock, starting the real app -- through
+    `create_app`'s own lifespan, not a hand-assembled worker call -- must
+    ingest a frame (the gateway thread, slices 5/6), run a rotation round
+    (slice 7), and resend a due command (slice 8), end to end. This is the
+    test that proves all four orphaned drivers this slice exists to start
+    actually run: the fourth, `attempt_time_sync` (slice 9), also fires
+    every tick here since the clock is trusted, but is not separately
+    asserted on -- TIME_SYNC has no user-facing effect this test can read
+    back other than one more frame type on the wire.
+    """
+    heartbeat_payload = bytes(
+        [
+            0x01,
+            0xA8,
+            0x0A,
+            0x04,
+            0x03,
+            0x02,
+            0x01,
+            0x01,
+            0x09,
+            0x00,
+            0x05,
+            0x00,
+            0x08,
+            0x07,
+            0x06,
+            0x05,
+        ]
+    )
+    raw_frame = encode_frame(
+        Frame(msg_type=payloads.HEARTBEAT, node_id=11, msg_id=1, payload=heartbeat_payload)
+    )
+    wire = cobs_encode(raw_frame) + bytes([DELIMITER])
+    fake_port = _FakePort(to_read=wire)
+
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.command_disarm(9, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = SerialGateway(DeviceConfig(explicit_path="fake"), open_port=lambda device: fake_port)
+
+    app = create_app(
+        registry=registry, clock=_FixedClock(ClockTrust.NTP), store=store, gateway=gateway
+    )
+
+    with TestClient(app) as c:
+        deadline = time.monotonic() + 5.0
+        ingested = False
+        written_types: set[int] = set()
+        while time.monotonic() < deadline:
+            rows = c.get("/api/traps").json()
+            ingested = any(row["node_id"] == 11 for row in rows)
+            written_types = _decode_written_msg_types(fake_port.written)
+            if (
+                ingested
+                and payloads.GET_BACKLOG in written_types
+                and payloads.DISARM in written_types
+            ):
+                break
+            time.sleep(0.02)
+
+    assert ingested, "the gateway thread never ingested the fixture frame"
+    assert payloads.GET_BACKLOG in written_types, "the scheduler thread never ran a rotation round"
+    assert payloads.DISARM in written_types, "the scheduler thread never resent the due command"
+
+
+def test_health_reports_workers_disabled_when_no_gateway_configured() -> None:
+    """Backward compatibility: every test above this one calls `create_app`
+    with no `store`/`gateway` at all -- `/health`'s new `workers` field
+    must not flip `ok` to `False` just because nothing was configured.
+    """
+    c, _ = client()
+    body = c.get("/health").json()
+
+    assert body["ok"] is True
+    assert body["workers"]["gateway"] == {"enabled": False, "alive": False, "last_error": None}
+    assert body["workers"]["scheduler"] == {"enabled": False, "alive": False, "last_error": None}
+
+
+# --- 12.0c: a dead worker is visible in /health, not silently deaf ---------
+
+
+class _CrashingGateway:
+    def ensure_connected(self, *, stop: object) -> bool:
+        raise RuntimeError("boom -- simulated dead radio")
+
+    def read_frames(self, *, size: int = 4096) -> list[bytes]:  # pragma: no cover - unreachable
+        return []
+
+    def write_frame(self, raw_frame: bytes) -> bool:  # pragma: no cover - unreachable
+        return True
+
+
+def test_a_dead_gateway_thread_is_visible_in_health(tmp_path: Path) -> None:
+    """12.0c, and the exact cost this slice's own tasks.md names for
+    skipping it: without this, a thread that dies in week three leaves the
+    station serving `/health` perfectly, every trap looking unreachable,
+    and nothing anywhere saying the radio -- not the traps -- is at fault.
+    """
+    store = Store(tmp_path / "station.db")
+    app = create_app(store=store, gateway=_CrashingGateway())  # type: ignore[arg-type]
+
+    with TestClient(app) as c:
+        deadline = time.monotonic() + 2.0
+        body = c.get("/health").json()
+        while time.monotonic() < deadline and body["workers"]["gateway"]["alive"]:
+            time.sleep(0.02)
+            body = c.get("/health").json()
+
+    assert body["workers"]["gateway"]["enabled"] is True
+    assert body["workers"]["gateway"]["alive"] is False
+    assert body["workers"]["gateway"]["last_error"] is not None
+    assert "boom" in body["workers"]["gateway"]["last_error"]
+    assert body["ok"] is False
+
+
+# --- 11.10: export_station() gets its trigger, deferred out of slice 11 ----
+
+
+def test_export_route_produces_a_station_export_folder(tmp_path: Path) -> None:
+    """11.10, closed here: `export_station()` (slice 11) was fully built
+    and tested with nothing calling it -- slice 11's own PR boundary did
+    not include `app.py`/`cli.py` (see that slice's apply-progress notes),
+    and design.md's own concurrency diagram lists `export` alongside
+    `arm`/`acknowledge` as one HTTP threadpool handler, which is where
+    this route lives.
+    """
+    store = Store(tmp_path / "station.db")
+    app = create_app(store=store)
+    dest = tmp_path / "usb"
+    dest.mkdir()
+
+    c = TestClient(app)
+    response = c.post("/api/export", json={"dest_root": str(dest)})
+
+    assert response.status_code == 200
+    folder = Path(response.json()["folder"])
+    assert folder.is_dir()
+    assert (folder / "station.db").exists()
+    assert (folder / "events.csv").exists()
+    assert (folder / "README.txt").exists()
+
+
+def test_export_route_without_a_store_reports_unavailable_not_a_crash() -> None:
+    c, _ = client()
+    response = c.post("/api/export", json={"dest_root": "/tmp/wherever"})
+    assert response.status_code == 503

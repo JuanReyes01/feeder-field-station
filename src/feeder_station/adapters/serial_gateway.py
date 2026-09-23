@@ -23,6 +23,7 @@ test instead of real seconds.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -180,6 +181,15 @@ class SerialGateway:
         self._frames_in = 0
         self._frames_out = 0
         self._last_error: str | None = None
+        # design.md section 7's concurrency table, "Serial writes" row: one
+        # lock around `port.write()` -- slice 12 is the first slice that
+        # ever gives this gateway two callers (the gateway thread's own ACK
+        # writes and the scheduler thread's GET_BACKLOG/command writes); a
+        # queue was rejected there for the same reason it is not the answer
+        # here either (it would turn "sent after the commit" into "queued
+        # after the commit"). Only `write_frame` needs this: reads happen on
+        # the gateway thread alone.
+        self._write_lock = threading.Lock()
 
     @property
     def link_state(self) -> LinkState:
@@ -273,17 +283,23 @@ class SerialGateway:
     def write_frame(self, raw_frame: bytes) -> bool:
         """COBS-encode and write one frame. ``False`` when nothing is connected
         or the write itself drops the link — never raises.
+
+        Holds ``self._write_lock`` for the whole call: two threads writing
+        to the same port at once could interleave their bytes into one
+        corrupt block on the wire, which no amount of COBS framing on the
+        receiving end could recover from.
         """
-        if self._port is None:
-            return False
-        block = cobs_encode(raw_frame) + bytes([DELIMITER])
-        try:
-            self._port.write(block)
-        except serial.SerialException as exc:
-            self._disconnect(str(exc))
-            return False
-        self._frames_out += 1
-        return True
+        with self._write_lock:
+            if self._port is None:
+                return False
+            block = cobs_encode(raw_frame) + bytes([DELIMITER])
+            try:
+                self._port.write(block)
+            except serial.SerialException as exc:
+                self._disconnect(str(exc))
+                return False
+            self._frames_out += 1
+            return True
 
     def close(self) -> None:
         """Close the port, if any, without recording it as a link error."""

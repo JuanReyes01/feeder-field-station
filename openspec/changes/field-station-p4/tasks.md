@@ -313,13 +313,13 @@ Traces: S6 (re-scoped, D1), S14, D6. Files: `adapters/export.py` (new), `docs/re
 - [x] 11.7 RED: `test_plain_file_copy_is_not_the_export_path`
 - [x] 11.8 GREEN: confirm export only ever reads the `VACUUM INTO` copy, never the live file
 - [x] 11.9 RED: `test_documented_copy_step_produces_a_complete_openable_copy`
-- [~] 11.10 GREEN: assemble `station-export-{timestamp}/` (db + CSV + README); add the CLI/UI trigger
-      — folder assembly done (`export_station()`); CLI/UI trigger deliberately NOT wired: slice 11's
-      own Files list (adapters/export.py, docs/requirements.md, tests/adapters/test_export.py) and
-      PR boundary don't include `cli.py`/`app.py`, and task 12.8 explicitly assigns `cli.py` args to
-      slice 12. Wiring a trigger into either file now would touch out-of-scope files and collide with
-      slice 12's planned `cli.py` changes. `export_station()` is the trigger — reachable and fully
-      tested; exposing it via CLI/HTTP is a follow-up, either folded into slice 12 or a small addendum.
+- [x] 11.10 GREEN: assemble `station-export-{timestamp}/` (db + CSV + README); add the CLI/UI trigger
+      — folder assembly was already done (`export_station()`, slice 11). Closed by slice 12: `POST
+      /api/export` (`app.py`) is the trigger, calling `export_station()` with an operator-supplied
+      `dest_root` — design.md's own concurrency diagram already lists `export` alongside
+      `arm`/`acknowledge` as an HTTP threadpool handler, which is where this route lives. A store-less
+      `create_app()` (every pre-slice-12 test) returns 503 from this route rather than crashing. See
+      `tests/test_app.py::test_export_route_produces_a_station_export_folder`.
 - [x] 11.11 Docs (no test): amend `docs/requirements.md` S6 per D1 — station's own export, not a
       per-reading raw file
 
@@ -334,6 +334,19 @@ CI-provable.** CI proxy: 11.1-11.10's mechanical-correctness scenarios; usabilit
 Traces: S7, S8. Files: `deploy/feeder-station.service` (new), `docs/deploy.md` (new), `cli.py`
 (modified), `tests/test_deploy_unit.py`.
 
+**Actual Files list, wider than the line above** (that line predates 12.0a-12.0d, added the same day):
+`adapters/workers.py` (new — starts/supervises the two threads), `adapters/command_sender.py` (new —
+the command-sender driver), `app.py` (modified — lifespan wiring, the registry lock, `/health`'s
+`workers` field, `POST /api/export` for 11.10), `cli.py` (modified), `config.py` (modified —
+`arm_duration`), `adapters/store.py` (modified — one SQLite connection per thread, `optimize()`),
+`adapters/serial_gateway.py` (modified — a lock around `port.write()`), `adapters/scheduler.py`
+(modified — a real single-node-roster hang, see below), `deploy/feeder-station.service` (new),
+`docs/deploy.md` (new), plus `tests/adapters/test_workers.py`, `tests/adapters/test_command_sender.py`,
+`tests/test_cli.py`, `tests/test_deploy_unit.py` (all new), and small additions to
+`tests/adapters/test_store.py`, `tests/adapters/test_backlog_rotation.py`, `tests/test_app.py`,
+`tests/test_config.py`. `app.py` was never named in the original Files line above because it predates
+12.0a-12.0d; those tasks cannot be done without it.
+
 **Added 2026-09-23, after slice 7.** Nothing in slices 1-11 ever *starts* a thread. Design §7
 describes three (the serial reader, the rotation scheduler, the loop) but no slice owned standing
 them up, so the whole change could finish green with a station that serves HTTP and never speaks to
@@ -345,31 +358,61 @@ worthless without them.
 calling it — and the gateway reader
 has never been started either. All three belong here.
 
-- [ ] 12.0a RED: `test_the_app_starts_its_background_workers` — with a fake port and a fake clock,
+- [x] 12.0a RED: `test_the_app_starts_its_background_workers` — with a fake port and a fake clock,
       starting the app ingests a frame, runs a rotation round, and resends a due command, end to end
-- [ ] 12.0b GREEN: the lifespan starts them and stops them on shutdown; a thread that dies
+- [x] 12.0b GREEN: the lifespan starts them and stops them on shutdown; a thread that dies
       is reported in `/health` rather than silently leaving the station deaf
-- [ ] 12.0c RED: `test_a_dead_gateway_thread_is_visible_in_health` — kill the thread, `/health` says so
-- [ ] 12.0d GREEN: supervise both threads from the lifespan
+- [x] 12.0c RED: `test_a_dead_gateway_thread_is_visible_in_health` — kill the thread, `/health` says so
+- [x] 12.0d GREEN: supervise both threads from the lifespan
 
-- [ ] 12.1 RED: `test_unit_file_has_restart_always_and_no_internet_wait_dependency` — parses the
+- [x] 12.1 RED: `test_unit_file_has_restart_always_and_no_internet_wait_dependency` — parses the
       `.service` file; asserts `Restart=always`, `After=network.target`, and no
       `network-online.target` in `Requires=`/`Wants=`/`After=`
-- [ ] 12.2 GREEN: write `deploy/feeder-station.service`
-- [ ] 12.3 RED: `test_process_restarts_after_being_killed` — subprocess harness kills the process,
+- [x] 12.2 GREEN: write `deploy/feeder-station.service`
+- [x] 12.3 RED: `test_process_restarts_after_being_killed` — subprocess harness kills the process,
       asserts `/health` responds again within a bounded delay — **CI proxy, hardware gate named below**
-- [ ] 12.4 GREEN: confirm `cli.py`/lifespan exits cleanly on SIGTERM so `Restart=always` restarts a
+- [x] 12.4 GREEN: confirm `cli.py`/lifespan exits cleanly on SIGTERM so `Restart=always` restarts a
       sane process, not a corrupt one
-- [ ] 12.5 RED: `test_service_starts_with_no_route_to_the_internet` — mocked DNS/network failure,
-      `/health` and `/` still respond
-- [ ] 12.6 GREEN: confirm no startup path makes an outbound network call
-- [ ] 12.7 Docs (no test): `docs/deploy.md` runbook naming install steps and the exact Pi OS image +
-      version tested (or flags it explicitly as still open, per design's open question)
-- [ ] 12.8 GREEN: `cli.py` args — `--db-path`, `--serial-device`, `--no-gateway` (rollback kill switch)
+- [x] 12.5 RED: `test_service_starts_with_no_route_to_the_internet` — `socket.socket.connect` blocked
+      in-process (no real offline Pi available); `/health` and `/` still respond
+- [x] 12.6 GREEN: confirm no startup path makes an outbound network call
+- [x] 12.7 Docs (no test): `docs/deploy.md` runbook naming install steps; the exact Pi OS image +
+      version tested is flagged explicitly as still open, per design's own open question
+- [x] 12.8 GREEN: `cli.py` args — `--db-path`, `--serial-device`, `--no-gateway` (rollback kill switch)
 
 Done: unit-file, killed-process-restart, and no-internet scenarios pass; runbook exists and names the
-tested image or flags it open.
-PR boundary: `deploy/feeder-station.service`, `docs/deploy.md`, `cli.py` args, tests.
+tested image or flags it open. All four orphaned drivers (gateway reader, `run_rotation_round`,
+`due_for_resend`/`sent`, `attempt_time_sync`) actually run, proven end to end by
+`tests/test_app.py::test_the_app_starts_its_background_workers`. 11.10's CLI/UI export trigger is
+closed (`POST /api/export`).
+
+**Two pre-existing bugs surfaced by actually starting real threads, fixed in this slice's scope:**
+1. `adapters/store.py`'s `Store` opened exactly one SQLite connection in `__init__` and reused it from
+   every caller. That was never exercised concurrently before this slice (only the HTTP threadpool ever
+   touched a `Store`); giving it a second real caller thread hits Python's `sqlite3`
+   `check_same_thread` guard immediately (`sqlite3.ProgrammingError`). Fixed with one connection per
+   thread, opened lazily (design.md section 7's own concurrency table already specifies this — it was
+   simply never implemented). See `tests/adapters/test_store.py::
+   test_a_second_thread_gets_its_own_connection_not_the_first_threads`.
+2. `adapters/scheduler.py::run_rotation_round` detected a completed lap by comparing
+   `schedule.position` before and after `record_response`. For a roster of exactly one node,
+   `position` is always `0 % 1 == 0` — the comparison never fires, and the function never returns. All
+   of slice 7's own tests used 10-node rosters, so this never showed up until a real, small registry
+   (the single most common real deployment shape: a station with a handful of known traps) hit it for
+   the first time in `run_scheduler_loop`. Fixed by counting "did this node's turn settle" directly
+   instead of inferring it from position. See `tests/adapters/test_backlog_rotation.py::
+   test_run_rotation_round_terminates_with_a_single_silent_node`.
+
+Also added, required by design.md section 7's own concurrency table but never previously implemented:
+the registry lock ("owned by the shell"), now held around every HTTP route's and every worker's
+registry access; and a lock around `SerialGateway.write_frame()` ("one lock around `port.write()`"),
+since this slice is the first to give the gateway two real writer threads.
+
+PR boundary: everything in the widened Files list above. Larger than the ~220-line estimate in the
+Review Workload Forecast — flagged, not hidden; see this slice's apply-progress notes for the
+reasoning (concurrency correctness bugs only became reachable once real threads existed, and fixing
+them was judged safer than shipping a station that hangs or corrupts state under real deployment
+conditions).
 Hardware gate: **a literal power-pull on the physical Pi (S7's literal criterion) is not CI-provable.**
 CI proxy: 12.3's killed-process-then-restart test; named outstanding in the verify report.
 

@@ -58,3 +58,20 @@ def test_env_overrides_the_backlog_retry_budget() -> None:
     config = StationConfig.load(argv=[], env={"FEEDER_STATION_BACKLOG_RETRY_BUDGET": "5"})
 
     assert config.backlog_retry_budget == 5
+
+
+def test_arm_duration_defaults_to_24_hours() -> None:
+    """12.0d: `adapters/command_sender.py` reads this rather than a bare
+    literal — messages.md does not pin ARM's `expires_epoch` duration, so
+    this is this slice's own documented assumption, the same discipline
+    `domain/payloads.py` already applies to unpinned field widths.
+    """
+    config = StationConfig.load(argv=[], env={})
+
+    assert config.arm_duration == timedelta(hours=24)
+
+
+def test_env_overrides_the_arm_duration() -> None:
+    config = StationConfig.load(argv=[], env={"FEEDER_STATION_ARM_DURATION_S": "3600"})
+
+    assert config.arm_duration == timedelta(seconds=3600)

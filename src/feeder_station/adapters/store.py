@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,15 +98,21 @@ _PRAGMAS: tuple[tuple[str, str | int], ...] = (
 )
 
 
-def open_connection(path: str | Path) -> sqlite3.Connection:
+def open_connection(path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open one connection with the full PRAGMA set applied.
 
     ``isolation_level=None`` puts the connection in autocommit mode so
     :meth:`Store.append` can issue its own explicit ``BEGIN IMMEDIATE`` /
     ``COMMIT`` — the Python ``sqlite3`` module's own implicit-transaction
     handling would otherwise fight over when a transaction starts.
+
+    ``check_same_thread=False`` is for :class:`Store`'s own per-thread
+    connections alone (design.md section 7): each is only ever *used* from
+    the one thread that lazily opened it, but the shell may need to
+    *close* it later from whichever thread is running shutdown, after
+    every worker thread has already been joined and stopped touching it.
     """
-    conn = sqlite3.connect(path, isolation_level=None)
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=check_same_thread)
     for pragma, value in _PRAGMAS:
         conn.execute(f"PRAGMA {pragma} = {value}")
     return conn
@@ -213,11 +220,57 @@ class Store:
     def __init__(self, path: str | Path) -> None:
         _assert_vacuum_into_is_supported()
         self._path = Path(path)
-        self._conn = open_connection(self._path)
+        self._local = threading.local()
+        self._opened_connections: list[sqlite3.Connection] = []
+        self._opened_connections_lock = threading.Lock()
         _ensure_schema(self._conn)
 
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """design.md section 7's own concurrency table, verbatim: "One per
+        thread, created lazily, each opened with the full PRAGMA set...
+        `check_same_thread` exists for a reason." Before slice 12, exactly
+        one thread — whichever constructed this ``Store`` — ever called
+        into it. Slice 12 gives it three (the HTTP threadpool, the gateway
+        thread, the scheduler thread); this lazily opens one connection
+        per calling thread instead of sharing one, which sqlite3's own
+        ``check_same_thread`` default would otherwise refuse outright.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = open_connection(self._path, check_same_thread=False)
+            self._local.conn = conn
+            with self._opened_connections_lock:
+                self._opened_connections.append(conn)
+        return conn
+
+    def optimize(self) -> None:
+        """design.md section 7's shutdown row, verbatim: "runs `PRAGMA
+        optimize`, closes." SQLite's own recommendation is to run this
+        once, right before closing a long-lived connection, so the query
+        planner's statistics stay useful across a restart — cheap, and
+        never called mid-session where it could momentarily block a writer.
+        """
+        self._conn.execute("PRAGMA optimize")
+
     def close(self) -> None:
-        self._conn.close()
+        """Closes every connection this ``Store`` has ever lazily opened,
+        across every thread that ever called into it — not only the
+        calling thread's own.
+
+        Safe only once every other thread holding a reference to this
+        ``Store`` has actually stopped running (design.md section 7's
+        "Shutdown" row: the lifespan joins both worker threads *before*
+        calling this) — ``check_same_thread=False`` on each connection
+        (see :func:`open_connection`) is what makes closing them from here,
+        rather than from their own now-finished threads, possible at all.
+        """
+        with self._opened_connections_lock:
+            connections, self._opened_connections = self._opened_connections, []
+        for conn in connections:
+            conn.close()
+        if hasattr(self._local, "conn"):
+            del self._local.conn
 
     def integrity_check(self) -> str:
         row = self._conn.execute("PRAGMA integrity_check").fetchone()
