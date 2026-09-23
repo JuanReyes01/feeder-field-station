@@ -9,6 +9,7 @@ Protocol double (DD16's own reasoning, one layer up): no SQLite, no pyserial.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 import pytest
@@ -249,3 +250,33 @@ def test_an_undecodable_frame_is_counted_via_record_payload_error() -> None:
     )
 
     assert payload_errors == [None]
+
+
+def test_a_dropped_frame_is_logged_at_warning_with_the_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WARNING K(a) (verify-report-batch1-round2.md): mutation testing
+    proved this log is the only thing that justifies dropping an
+    undecodable frame silently -- downgrading it to
+    `logger.debug("ingest: dropped a frame")`, dropping the exception text
+    that names *why* the frame was undecodable, left all 729 tests green.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    with caplog.at_level(logging.WARNING, logger="feeder_station.adapters.ingest"):
+        ingest_frame(
+            b"\x01\x02\x03",  # too short to even be a header -- raises FrameError
+            store=_StubStore(),
+            ack_port=_SpyAckPort(),
+            registry=registry,
+            publish=lambda event: None,
+            received_epoch=RECEIVED_EPOCH,
+            clock_trust="rtc",
+        )
+
+    drop_records = [r for r in caplog.records if "dropped an undecodable frame" in r.getMessage()]
+    assert len(drop_records) == 1
+    record = drop_records[0]
+    assert record.levelno == logging.WARNING  # not downgraded to DEBUG
+    # the exception itself, not dropped -- FrameError's own message for 3 bytes
+    assert "shorter than" in record.getMessage()

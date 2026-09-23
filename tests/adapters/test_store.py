@@ -7,6 +7,7 @@ explicitly as a proxy, not a hardware gate: see its own docstring.
 
 from __future__ import annotations
 
+import logging
 import random
 import sqlite3
 import subprocess
@@ -14,6 +15,8 @@ import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
@@ -535,6 +538,46 @@ def test_rehydrate_skips_and_counts_an_unreadable_row_without_blocking_other_nod
     assert reopened.rehydration_errors == 1
     assert 7 not in {trap.node_id for trap in registry.traps()}  # the unreadable row, skipped
     assert registry.trap(9).state is TrapState.ARMED  # another node's row, unaffected
+
+
+def test_a_skipped_row_is_logged_at_error_with_the_node_id_and_a_traceback(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """WARNING K(a) (verify-report-batch1-round2.md): `except Exception`
+    was accepted as a broad catch specifically because every skip is
+    logged with its node id and a traceback -- the *counted* half
+    (`rehydration_errors`) is pinned five ways; the *logged* half was
+    pinned by nobody, and mutation testing proved it: downgrading this log
+    to `logger.debug("rehydrate: skipped a row")`, dropping both the node
+    id and the traceback, left all 729 tests green.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 7, "battery_mv": 4000, "targets_version": 1},  # 7: no known TrapState
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    with caplog.at_level(logging.DEBUG, logger="feeder_station.adapters.store"):
+        store.rehydrate(registry)
+
+    skip_records = [r for r in caplog.records if "skipping an unreadable row" in r.getMessage()]
+    assert len(skip_records) == 1
+    record = skip_records[0]
+    assert record.levelno == logging.ERROR  # not downgraded to DEBUG
+    assert "7" in record.getMessage()  # the node id -- not dropped
+    assert record.exc_info is not None  # the traceback -- not dropped
 
 
 def test_rehydration_errors_resets_each_call_not_accumulating(tmp_path: Path) -> None:
