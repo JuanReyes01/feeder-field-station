@@ -10,20 +10,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from feeder_station.domain.traps import Registry, TrapState
+from feeder_station.domain.traps import Registry
 
 SILENCE_AFTER = timedelta(minutes=5)
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Broadcaster:
@@ -60,7 +61,8 @@ def create_app(registry: Registry | None = None) -> FastAPI:
 
     @app.get("/api/traps")
     def traps() -> list[dict[str, Any]]:
-        return app.state.registry.view(now=now())
+        rows: list[dict[str, Any]] = app.state.registry.view(now=now())
+        return rows
 
     @app.post("/api/traps/{node_id}/arm")
     def arm(node_id: int) -> dict[str, Any]:
@@ -84,7 +86,7 @@ def create_app(registry: Registry | None = None) -> FastAPI:
                 while True:
                     try:
                         payload = await asyncio.wait_for(queue.get(), timeout=20)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield b": keepalive\n\n"  # keeps proxies and phones from hanging up
                         continue
                     yield f"data: {payload}\n\n".encode()

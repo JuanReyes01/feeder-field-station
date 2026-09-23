@@ -1,0 +1,58 @@
+# OpenSpec project config for feeder-field-station
+# (see ~/.claude/skills/_shared/openspec-convention.md).
+# Phase blocks with settings use a `rules:` list, because a YAML mapping cannot
+# also hold list items.
+schema: spec-driven
+
+context: |
+  Project: feeder-field-station, the always-on device of the CICG feeder network.
+  It is the radio gateway to the traps, the operator interface, and the event store.
+  Part of the CICG feeder project in Fusagasugá, Colombia.
+  Tech stack: Python 3.13 managed with uv; FastAPI; uvicorn; Server-Sent Events.
+    Build with hatchling, src layout, version single-sourced in __init__.py.
+  Architecture: pure domain/ (frames.py, traps.py) with no FastAPI and no I/O;
+    app.py is a thin HTTP shell; cli.py is the entry point. Adapters hold all I/O.
+  Testing: pytest; ruff (line length 100); mypy strict.
+  Requirements: docs/requirements.md, S1-S15, each with an acceptance criterion.
+  System design: https://github.com/JuanReyes01/cicg-feeder-project/blob/main/docs/design.md
+  Protocol: the station and the nodes share one frame format, defined once in the
+    project's docs/protocol/messages.md. domain/frames.py is the Python half; the C
+    half is components/link_frame in feeder-node-firmware, and BOTH test suites use
+    the same byte vectors so they cannot drift apart.
+  Hardware target: Raspberry Pi with mains power, a battery-backed DS3231 RTC, and
+    intermittent internet. Developed on a Fedora laptop.
+  Sibling repos: feeder-node-firmware (ESP-IDF, the traps), feeder-analysis (the
+    desktop analysis app that ingests the raw CSV format), feeder-rfid-legacy (archive).
+  Engram project key: cicg.
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Trace every requirement back to an S-number in docs/requirements.md
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Every requirement carries an acceptance criterion that can actually be run
+    - State from a device is what the device reports, never what was commanded (S4)
+    - A capture is a state that persists until acknowledged, not an event (S3)
+  design:
+    - Include sequence or data-flow diagrams for complex flows
+    - Document architecture decisions with rationale
+    - Keep domain/ free of FastAPI, sockets, files and clocks
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - One delivery slice is one PR with a green uv run pytest
+  apply:
+    tdd: true
+    test_command: "uv run pytest"
+    rules:
+      - Follow existing code patterns
+      - Strict TDD (RED, GREEN, REFACTOR)
+      - Nothing is acknowledged to a trap before it is durably stored (S9)
+  verify:
+    test_command: "uv run pytest"
+    build_command: "uv build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

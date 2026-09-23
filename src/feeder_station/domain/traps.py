@@ -13,7 +13,7 @@ afterwards sees it, whether they were watching at the time or not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any

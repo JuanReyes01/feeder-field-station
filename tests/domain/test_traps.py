@@ -6,11 +6,11 @@ Two rules from the requirements drive every test here:
   S3  — a capture is a state the trap stays in, not a notification that flies by.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from feeder_station.domain.traps import Registry, TrapState
 
-NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
 
 
