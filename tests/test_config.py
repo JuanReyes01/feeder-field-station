@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from feeder_station.config import StationConfig
 
 
@@ -75,3 +77,27 @@ def test_env_overrides_the_arm_duration() -> None:
     config = StationConfig.load(argv=[], env={"FEEDER_STATION_ARM_DURATION_S": "3600"})
 
     assert config.arm_duration == timedelta(seconds=3600)
+
+
+def test_channel_budget_frames_per_s_defaults_to_the_messages_md_budget() -> None:
+    """CRITICAL 3: docs/protocol/messages.md's own arithmetic -- a ~50-byte
+    frame costs 0.37 s of airtime, and the budget is "under 1% occupied" --
+    named once, here, not a bare literal inside `domain/pacing.py`'s caller.
+    """
+    config = StationConfig.load(argv=[], env={})
+
+    assert config.channel_budget_frames_per_s == pytest.approx(0.01 / 0.37)
+
+
+def test_env_overrides_the_channel_budget() -> None:
+    config = StationConfig.load(
+        argv=[], env={"FEEDER_STATION_CHANNEL_BUDGET_FRAMES_PER_S": "5.0"}
+    )
+
+    assert config.channel_budget_frames_per_s == 5.0
+
+
+def test_argv_overrides_the_channel_budget() -> None:
+    config = StationConfig.load(argv=["--channel-budget-frames-per-s", "2.5"], env={})
+
+    assert config.channel_budget_frames_per_s == 2.5

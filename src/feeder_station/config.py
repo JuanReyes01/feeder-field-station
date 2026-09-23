@@ -42,10 +42,22 @@ DEFAULT_BACKLOG_RETRY_BUDGET = 3
 # already requires for SET_TARGETS.
 DEFAULT_ARM_DURATION = timedelta(hours=24)
 
+# CRITICAL 3 (sdd-verify field-station-p4): docs/protocol/messages.md's own
+# arithmetic (also quoted in adapters/workers.py's docstring) -- a ~50-byte
+# frame costs 0.37 s of airtime at Long Fast, and the design budget is
+# "keep the channel under 1% occupied". Named once, here, exactly like
+# every other DEFAULT_* in this module, so `domain/pacing.py`'s bucket is
+# sized from a config value rather than a literal buried in
+# `adapters/workers.py`.
+AIRTIME_PER_FRAME_S = 0.37
+CHANNEL_BUDGET_FRACTION = 0.01
+DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S = CHANNEL_BUDGET_FRACTION / AIRTIME_PER_FRAME_S
+
 ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
 ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
 ENV_BACKLOG_RETRY_BUDGET = "FEEDER_STATION_BACKLOG_RETRY_BUDGET"
 ENV_ARM_DURATION_S = "FEEDER_STATION_ARM_DURATION_S"
+ENV_CHANNEL_BUDGET_FRAMES_PER_S = "FEEDER_STATION_CHANNEL_BUDGET_FRAMES_PER_S"
 
 
 @dataclass(frozen=True)
@@ -54,6 +66,7 @@ class StationConfig:
     silence_after: timedelta = DEFAULT_SILENCE_AFTER
     backlog_retry_budget: int = DEFAULT_BACKLOG_RETRY_BUDGET
     arm_duration: timedelta = DEFAULT_ARM_DURATION
+    channel_budget_frames_per_s: float = DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S
 
     @classmethod
     def load(
@@ -76,6 +89,7 @@ class StationConfig:
         parser.add_argument("--silence-after-s", type=float, default=None)
         parser.add_argument("--backlog-retry-budget", type=int, default=None)
         parser.add_argument("--arm-duration-s", type=float, default=None)
+        parser.add_argument("--channel-budget-frames-per-s", type=float, default=None)
         args, _unknown = parser.parse_known_args(list(argv) if argv is not None else [])
 
         return cls(
@@ -99,6 +113,11 @@ class StationConfig:
                 resolved_env.get(ENV_ARM_DURATION_S),
                 DEFAULT_ARM_DURATION,
             ),
+            channel_budget_frames_per_s=_resolve_float(
+                args.channel_budget_frames_per_s,
+                resolved_env.get(ENV_CHANNEL_BUDGET_FRAMES_PER_S),
+                DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S,
+            ),
         )
 
 
@@ -117,4 +136,12 @@ def _resolve_int(from_argv: int | None, from_env: str | None, default: int) -> i
         return from_argv
     if from_env is not None:
         return int(from_env)
+    return default
+
+
+def _resolve_float(from_argv: float | None, from_env: str | None, default: float) -> float:
+    if from_argv is not None:
+        return from_argv
+    if from_env is not None:
+        return float(from_env)
     return default
