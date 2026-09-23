@@ -26,7 +26,11 @@
   .trap.no-contact { border-color: #a86a00; }
   .state { font-weight: 700; text-transform: uppercase; font-size: .8rem; letter-spacing: .05em; }
   .no-contact-badge { color: #ffb648; font-weight: 700; margin: .3rem 0; }
-  .stale-badge { color: #ffcf7a; font-style: italic; font-size: .85rem; margin: .3rem 0; }
+  /* WARNING 2 (verify-report-batch2c.md): bold, same weight as
+     .no-contact-badge, not the previous small italic -- doubt about a
+     trap's own state must read at a glance next to "SIN CONTACTO", not
+     as a footnote nobody notices. */
+  .stale-badge { color: #ffcf7a; font-weight: 700; margin: .3rem 0; }
   .pending { color: #7ec8ff; font-size: .85rem; }
   .muted { color: #999; font-size: .85rem; }
   .empty { color: #999; }

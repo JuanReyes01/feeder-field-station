@@ -402,11 +402,30 @@ def test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant() -
     unconditionally (`True` or `False`) or removed from the markup
     entirely while the field name stayed in a comment -- this pins the
     actual ternary that keys the badge's presence on the flag.
+
+    **Extended (WARNING 2, verify-report-batch2c.md): the substring pin
+    above only proved the ternary's *condition* mentions the flag -- it
+    constrained neither branch's content. Two mutations shipped green:
+    inverting the condition (`!t.state_may_be_stale ? <badge> : ""`, the
+    signal exactly backwards) and emptying both branches (`? "" : ""`, the
+    badge deleted). Anchoring the whole ternary -- condition, the truthy
+    branch's actual markup, and the falsy branch's empty string -- fails
+    both: an inverted condition no longer reads `${t.state_may_be_stale ?`
+    literally, and empty branches no longer contain the badge markup after
+    the `?`.
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
 
     assert re.search(r"t\.state_may_be_stale\s*\?", html), (
         "renderTrap must branch on t.state_may_be_stale, not render a constant"
+    )
+    pattern = re.compile(
+        r"""\$\{t\.state_may_be_stale \? '<p class="stale-badge">[^<]*</p>' : ""\}"""
+    )
+    assert pattern.search(html), (
+        "the ternary must be t.state_may_be_stale (not inverted) rendering the "
+        "stale-badge markup on true and nothing on false -- not an inverted "
+        "condition or two empty branches"
     )
 
 
