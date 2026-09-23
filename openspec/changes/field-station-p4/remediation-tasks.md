@@ -403,6 +403,11 @@ and `trap-commands` "resend continues until version confirmed" — both should m
 
 ## Batch 3 — CRITICAL 3 + CRITICAL 4: one station-wide frame budget
 
+**Split as this plan anticipated**: 3a (tasks 3.1-3.6, CRITICAL 3, the station-wide pacer) is
+**DONE** — see `apply-progress-batch3a.md`. 3b (tasks 3.7-3.8, CRITICAL 4, the withheld-`TIME_SYNC`
+write volume) is **not started**; it can now consume the `SharedBudget`/`domain/pacing.py` primitive
+3a introduced, per this plan's own contingency note below.
+
 **Rule to prove**: **the station's total transmit rate stays under the budget in
 `docs/protocol/messages.md`** (~50 bytes/frame, 0.37 s airtime at Long Fast, "keep the channel under
 1% occupied" → ≈0.027 frames/s), **measured off the wire through the real `cli.build_app` path**, not
@@ -416,7 +421,7 @@ same deadlock argument the first report made); `clock-trust/spec.md` "Withhold T
 untrusted" (the log obligation, MUST log each withheld send — the defect is volume, not the log
 itself); S9 (indirectly, via the fsync-inside-the-lock interaction with WARNING 4).
 
-- [ ] 3.1 RED — new integration test (suggested home: `tests/adapters/test_workers.py` or
+- [x] 3.1 RED — new integration test (suggested home: `tests/adapters/test_workers.py` or
   `tests/test_cli.py`, reusing the report's own measurement harness — real `build_app`, real pty, 10
   traps, all armed and unconfirmed, backoff burst allowed to settle, then a steady-state window
   measured off the wire): assert the station's **total** frames/s across `GET_BACKLOG`, `ARM`/
@@ -424,7 +429,13 @@ itself); S9 (indirectly, via the fsync-inside-the-lock interaction with WARNING 
   supersedes `test_default_backlog_pacing_holds_the_stations_own_airtime_budget`'s scope (that test's
   own docstring "honestly scopes it to backlog polling's own contribution" — this task is the first
   one that names and measures the *station's* total, which nothing today does).
-- [ ] 3.2 GREEN — new pure module under `src/feeder_station/domain/` (e.g. `pacing.py`, following the
+  **Done** (batch 3a): `tests/test_cli.py::test_station_total_frame_rate_holds_the_channel_budget_
+  off_the_real_wire` — real `cli.build_app`, real `pty.openpty()`, 10 traps ARMed via the real HTTP
+  route and never confirming, burst settled, steady-state window measured off the wire via raw
+  `os.read`/COBS decode. Uses an accelerated `--channel-budget-frames-per-s` (mechanism proof, not a
+  ~100s-per-run real-time proof); the real, unaccelerated default was measured separately with the same
+  harness and is recorded in `apply-progress-batch3a.md`.
+- [x] 3.2 GREEN — new pure module under `src/feeder_station/domain/` (e.g. `pacing.py`, following the
   existing `backlog.RotationSchedule` shape — pure state, mutated under `registry_lock` in
   `adapters/workers.py`, never importing `adapters/`, DD1): a token-bucket or equivalent primitive
   sized from the `messages.md` budget (configurable via `config.py`, not hardcoded, mirroring how
@@ -432,20 +443,34 @@ itself); S9 (indirectly, via the fsync-inside-the-lock interaction with WARNING 
   `src/feeder_station/adapters/workers.py::run_scheduler_loop`: gate `poll_node` (`GET_BACKLOG`),
   `send_due_commands` and `attempt_time_sync`'s actual sends all through the same bucket — "no future
   driver can bypass it either," per the report's own fix language.
-- [ ] 3.3 GREEN — `src/feeder_station/domain/commands.py::RESEND_BACKOFF_S`: raise the 30 s cap toward
+  **Done** (batch 3a): `domain/pacing.py::TokenBucket`/`start`/`try_consume`, sized from the new
+  `config.channel_budget_frames_per_s`. `adapters/workers.py::SharedBudget` wraps it (driven by
+  `time.monotonic()`, not the injected `Clock` — see apply-progress for why). `send_due_commands` takes
+  a required `budget` param and consumes per trap internally (the only one of the three capable of a
+  multi-frame burst in one call); `poll_node`/`attempt_time_sync` are gated at their sole production
+  call site in `run_scheduler_loop`, confirmed via `rg` to be their only reachable caller.
+- [x] 3.3 GREEN — `src/feeder_station/domain/commands.py::RESEND_BACKOFF_S`: raise the 30 s cap toward
   `config.heartbeat_interval` (a command cannot be confirmed faster than the trap's own heartbeat
   cadence, so capping the backoff below that cadence only adds unconfirmable retransmits).
-- [ ] 3.4 RED — `tests/domain/test_commands.py` (or wherever `RESEND_BACKOFF_S`/`due_for_resend` is
+  **Done** (batch 3a): cap raised to 300 s (`DEFAULT_HEARTBEAT_INTERVAL`), doubling schedule extended.
+- [x] 3.4 RED — `tests/domain/test_commands.py` (or wherever `RESEND_BACKOFF_S`/`due_for_resend` is
   currently covered): assert the new cap value and that `due_for_resend` still behaves correctly at
   the new ceiling — a straightforward value-change test, not property-shaped, since this one genuinely
   is a constant.
-- [ ] 3.5 GREEN for 3.4.
-- [ ] 3.6 **Edited assertion** — `tests/adapters/test_workers.py::test_default_backlog_pacing_holds_
+  **Done** (batch 3a): `test_resend_backoff_is_capped_at_the_default_heartbeat_interval_not_30s`.
+- [x] 3.5 GREEN for 3.4.
+- [x] 3.6 **Edited assertion** — `tests/adapters/test_workers.py::test_default_backlog_pacing_holds_
   the_stations_own_airtime_budget`. **Before**: asserts `1 / DEFAULT_HEARTBEAT_INTERVAL.total_
   seconds() * 0.37 < 0.01` — arithmetic on two module constants, no station constructed, no frame
   counted. **After**: either deleted in favor of 3.1's real measurement, or rewritten to assert the
   same real-wire measurement 3.1 performs for the `GET_BACKLOG`-alone case specifically (matching its
   original, narrower, honestly-scoped docstring) while 3.1 owns the *total*. State which was chosen.
+  **Done** (batch 3a): **rewritten, not deleted** — renamed
+  `test_get_backlog_alone_holds_the_channel_budget_measured_for_real`, drives the real
+  `run_scheduler_loop` on a real thread, 10 idle traps, clock left `UNSET` so GET_BACKLOG is the only
+  category competing, and counts real frames off a `_SpyGateway`. A companion test,
+  `test_time_sync_alone_is_capped_by_the_shared_budget`, proves the same shared budget caps TIME_SYNC
+  too. See apply-progress for why deletion was rejected.
 - [ ] 3.7 RED — new test bounding `STATION_TIME_SYNC_WITHHELD` row-write rate with an unset clock and
   a multi-node roster over a multi-tick window (property-shaped: an upper bound on rows/second that
   holds regardless of roster size or tick count — not "at least one row exists," which is what
