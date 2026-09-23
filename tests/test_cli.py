@@ -12,17 +12,19 @@ flag produced without actually starting a server.
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store
 from feeder_station.cli import build_app
 from feeder_station.config import StationConfig
 from feeder_station.domain import payloads
 from feeder_station.domain.events import OPERATOR_SET_TARGETS, StationEvent
+from feeder_station.domain.traps import Registry
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
 
@@ -200,6 +202,139 @@ def test_an_older_capture_does_not_regress_a_newer_heartbeats_state(tmp_path: Pa
     assert trap["capture"]["tag"] == "0384199C87EC06"  # S3 still holds: still surfaced
 
 
+# --- CRITICAL 1 (sdd-verify, field-station-p4 batch 2): the rehydrated
+# registry must equal the live registry, for every ordering and every
+# report type -- verify-report-2.md's own diagnosis is that the prior fix
+# was validated against one example instead of this rule. --------------------
+
+_REHYDRATION_NODE = 11
+_OLD = 6 * 3600.0
+_NEW = 120.0
+_NEWER = 60.0
+_RECENT = 30.0
+
+# (msg_type, fields, tag, seconds-before-now) per event, oldest listed first
+# only by convention -- the property under test does not assume an order.
+_REHYDRATION_ORDERINGS: list[
+    tuple[str, list[tuple[int, dict[str, object], bytes | None, float]]]
+] = [
+    (
+        "capture_old_heartbeat_new",
+        [
+            (payloads.CAPTURED, {"state_after": 2}, TAG, _OLD),
+            (
+                payloads.HEARTBEAT,
+                {"state": 0, "battery_mv": 4000, "targets_version": 1},
+                None,
+                _NEW,
+            ),
+        ],
+    ),
+    (
+        "heartbeat_old_capture_new",  # the mirror ordering the prior fix regressed
+        [
+            (
+                payloads.HEARTBEAT,
+                {"state": 1, "battery_mv": 3900, "targets_version": 2},
+                None,
+                _OLD,
+            ),
+            (payloads.CAPTURED, {"state_after": 2}, TAG, _NEW),
+        ],
+    ),
+    (
+        "capture_alone_no_heartbeat_ever",
+        [(payloads.CAPTURED, {"state_after": 2}, TAG, _RECENT)],
+    ),
+    (
+        "heartbeat_then_fault",
+        [
+            (
+                payloads.HEARTBEAT,
+                {"state": 1, "battery_mv": 3900, "targets_version": 2},
+                None,
+                _OLD,
+            ),
+            (payloads.FAULT, {"code": 1, "detail": ""}, None, _NEWER),
+        ],
+    ),
+    (
+        "fault_then_newer_heartbeat",  # the un-reported mirror of the case above
+        [
+            (payloads.FAULT, {"code": 1, "detail": ""}, None, _OLD),
+            (
+                payloads.HEARTBEAT,
+                {"state": 1, "battery_mv": 3900, "targets_version": 2},
+                None,
+                _NEW,
+            ),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "events"),
+    _REHYDRATION_ORDERINGS,
+    ids=[case_id for case_id, _ in _REHYDRATION_ORDERINGS],
+)
+def test_rehydrated_registry_matches_the_live_registry_for_every_ordering(
+    tmp_path: Path,
+    case_id: str,
+    events: list[tuple[int, dict[str, object], bytes | None, float]],
+) -> None:
+    """CRITICAL 1 (verify-report-2.md, Part 1.2): not "this ordering
+    rehydrates correctly" but *the rehydrated registry equals the live
+    registry, for every ordering and every report type* -- `HEARTBEAT`,
+    `CAPTURED` and `FAULT`, in both directions. One property, one test,
+    parametrized over five logs: the same log fed through two paths (the
+    live ingest path, replayed directly here via `adapters/ingest.py::
+    _apply_to_registry`; the rehydrated path, through a real restart) must
+    agree, never merely "the one ordering a report happened to print."
+
+    `event-store/spec.md` "Registry rehydration at boot" (rebuild the
+    last known reported state); `radio-gateway/spec.md` "FAULT and
+    silence handling" (a `FAULT` MUST update reported state, including
+    across a restart); `trap-commands/spec.md`'s S4 ("displayed state
+    MUST always be whatever its own most recent report said"); S3, S4,
+    S11.
+    """
+    now = datetime.now(UTC)
+    now_epoch = now.timestamp()
+
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    live_registry = Registry(silence_after=timedelta(minutes=15))
+    for msg_id, (msg_type, fields, tag, offset) in enumerate(events, start=1):
+        event = StationEvent(
+            source="node",
+            node_id=_REHYDRATION_NODE,
+            msg_type=msg_type,
+            msg_id=msg_id,
+            node_epoch=None,
+            tag=tag,
+            fields=fields,
+            payload=b"",
+        )
+        received_epoch = now_epoch - offset
+        seed.append(event, received_epoch=received_epoch, clock_trust="ntp")
+        _apply_to_registry(live_registry, event, at=datetime.fromtimestamp(received_epoch, tz=UTC))
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rehydrated_rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+
+    live_row = live_registry.view(now=now)[0]
+    rehydrated_row = rehydrated_rows[_REHYDRATION_NODE]
+
+    for field in ("state", "last_seen", "reachable"):
+        assert rehydrated_row[field] == live_row[field], (
+            f"{case_id}: {field} diverges -- live={live_row[field]!r} "
+            f"rehydrated={rehydrated_row[field]!r}"
+        )
+
+
 # --- CRITICAL 2 (sdd-verify, field-station-p4): a corrupt stored row must
 # never brick the boot -------------------------------------------------------
 
@@ -330,6 +465,73 @@ def test_boot_survives_a_broken_node_roster_query(tmp_path: Path) -> None:
     body = response.json()
     assert body["ok"] is True
     assert body["rehydration_errors"] == 1
+
+
+# --- WARNING J (verify-report-batch1-round2.md): a row rehydration cannot
+# read must never fabricate "idle" -- "unknown" must be representable. ------
+
+
+def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: Path) -> None:
+    """`battery_mv`/`targets_version`/`last_seen` all honestly render
+    `null` when their source row cannot be read; before this fix `state`
+    was the one field that invented a value instead -- `Trap`'s dataclass
+    default, `TrapState.IDLE`, the calmest reading available and
+    indistinguishable from a trap that genuinely reported idle. In a
+    system whose whole job is telling a biologist whether a trap is
+    holding an animal, that is the worst possible default
+    (verify-report-batch1-round2.md: "a false all-clear on a trap holding
+    an animal").
+
+    The only `HEARTBEAT` row is corrupted the same way CRITICAL 2's own
+    tests corrupt one (`state` byte out of range); the `CAPTURED` row is
+    otherwise well-formed but its own `state_after` is missing -- a row
+    shape the wire decoder could never produce (`decode_captured`
+    requires it), simulating corruption landing on that one field
+    specifically, the same technique WARNING B's own parametrized
+    `payloads.py` tests use. Nothing anywhere can honestly supply a state
+    fact for this node; the capture object itself is still restored (S3).
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 7, "battery_mv": 3100, "targets_version": 9},  # 7: no known TrapState
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.CAPTURED,
+            msg_id=2,
+            node_epoch=None,
+            tag=TAG,
+            fields={},  # state_after missing -- simulated corruption of that field alone
+            payload=b"",
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+        health = c.get("/health").json()
+
+    trap = rows[7]
+    assert trap["state"] is None  # honest "we do not know" -- never a fabricated "idle"
+    assert trap["capture"]["tag"] == "0384199C87EC06"  # S3 still holds
+    assert health["rehydration_errors"] == 1  # only the heartbeat row was unreadable
 
 
 def test_an_unconfirmed_set_targets_command_survives_a_restart(tmp_path: Path) -> None:
