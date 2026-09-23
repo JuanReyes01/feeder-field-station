@@ -544,6 +544,7 @@ class Store:
             return
         for node_id in node_ids:
             facts: list[_ReportedFact] = []
+            a_state_row_was_unreadable = False
             for state_step in (
                 self._rehydrate_heartbeat,
                 self._rehydrate_capture,
@@ -554,6 +555,7 @@ class Store:
                 except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
                     logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
                     self.rehydration_errors += 1
+                    a_state_row_was_unreadable = True
                     continue
                 if fact is not None:
                     facts.append(fact)
@@ -578,6 +580,13 @@ class Store:
             if facts:
                 winner = max(facts, key=lambda fact: fact.seq)
                 registry.restore_reported_state(node_id, winner.state, at=winner.at)
+                if a_state_row_was_unreadable:
+                    # WARNING C (verify-report-batch2a.md), WARNING J's own
+                    # residual: an unread sibling row could have been newer
+                    # than `winner`, silently superseding a real report with
+                    # an older one. Say so rather than presenting a
+                    # possibly-stale fact as current.
+                    registry.mark_state_possibly_stale(node_id)
 
             try:
                 self._rehydrate_desired_command(node_id, registry)

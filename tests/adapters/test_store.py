@@ -566,6 +566,83 @@ def test_rehydration_errors_resets_each_call_not_accumulating(tmp_path: Path) ->
     assert store.rehydration_errors == 1  # not 3 -- each call starts fresh
 
 
+# --- WARNING C (verify-report-batch2a.md), WARNING J's own residual --------
+# WARNING J closed "no readable state row at all" (`state` honestly `None`).
+# It left open "the *newest* state-bearing row is unreadable, an older one
+# is not" -- the older, readable report still wins the race and is shown as
+# current, with nothing saying a fresher one existed and could not be read.
+
+
+def test_a_skipped_newer_row_flags_the_older_survivor_as_possibly_stale(
+    tmp_path: Path,
+) -> None:
+    """Two-row node: a readable HEARTBEAT (`ARMED`) first, then a FAULT
+    whose `received_epoch` cannot be turned into a `datetime` (the same
+    `OverflowError` CRITICAL A's own corruption technique produces) --
+    the node's actual latest word, unreadable. The HEARTBEAT still wins
+    the state race (WARNING J: a real, older report beats nothing at
+    all) but the winner must now say it might not be current, not
+    present `armed` as a plain fact the way `test_fault_uplink_updates_
+    reported_state_to_fault` shows a *readable* FAULT would.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 1},  # 1 -> ARMED
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.FAULT,
+            msg_id=2,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=b"",
+        ),
+        received_epoch=1e20,  # unreadable: OverflowError inside _epoch_to_datetime
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    # the older, readable report -- still the best fact there is
+    assert trap.state is TrapState.ARMED
+    assert trap.state_may_be_stale is True  # ... but a newer one existed and could not be read
+    assert reopened.rehydration_errors == 1
+
+
+def test_a_fresh_live_report_clears_the_possibly_stale_flag(tmp_path: Path) -> None:
+    """The flag is a rehydration-time hedge, not a permanent mark: once the
+    node reports again live, that report is by definition the newest thing
+    the station has heard, so there is nothing left to be stale about.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.restore_reported_state(7, TrapState.ARMED, at=datetime.now(UTC))
+    registry.mark_state_possibly_stale(7)
+    assert registry.trap(7).state_may_be_stale is True
+
+    registry.heartbeat(7, state=TrapState.IDLE, at=datetime.now(UTC))
+
+    assert registry.trap(7).state_may_be_stale is False
+
+
 def test_trap_state_from_wire_maps_every_valid_byte_to_the_right_state() -> None:
     """WARNING B: the wire-order mapping, pinned end to end."""
     assert [trap_state_from_wire(v) for v in range(len(TrapState))] == [

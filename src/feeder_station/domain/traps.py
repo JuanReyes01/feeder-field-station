@@ -60,6 +60,17 @@ class Trap:
     # the station does not know, and must say so, never guess the safest-
     # looking answer.
     state: TrapState | None = None
+    # WARNING C (sdd-verify field-station-p4 batch 2, verify-report-batch2a.md):
+    # WARNING J's own residual. `state` above can be a real, readable
+    # report and still not be the node's *newest* one -- when a fresher
+    # state-bearing row exists but could not be read, the older, readable
+    # report still wins the state race (a real report beats nothing at
+    # all) but must say it might not be current, the same "unknown beats a
+    # default that renders as safe" rule WARNING J already applies when
+    # there is no fact at all. Cleared by the next live report (`heartbeat`/
+    # `captured`/`fault`), since that report is by definition the newest
+    # thing the station has heard.
+    state_may_be_stale: bool = False
     battery_mv: int | None = None
     targets_version: int | None = None
     last_seen: datetime | None = None
@@ -106,6 +117,7 @@ class Registry:
     ) -> Trap:
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = state
+        trap.state_may_be_stale = False  # WARNING C: a live report is always the newest one
         trap.last_seen = at
         if battery_mv is not None:
             trap.battery_mv = battery_mv
@@ -171,6 +183,7 @@ class Registry:
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = state
+        trap.state_may_be_stale = False  # WARNING C: a live report is always the newest one
         trap.last_seen = at
         trap.capture = Capture(tag=tag, at=at)
         return trap.capture
@@ -213,6 +226,20 @@ class Registry:
         trap.state = state
         trap.last_seen = at
 
+    def mark_state_possibly_stale(self, node_id: int) -> None:
+        """Rehydration-only (WARNING C, sdd-verify field-station-p4 batch 2,
+        verify-report-batch2a.md): called when a node's state-bearing rows
+        were a mix of readable and unreadable -- :meth:`restore_reported_state`
+        already applied the best available fact, but a fresher, unreadable
+        sibling row means that fact might not be the node's true latest.
+        Never called from the live ingest path: a live report is by
+        definition the newest thing the station has heard, so
+        :meth:`heartbeat`/:meth:`captured`/:meth:`fault` each clear this
+        instead of setting it.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.state_may_be_stale = True
+
     def restore_heartbeat_fields(
         self, node_id: int, battery_mv: int | None, targets_version: int | None
     ) -> None:
@@ -247,6 +274,7 @@ class Registry:
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = TrapState.FAULT
+        trap.state_may_be_stale = False  # WARNING C: a live report is always the newest one
         trap.last_seen = at
 
     def acknowledge(self, node_id: int, at: datetime) -> None:
@@ -273,6 +301,11 @@ class Registry:
                     # the same "never enabled, never counts as a value"
                     # discipline `battery_mv`/`last_seen` already apply.
                     "state": trap.state.value if trap.state is not None else None,
+                    # WARNING C: a real, readable report can still not be
+                    # the node's newest one -- true only while an unread
+                    # sibling row might have been fresher (rehydration);
+                    # cleared by the node's next live report.
+                    "state_may_be_stale": trap.state_may_be_stale,
                     "reachable": reachable,
                     "trustworthy": reachable,
                     "battery_mv": trap.battery_mv,
