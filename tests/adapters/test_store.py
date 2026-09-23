@@ -226,19 +226,110 @@ def test_registry_reflects_last_known_state_after_restart(tmp_path: Path) -> Non
     trap = registry.trap(7)
     assert trap.battery_mv == 3900
     assert trap.targets_version == 2
-    # CRITICAL 2 (sdd-verify, field-station-p4): `state` is the heartbeat
-    # replay's fact alone, never the capture's, however much more recent
-    # the capture is -- trap-commands/spec.md, "The trap's displayed state
-    # MUST always be whatever its own most recent HEARTBEAT or HELLO
-    # reported." Before this fix, `_rehydrate_capture` called
-    # `Registry.captured()`, which also stamps `state`/`last_seen` -- this
-    # assertion used to read `TrapState.FIRED` "because the capture is the
-    # more recent fact", which is exactly the regression: a capture replay
-    # must never regress a state a later heartbeat already reported.
-    assert trap.state is TrapState.ARMED
+    # CRITICAL 1 (sdd-verify, field-station-p4 batch 2 — verify-report-2.md
+    # Part 1.2, ordering B): `state` is whichever of HEARTBEAT/CAPTURED/
+    # FAULT is the node's most recent REPORT by store `seq`, never "the
+    # heartbeat, always" -- trap-commands/spec.md's S4 ("displayed state
+    # MUST always be whatever its own most recent report said") makes no
+    # exception for report type. Here the CAPTURED row (seq 2) is newer
+    # than the HEARTBEAT (seq 1), and its own `state_after` field is the
+    # source (WARNING 7), so the answer is FIRED.
+    #
+    # This assertion previously read `TrapState.ARMED` -- edited from
+    # `FIRED` by an earlier fix pass that made `_rehydrate_capture` never
+    # touch `state` at all, correct only for the mirror ordering (capture
+    # older than the heartbeat) and, per verify-report-2.md, "exactly what
+    # hid ordering B". Not simply flipped back: `test_registry_prefers_a_
+    # newer_heartbeat_over_an_older_capture` below pins that mirror
+    # ordering explicitly in the same file, so the two directions cannot
+    # trade places silently again (task 2.4, option (b): a narrow
+    # store-level guard alongside `test_cli.py`'s boot-level property
+    # test, not a replacement for it -- this exercises `Store.rehydrate()`
+    # directly, a layer the property test does not reach on its own).
+    assert trap.state is TrapState.FIRED
     assert trap.capture is not None
     assert trap.capture.tag == TAG
     assert trap.capture.acknowledged is False
+
+
+def test_registry_prefers_a_newer_heartbeat_over_an_older_capture(tmp_path: Path) -> None:
+    """CRITICAL 1's other direction, in the same file as the test above
+    (task 2.4, option (b)): a `CAPTURED` row older than the latest
+    `HEARTBEAT` must not win the state race, mirroring `test_cli.py::
+    test_an_older_capture_does_not_regress_a_newer_heartbeats_state`'s
+    boot-level proof at the `Store.rehydrate()` unit level.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+
+    capture = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.CAPTURED,
+        msg_id=1,
+        node_epoch=None,
+        tag=TAG,
+        fields={"state_after": 2},  # 2 -> FIRED, but older than the heartbeat below
+        payload=b"",
+    )
+    store.append(capture, received_epoch=1000.0, clock_trust="unset")
+
+    heartbeat = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.HEARTBEAT,
+        msg_id=2,
+        node_epoch=None,
+        tag=None,
+        fields={"state": 0, "battery_mv": 4000, "targets_version": 1},  # 0 -> IDLE
+        payload=b"",
+    )
+    store.append(heartbeat, received_epoch=1001.0, clock_trust="unset")
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.IDLE  # the newer heartbeat wins, not the older capture
+    assert trap.capture is not None  # S3: still surfaced regardless of which fact won the race
+    assert trap.capture.tag == TAG
+
+
+def test_a_winning_captured_row_reads_its_own_state_after_not_a_hardcoded_fired(
+    tmp_path: Path,
+) -> None:
+    """WARNING 7 / task 2.2: `state_after` is decoded and now load-bearing
+    for a winning CAPTURED row, not assumed to always be `FIRED`. Every
+    other test in this file happens to use `state_after=2` (FIRED), which
+    would let a hardcoded `TrapState.FIRED` pass unnoticed -- this one
+    uses a different value specifically so a mutation that hardcodes the
+    answer instead of reading the field is caught (verified by hand: a
+    `state=TrapState.FIRED` hardcode in `_rehydrate_capture` survives
+    every other test in this suite and is killed only by this one).
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    capture = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.CAPTURED,
+        msg_id=1,
+        node_epoch=None,
+        tag=TAG,
+        fields={"state_after": 1},  # 1 -> ARMED, not FIRED
+        payload=b"",
+    )
+    store.append(capture, received_epoch=1000.0, clock_trust="unset")
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.ARMED  # state_after's own value, never a hardcoded FIRED
 
 
 def test_rehydrate_reflects_a_heartbeat_when_no_capture_exists(tmp_path: Path) -> None:
@@ -266,7 +357,21 @@ def test_rehydrate_reflects_a_heartbeat_when_no_capture_exists(tmp_path: Path) -
     assert trap.capture is None
 
 
-def test_rehydrate_does_not_resurface_an_already_acknowledged_capture(tmp_path: Path) -> None:
+def test_rehydrate_still_shows_the_state_of_an_already_acknowledged_capture(
+    tmp_path: Path,
+) -> None:
+    """CRITICAL 1 (sdd-verify, field-station-p4 batch 2 — verify-report-2.md):
+    this test previously asserted no trap existed at all for node 4, on
+    the reasoning that an already-acknowledged capture leaves "nothing
+    reported anything left to rehydrate". That reasoning is exactly the
+    misreading verify-report-2.md's CRITICAL 1 names: *"S4's fact is the
+    trap's most recent report — and a CAPTURED ... is a report, made by
+    the node, about itself"* — and acknowledging one clears the capture
+    *object* alone (`Registry.acknowledge()` only ever sets `trap.capture
+    = None`), never the reported state. The live registry would show
+    `state=fired` for this exact log whether or not the operator ever
+    acknowledged it; rehydration must agree.
+    """
     db_path = tmp_path / "station.db"
     store = Store(db_path)
     capture = StationEvent(
@@ -276,7 +381,7 @@ def test_rehydrate_does_not_resurface_an_already_acknowledged_capture(tmp_path: 
         msg_id=1,
         node_epoch=None,
         tag=TAG,
-        fields={"state_after": 2},
+        fields={"state_after": 2},  # 2 -> FIRED
         payload=b"",
     )
     store.append(capture, received_epoch=1.0, clock_trust="unset")
@@ -297,10 +402,9 @@ def test_rehydrate_does_not_resurface_an_already_acknowledged_capture(tmp_path: 
     registry = Registry(silence_after=timedelta(minutes=15))
     reopened.rehydrate(registry)
 
-    # Node 4 never sent a heartbeat and its only capture is already
-    # acknowledged: nothing reported anything left to rehydrate, so no trap
-    # exists at all (S4 — state comes only from what was reported).
-    assert 4 not in {trap.node_id for trap in registry.traps()}
+    trap = registry.trap(4)
+    assert trap.state is TrapState.FIRED
+    assert trap.capture is None  # acknowledged: the capture object itself does not resurface
 
 
 # --- CRITICAL 2 (sdd-verify, field-station-p4): rehydrate is total ----------

@@ -167,6 +167,22 @@ class StoredEvent:
     payload: bytes | None
 
 
+@dataclass(frozen=True)
+class _ReportedFact:
+    """One state-bearing row's candidate for `rehydrate`'s state race
+    (CRITICAL 1, sdd-verify field-station-p4 batch 2): whichever of a
+    node's HEARTBEAT/CAPTURED/FAULT rows has the highest `seq` is its
+    most recent report and wins, regardless of type -- the same "any of
+    the three is a report" reading `ingest.py::_apply_to_registry`
+    already gives the live path (`registry.heartbeat()`/`captured()`/
+    `fault()` each set `state` unconditionally).
+    """
+
+    seq: int
+    state: TrapState
+    at: datetime
+
+
 _SELECT_COLUMNS = (
     "seq, node_seq, source, node_id, msg_type, msg_id, received_epoch, "
     "clock_trust, node_epoch, tag, fields, payload"
@@ -446,24 +462,34 @@ class Store:
     def rehydrate(self, registry: Registry) -> None:
         """Rebuild ``registry``'s per-node state from stored events.
 
-        Design.md section 6's three-step order, all now implemented
-        (CRITICAL 1/2/verify-report's superseding note, sdd-verify
-        field-station-p4 — the "desired command state" step this
-        docstring used to call out as missing is step 3 below):
+        Four replay steps per node (CRITICAL 1, sdd-verify field-station-p4
+        batch 2 — design.md section 6's old three-step order read as if
+        ``state`` were exclusively the heartbeat's business; it is not:
+        ``ingest.py``'s own live path sets ``state`` from a HEARTBEAT, a
+        CAPTURED *or* a FAULT, whichever arrives, and rehydration must
+        answer the same question the same way):
 
-        1. Latest ``HEARTBEAT`` → the reported state, battery,
-           ``targets_version`` and ``last_seen``.
-        2. Latest unacknowledged ``CAPTURED`` → the capture alone
-           (:meth:`Registry.restore_capture`, CRITICAL 2 — this must never
-           also touch ``state``/``last_seen``: those are step 1's fact,
-           however much older or newer the capture itself is).
-        3. Latest ``operator/arm|disarm|set_targets`` → the *desired*
-           state, replayed only if step 1's own heartbeat has not already
-           satisfied it (DD15) — an edit the trap already confirmed before
-           the restart must not be resurrected as pending.
-           ``desired_tags`` (S2) is replayed on its own from the latest
-           ``OPERATOR_SET_TARGETS`` row regardless, the same independence
-           :meth:`Registry.command_set_targets` already gives it live.
+        (a) The **state race**: :meth:`_rehydrate_heartbeat`,
+            :meth:`_rehydrate_capture` and :meth:`_rehydrate_fault` each
+            return the node's latest row of their own type as a candidate
+            fact, if readable. Whichever candidate has the highest store
+            ``seq`` — the most recent report, of any type — wins and is
+            applied via :meth:`Registry.restore_reported_state`. No
+            candidate at all (every state-bearing row missing or
+            unreadable) leaves ``state`` at its own honest ``None``
+            (WARNING J) rather than defaulting to anything.
+        (b) ``battery_mv``/``targets_version`` — restored from the latest
+            HEARTBEAT regardless of whether it won (a): those fields exist
+            on no other report type (:meth:`_rehydrate_heartbeat`, via
+            :meth:`Registry.restore_heartbeat_fields`).
+        (c) The unacknowledged capture object — :meth:`_rehydrate_capture`,
+            via :meth:`Registry.restore_capture`, independent of which
+            report won the state race (S3: still surfaced either way).
+        (d) The *desired* command state — :meth:`_rehydrate_desired_command`,
+            replayed only if (a)/(b) have not already satisfied it (DD15),
+            so it must run last, after the node's final state is settled.
+            ``desired_tags`` (S2) replays on its own regardless, the same
+            independence :meth:`Registry.command_set_targets` gives it live.
 
         Reachability is deliberately never rehydrated — a restarted
         station has not heard from anyone yet (S11).
@@ -477,7 +503,13 @@ class Store:
         **Skip-and-count, never raise (CRITICAL 2; widened by CRITICAL A,
         sdd-verify field-station-p4 batch 1).** An unreadable row is
         skipped, logged with its node id, and counted in
-        :attr:`rehydration_errors` instead of propagating.
+        :attr:`rehydration_errors` instead of propagating. Granularity is
+        per row-source, not per node (WARNING J's own question, decided
+        deliberately here rather than inherited): a node with one
+        unreadable row still shows whatever its *other* rows honestly
+        support, the same partial-but-honest shape ``battery_mv``/
+        ``last_seen`` already had — dropping the whole node over one bad
+        row would throw away real, readable data for no gain.
 
         The guard is ``except Exception``, not a hand-picked tuple: a
         narrower ``except ValueError`` missed three exception types
@@ -486,7 +518,7 @@ class Store:
         reliably. The contract here genuinely is indifference to the error
         type. ``BaseException`` stays uncaught. The roster query
         (:meth:`_known_node_ids`) and the loop over it are inside this
-        guard too now, not only each node's three replay steps — a
+        guard too now, not only each node's replay steps — a
         ``sqlite3.DatabaseError`` reading ``node_cursor`` used to sit
         above the ``try`` and would have escaped regardless.
 
@@ -502,56 +534,116 @@ class Store:
             self.rehydration_errors += 1
             return
         for node_id in node_ids:
-            for step in (
+            facts: list[_ReportedFact] = []
+            for state_step in (
                 self._rehydrate_heartbeat,
                 self._rehydrate_capture,
-                self._rehydrate_desired_command,
+                self._rehydrate_fault,
             ):
                 try:
-                    step(node_id, registry)
+                    fact = state_step(node_id, registry)
                 except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
                     logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
                     self.rehydration_errors += 1
+                    continue
+                if fact is not None:
+                    facts.append(fact)
+
+            # CRITICAL 1: the winner is the most recent REPORT of any kind,
+            # not "the heartbeat, always". WARNING J: no winner leaves
+            # `state` at `None`, never a fabricated `IDLE`.
+            if facts:
+                winner = max(facts, key=lambda fact: fact.seq)
+                registry.restore_reported_state(node_id, winner.state, at=winner.at)
+
+            try:
+                self._rehydrate_desired_command(node_id, registry)
+            except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
+                logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
+                self.rehydration_errors += 1
 
     def _known_node_ids(self) -> list[int]:
         rows = self._conn.execute("SELECT node_id FROM node_cursor ORDER BY node_id").fetchall()
         return [row[0] for row in rows]
 
-    def _rehydrate_heartbeat(self, node_id: int, registry: Registry) -> None:
+    def _rehydrate_heartbeat(self, node_id: int, registry: Registry) -> _ReportedFact | None:
+        """One row, one atomic attempt: the state candidate (step (a)) is
+        computed first and may raise on an out-of-range byte
+        (``trap_state_from_wire``); only once that has succeeded are
+        ``battery_mv``/``targets_version`` (step (b)) restored, so a
+        corrupt ``state`` byte fails this whole row the same way it did
+        before this batch — CRITICAL A's own per-row-source guard in
+        ``rehydrate`` still counts it once either way, and a node with no
+        *other* readable row for it stays out of the registry entirely,
+        exactly as ``test_rehydrate_skips_and_counts_an_unreadable_row_
+        without_blocking_other_nodes`` (CRITICAL 2) already pins.
+        """
         heartbeat = self.latest(node_id, payloads.HEARTBEAT)
         if heartbeat is None:
-            return
+            return None
 
         state_value = heartbeat.fields.get("state")
-        if not isinstance(state_value, int):
-            return
+        fact = (
+            _ReportedFact(
+                seq=heartbeat.seq,
+                state=trap_state_from_wire(state_value),
+                at=_epoch_to_datetime(heartbeat.received_epoch),
+            )
+            if isinstance(state_value, int)
+            else None
+        )
 
         battery_mv = heartbeat.fields.get("battery_mv")
         targets_version = heartbeat.fields.get("targets_version")
-        registry.heartbeat(
-            node_id=node_id,
-            state=trap_state_from_wire(state_value),
-            at=_epoch_to_datetime(heartbeat.received_epoch),
+        registry.restore_heartbeat_fields(
+            node_id,
             battery_mv=battery_mv if isinstance(battery_mv, int) else None,
             targets_version=targets_version if isinstance(targets_version, int) else None,
         )
+        return fact
 
-    def _rehydrate_capture(self, node_id: int, registry: Registry) -> None:
+    def _rehydrate_capture(self, node_id: int, registry: Registry) -> _ReportedFact | None:
+        """Step (c) — the capture object, gated on acknowledgement as
+        before (CRITICAL 2) — and, since a CAPTURED row is itself a
+        report exactly like a HEARTBEAT or FAULT (S4; ``ingest.py``'s own
+        ``registry.captured()`` sets ``state`` too), step (a)'s CAPTURED
+        candidate from ``state_after`` (WARNING 7 — decoded then
+        discarded until this fix), *regardless* of acknowledgement:
+        acknowledging a capture clears the capture object, never the
+        reported state, matching ``Registry.acknowledge()``'s own scope.
+        """
         captured = self.latest(node_id, payloads.CAPTURED)
         if captured is None or captured.tag is None:
-            return
+            return None
 
         acknowledged = self.latest(node_id, OPERATOR_CAPTURE_ACKNOWLEDGED)
-        if acknowledged is not None and acknowledged.seq > captured.seq:
-            return
+        if acknowledged is None or acknowledged.seq <= captured.seq:
+            registry.restore_capture(
+                node_id=node_id,
+                tag=captured.tag,
+                at=_epoch_to_datetime(captured.received_epoch),
+            )
 
-        # CRITICAL 2: `restore_capture`, never `captured()` — the latter
-        # also stamps `state`/`last_seen`, which must stay the heartbeat
-        # replay's fact alone, regardless of which of the two is newer.
-        registry.restore_capture(
-            node_id=node_id,
-            tag=captured.tag,
+        state_after = captured.fields.get("state_after")
+        if not isinstance(state_after, int):
+            return None
+        return _ReportedFact(
+            seq=captured.seq,
+            state=trap_state_from_wire(state_after),
             at=_epoch_to_datetime(captured.received_epoch),
+        )
+
+    def _rehydrate_fault(self, node_id: int, registry: Registry) -> _ReportedFact | None:
+        """Step (a)'s FAULT candidate (CRITICAL 1) — not replayed at all
+        before this fix. A FAULT payload carries no state byte of its
+        own: the message type *is* the fact
+        (``radio-gateway/spec.md``, "FAULT and silence handling").
+        """
+        fault = self.latest(node_id, payloads.FAULT)
+        if fault is None:
+            return None
+        return _ReportedFact(
+            seq=fault.seq, state=TrapState.FAULT, at=_epoch_to_datetime(fault.received_epoch)
         )
 
     _OPERATOR_COMMAND_MSG_TYPES: tuple[tuple[int, CommandKind], ...] = (
@@ -561,7 +653,11 @@ class Store:
     )
 
     def _rehydrate_desired_command(self, node_id: int, registry: Registry) -> None:
-        """Design.md section 6's third replay step."""
+        """Step (d) — must run last, after the state race (a) and the
+        heartbeat fields (b) have settled the node's final ``state``/
+        ``targets_version``, since :func:`_reported_state` below reads
+        both to decide whether a command is already satisfied (DD15).
+        """
         latest_targets = self.latest(node_id, OPERATOR_SET_TARGETS)
         if latest_targets is not None:
             tags = _tags_from_fields(latest_targets.fields)
