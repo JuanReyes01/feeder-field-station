@@ -326,12 +326,24 @@ def create_app(
         # already applies above.
         link_ok = link is None or bool(link["connected"])
 
+        # CRITICAL 2 (sdd-verify, field-station-p4): "surface it, don't
+        # hide it" — the same convention `link`'s `decode_errors` already
+        # sets. A row `store.rehydrate()` skipped at boot (adapters/
+        # store.py::rehydrate) is real information for whoever is looking
+        # at this station, even though it never crashes the boot any more.
+        # `None` (never a fabricated `0`) when this station has no store at
+        # all, the same "never enabled, never counts" discipline `link`
+        # already applies for a station with no gateway configured.
+        store = app.state.store
+        rehydration_errors = None if store is None else store.rehydration_errors
+
         return {
             "ok": workers_ok and link_ok,
             "clock": now().isoformat(),
             "clock_trust": app.state.clock.trust().value,
             "workers": workers,
             "link": link,
+            "rehydration_errors": rehydration_errors,
         }
 
     @app.get("/api/traps")

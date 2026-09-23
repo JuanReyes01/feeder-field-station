@@ -198,6 +198,59 @@ def test_an_older_capture_does_not_regress_a_newer_heartbeats_state(tmp_path: Pa
     assert trap["capture"]["tag"] == "0384199C87EC06"  # S3 still holds: still surfaced
 
 
+# --- CRITICAL 2 (sdd-verify, field-station-p4): a corrupt stored row must
+# never brick the boot -------------------------------------------------------
+
+
+def test_boot_survives_an_out_of_range_stored_heartbeat_state(tmp_path: Path) -> None:
+    """Before this fix, `store.rehydrate()` ran inside `create_app`'s
+    lifespan with no `try`. `adapters/store.py::trap_state_from_wire` raises
+    `ValueError` for any `state` byte outside 0-3; nothing caught it, so the
+    ASGI startup raised, `uvicorn` exited, and `Restart=always`
+    (`deploy/feeder-station.service`) restarted straight into the same
+    unreadable row -- an infinite crash loop, no `/health`, no UI,
+    unrecoverable in the field without hand-editing SQLite.
+
+    The row here is written directly through `Store.append`, bypassing
+    `payloads.decode_heartbeat`'s now-fixed boundary check (task 1.2) --
+    simulating a bit-flip that happened before that check existed, or any
+    future row the boundary did not anticipate. `event-store/spec.md`'s
+    "Registry rehydration at boot" requirement is that a rebuild must not
+    abort the whole station over one row; `station-deployment/spec.md`'s S7
+    ("starts by itself, a power cut must not need a person") is what a
+    crash loop directly violates. A boot that cannot read one row must
+    still be a boot: it must reach `/health`, and the read failure must be
+    visible there, not merely swallowed.
+    """
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 7, "battery_mv": 4000, "targets_version": 1},  # 7: no known TrapState
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+
+    with TestClient(app) as c:
+        response = c.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["rehydration_errors"] == 1
+
+
 def test_an_unconfirmed_set_targets_command_survives_a_restart(tmp_path: Path) -> None:
     """design.md section 6's third replay step. Before this fix, an edit
     (`PUT /targets`) issued between a trap's last heartbeat and a restart

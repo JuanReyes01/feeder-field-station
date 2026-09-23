@@ -117,7 +117,7 @@ S7, S9 (`docs/requirements.md`).
   `decode_heartbeat`/`decode_captured`, raising the same decode-error class `frames.decode`/
   `interpret()` already use for a corrupt frame, so the existing `decode_errors` counter (surfaced in
   `/health`'s `link` block) picks it up for free — no new counter needed at this layer.
-- [ ] 1.3 RED — `tests/test_cli.py`: boot `cli.build_app` (real `TestClient`, real ASGI lifespan) on a
+- [x] 1.3 RED — `tests/test_cli.py`: boot `cli.build_app` (real `TestClient`, real ASGI lifespan) on a
   store that already holds one syntactically-valid-but-out-of-range `HEARTBEAT.state` row, written
   directly to bypass the now-fixed decode boundary (simulating a bit-flip that happened before 1.2
   existed, or any future row the decode boundary did not anticipate). Assert the app **boots**,
@@ -127,7 +127,7 @@ S7, S9 (`docs/requirements.md`).
   steps in a `try/except` that skips and counts an unreadable row rather than propagating, the same
   best-effort discipline `adapters/ingest.py::_apply_to_registry` already has for the live path.
   Return or store the skip count where `app.py`'s lifespan can reach it.
-- [ ] 1.5 GREEN — `src/feeder_station/app.py::health()`: add a `rehydration_errors` (or equivalent)
+- [x] 1.5 GREEN — `src/feeder_station/app.py::health()`: add a `rehydration_errors` (or equivalent)
   field to the response, sourced from 1.4's count, following the same "surface it, don't hide it"
   convention the `link` block already sets for decode errors.
 - [x] 1.6 REFACTOR — update `rehydrate`'s own docstring (already mid-edit per the CRITICAL-1/2
