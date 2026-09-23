@@ -10,21 +10,56 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.config import StationConfig
+from feeder_station.domain.payloads import TAG_BYTES
 from feeder_station.domain.traps import Registry
+
+# Deliberately one self-contained page: the station must work from a phone on
+# a local network with no internet, so nothing is fetched from a CDN (S8,
+# S10). It left `app.py` for `static/index.html` (DD1, slice 10) — a 400-line
+# HTML string was not reviewable as Python. Hatchling ships this non-Python
+# file inside the package (pyproject.toml), so this still works from an
+# installed wheel, not only from a source checkout.
+_STATIC_DIR = Path(__file__).parent / "static"
+_INDEX_HTML = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+_TAG_HEX_PATTERN = re.compile(rf"[0-9A-Fa-f]{{{TAG_BYTES * 2}}}")
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+class TargetsRequest(BaseModel):
+    """A new target-tag list from the operator (S1/S2's `SET_TARGETS`,
+    slice 2's wire codec). Validated here, at the HTTP boundary, so a
+    mistyped tag never reaches the registry as a silently-wrong version
+    bump -- S13: a biologist typing a 14-character hex code by hand will
+    mistype it sometimes, and the route must refuse clearly, not crash or
+    guess.
+    """
+
+    tags: list[str]
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_are_well_formed(cls, tags: list[str]) -> list[str]:
+        for tag in tags:
+            if not _TAG_HEX_PATTERN.fullmatch(tag):
+                raise ValueError(f"tag must be {TAG_BYTES * 2} hex characters, got {tag!r}")
+        return tags
 
 
 class Broadcaster:
@@ -141,6 +176,25 @@ def create_app(
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "acknowledged": True}
 
+    @app.put("/api/traps/{node_id}/targets")
+    def set_targets(node_id: int, body: TargetsRequest) -> dict[str, Any]:
+        # The desired version is computed from the trap's own last *reported*
+        # version (S4), never an operator-supplied number -- an unknown node
+        # (never yet heard from) starts at 1, same as any first command.
+        try:
+            current_version = app.state.registry.trap(node_id).targets_version
+        except KeyError:
+            current_version = None
+        next_version = (current_version or 0) + 1
+
+        app.state.registry.command_set_targets(node_id, targets_version=next_version, at=now())
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {
+            "node_id": node_id,
+            "pending_command": "set_targets",
+            "desired_targets_version": next_version,
+        }
+
     @app.get("/api/events")
     async def events() -> StreamingResponse:
         queue = app.state.broadcaster.subscribe()
@@ -162,48 +216,6 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return PAGE
+        return _INDEX_HTML
 
     return app
-
-
-# Deliberately one self-contained page: the station must work from a phone on a
-# local network with no internet, so nothing is fetched from a CDN (S8, S10).
-PAGE = """<!doctype html>
-<html lang="es">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Estación CICG</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background: #111; color: #eee; }
-  h1 { font-size: 1.1rem; font-weight: 600; }
-  .trap { border: 1px solid #333; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
-  .capture { border-color: #b33; background: #2a1111; }
-  .unreachable { opacity: .55; }
-  .state { font-weight: 700; text-transform: uppercase; font-size: .8rem; letter-spacing: .05em; }
-  button { font: inherit; padding: .5rem 1rem; border-radius: 6px; border: 1px solid #555;
-           background: #222; color: #eee; }
-</style>
-<h1>Estación CICG</h1>
-<div id="traps">Cargando…</div>
-<script>
-async function refresh() {
-  const traps = await (await fetch('/api/traps')).json();
-  document.getElementById('traps').innerHTML = traps.length ? traps.map(t => `
-    <div class="trap ${t.capture ? 'capture' : ''} ${t.reachable ? '' : 'unreachable'}">
-      <div class="state">Trampa ${t.node_id} · ${t.state}${t.reachable ? '' : ' · SIN CONTACTO'}</div>
-      ${t.capture ? `<p>Capturó ${t.capture.tag}<br><small>${t.capture.at}</small></p>
-        <button onclick="ack(${t.node_id})">Atendida</button>` : ''}
-      ${t.pending_command ? `<p><small>${t.pending_command} pendiente de confirmar</small></p>` : ''}
-    </div>`).join('') : '<p>Ninguna trampa se ha reportado todavía.</p>';
-}
-async function ack(id) {
-  await fetch(`/api/traps/${id}/acknowledge`, {method: 'POST'});
-  refresh();
-}
-new EventSource('/api/events').onmessage = refresh;
-refresh();
-setInterval(refresh, 30000);
-</script>
-</html>
-"""

@@ -33,6 +33,10 @@ path = "src/feeder_station/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/feeder_station"]
+# The operator UI's static/index.html (slice 10, DD1) is not Python — ship it
+# inside the wheel explicitly so an installed package serves the real page,
+# not just a source checkout.
+artifacts = ["src/feeder_station/static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

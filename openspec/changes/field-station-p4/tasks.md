@@ -273,22 +273,22 @@ failure degrades to `unset`, never to a guessed time.
 Traces: S3, S4, S8, S10, S11, S12, S13. Files: `static/index.html` (new — moved out of `app.py`'s
 `PAGE` string per DD1), `app.py` (modified), `pyproject.toml` (package non-Python files).
 
-- [ ] 10.1 RED: `test_app.py::test_index_serves_static_html_with_no_external_asset_reference`
-- [ ] 10.2 GREEN: move `PAGE` into `src/feeder_station/static/index.html`; `app.py`'s `/` route reads
+- [x] 10.1 RED: `test_app.py::test_index_serves_static_html_with_no_external_asset_reference`
+- [x] 10.2 GREEN: move `PAGE` into `src/feeder_station/static/index.html`; `app.py`'s `/` route reads
       it; add hatchling package-data config
-- [ ] 10.3 RED: `test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx` (route-level check —
+- [x] 10.3 RED: `test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx` (route-level check —
       touch-DOM interaction is not pytest's domain)
-- [ ] 10.4 GREEN: add `/api/traps/{id}/disarm`, `/api/traps/{id}/targets` (PUT) calling slice 8's
+- [x] 10.4 GREEN: add `/api/traps/{id}/disarm`, `/api/traps/{id}/targets` (PUT) calling slice 8's
       `Registry`/`Command` methods
-- [ ] 10.5 RED: `test_unacknowledged_capture_is_present_after_a_simulated_restart` (rehydrate a fake
+- [x] 10.5 RED: `test_unacknowledged_capture_is_present_after_a_simulated_restart` (rehydrate a fake
       store, assert `/api/traps` shows it)
-- [ ] 10.6 GREEN: confirm slice 4's rehydration path feeds `/api/traps` correctly at startup
-- [ ] 10.7 RED: `test_unreachable_trap_is_visually_distinguished_in_the_view_payload`
-- [ ] 10.8 GREEN: extend `index.html` template if the existing `.unreachable`/`.capture` classes need
+- [x] 10.6 GREEN: confirm slice 4's rehydration path feeds `/api/traps` correctly at startup
+- [x] 10.7 RED: `test_unreachable_trap_is_visually_distinguished_in_the_view_payload`
+- [x] 10.8 GREEN: extend `index.html` template if the existing `.unreachable`/`.capture` classes need
       a new field
-- [ ] 10.9 RED: `test_clock_unset_banner_present_when_health_reports_unset`
-- [ ] 10.10 GREEN: wire slice 9's `/health` clock field into a banner fetch in `index.html`
-- [ ] 10.11 REFACTOR: assert (in a test) no external asset URL anywhere in `static/index.html`
+- [x] 10.9 RED: `test_clock_unset_banner_present_when_health_reports_unset`
+- [x] 10.10 GREEN: wire slice 9's `/health` clock field into a banner fetch in `index.html`
+- [x] 10.11 REFACTOR: assert (in a test) no external asset URL anywhere in `static/index.html`
 
 Done: all 3 operator-ui scenarios pass; page stays self-contained; every S1/S2/S3/S4/S8/S10/S11/S12/S13
 UI-visible behavior has a route-level test.

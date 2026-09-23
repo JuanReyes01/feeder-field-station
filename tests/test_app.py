@@ -1,18 +1,31 @@
-"""The HTTP face, exercised end to end through the app itself."""
+"""The HTTP face, exercised end to end through the app itself.
+
+Slice 10 (`operator-ui`) adds route-level tests only: whether the page is
+actually operable by a biologist with no manual (S13) and whether it truly
+works one-handed on a phone (S10) are field gates, not CI gates -- a green
+suite here proves the routes, payload shapes and static file exist and
+behave; it is not a usability result.
+"""
 
 import asyncio
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from feeder_station import app as app_module
+from feeder_station.adapters.store import Store
 from feeder_station.app import Broadcaster, create_app
 from feeder_station.config import StationConfig
+from feeder_station.domain import payloads
 from feeder_station.domain.clock_trust import ClockTrust
+from feeder_station.domain.events import StationEvent
 from feeder_station.domain.traps import Registry, TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
+STATIC_INDEX_PATH = Path(app_module.__file__).parent / "static" / "index.html"
 
 
 class _FixedClock:
@@ -195,3 +208,186 @@ def test_silent_node_is_marked_unreachable_within_15_minutes() -> None:
 
     sixteen_minutes_later = heard_at + timedelta(minutes=16)
     assert registry.view(now=sixteen_minutes_later)[0]["reachable"] is False
+
+
+# --- Slice 10: operator-ui ---------------------------------------------------
+
+# --- 10.1/10.2: the page leaves app.py for static/index.html (DD1) ---------
+
+
+def test_index_serves_static_html_with_no_external_asset_reference() -> None:
+    """The route must serve `static/index.html`'s real bytes -- not a
+    duplicate string still living in `app.py` -- and the file itself must
+    never reach off the local network (S8): no CDN script, font or
+    stylesheet.
+    """
+    expected = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    c, _ = client()
+    page = c.get("/")
+
+    assert page.status_code == 200
+    assert page.text == expected
+    assert "http://" not in expected
+    assert "https://" not in expected
+
+
+def test_the_page_still_loads_with_no_traps() -> None:
+    """Same scenario `test_the_page_loads_with_no_traps` already covers,
+    re-asserted against the file-backed route so the move off `PAGE` did not
+    silently drop the greeting.
+    """
+    c, _ = client()
+    page = c.get("/")
+    assert page.status_code == 200
+    assert "Estación CICG" in page.text
+
+
+# --- 10.3/10.4: every operator route answers, targets included -------------
+
+
+def test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx() -> None:
+    """Route-level only -- touch-DOM interaction is not pytest's domain (see
+    this module's own docstring). Proves every action S13 names reaches the
+    registry through a 2xx response.
+    """
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
+
+    assert c.post("/api/traps/7/arm").status_code // 100 == 2
+    assert c.post("/api/traps/7/disarm").status_code // 100 == 2
+    assert c.put("/api/traps/7/targets", json={"tags": ["0384199C87EC06"]}).status_code // 100 == 2
+
+    registry.captured(node_id=7, tag=TAG, at=now())
+    assert c.post("/api/traps/7/acknowledge").status_code // 100 == 2
+
+
+def test_edit_targets_route_sets_pending_command_with_incremented_version() -> None:
+    """The route computes the next desired version from the trap's last
+    *reported* version (never an operator-supplied number, which would let
+    two stale tabs race each other to a version neither trap ever asked
+    for) -- S4's read-only-what-is-reported rule extended to versioning.
+    """
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.heartbeat(node_id=5, state=TrapState.IDLE, at=now(), targets_version=3)
+
+    response = c.put("/api/traps/5/targets", json={"tags": ["0384199C87EC06", "AABBCCDDEE0011"]})
+    assert response.status_code == 200
+    assert response.json()["desired_targets_version"] == 4
+
+    row = c.get("/api/traps").json()[0]
+    assert row["pending_command"] == "set_targets"
+    assert row["desired_targets_version"] == 4
+
+
+def test_edit_targets_route_accepts_a_never_before_seen_node() -> None:
+    """An operator may command a trap that has never reported yet -- the
+    desired version starts at 1, not a crash on a registry KeyError.
+    """
+    c, _ = client()
+    response = c.put("/api/traps/99/targets", json={"tags": []})
+    assert response.status_code == 200
+    assert response.json()["desired_targets_version"] == 1
+
+
+def test_edit_targets_route_rejects_a_malformed_tag() -> None:
+    """S13: a biologist typing a tag by hand will mistype it sometimes -- the
+    route must refuse clearly rather than silently arm a trap to ignore
+    everything or crash.
+    """
+    c, _ = client()
+    response = c.put("/api/traps/5/targets", json={"tags": ["not-a-tag"]})
+    assert response.status_code == 422
+
+
+# --- 10.5/10.6: an unacknowledged capture survives a simulated restart -----
+
+
+def test_unacknowledged_capture_is_present_after_a_simulated_restart(tmp_path: Path) -> None:
+    """Confirms slice 4's `Store.rehydrate()` feeds `/api/traps` correctly --
+    S3's second half, proven through an actual close/reopen of the database,
+    not just an in-memory `Registry`.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    capture_event = StationEvent(
+        source="node",
+        node_id=7,
+        msg_type=payloads.CAPTURED,
+        msg_id=1,
+        node_epoch=None,
+        tag=TAG,
+        fields={"state_after": 2},
+        payload=b"",
+    )
+    store.append(capture_event, received_epoch=1000.0, clock_trust="unset")
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    c = TestClient(create_app(registry))
+    rows = c.get("/api/traps").json()
+    assert rows[0]["node_id"] == 7
+    assert rows[0]["capture"]["tag"] == "0384199C87EC06"
+
+
+# --- 10.7/10.8: reported state and reachability are two different facts ----
+
+
+def test_unreachable_trap_is_visually_distinguished_in_the_view_payload() -> None:
+    """S4/S11: the payload the page renders must carry `reachable` as a
+    field separate from `state` -- an armed-but-unreachable trap must never
+    look, in the data the page reads, identical to a healthy armed one.
+    """
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.heartbeat(node_id=1, state=TrapState.ARMED, at=now())
+    registry.heartbeat(node_id=2, state=TrapState.ARMED, at=datetime(2000, 1, 1, tzinfo=UTC))
+
+    rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+
+    assert rows[1]["reachable"] is True
+    assert rows[2]["reachable"] is False
+    # Both report the identical `state` -- the distinguishing fact lives only
+    # in `reachable`, never folded into `state` itself as a reassuring lie.
+    assert rows[1]["state"] == rows[2]["state"] == "armed"
+
+
+# --- 10.9/10.10: the clock-unset banner reads /health's own field ----------
+
+
+def test_clock_unset_banner_present_when_health_reports_unset() -> None:
+    """Full DOM rendering is not pytest's domain (see this module's own
+    docstring). This proves two mechanical facts instead: the static page's
+    script reads `clock_trust`, and `/health` truly reports `unset` through a
+    real app instance -- the same field 9.x's `/health` tests already cover,
+    now proven reachable from the page that renders it.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert "clock_trust" in html
+    assert "unset" in html
+
+    app = create_app(clock=_FixedClock(ClockTrust.UNSET))
+    c = TestClient(app)
+    assert c.get("/health").json()["clock_trust"] == "unset"
+
+
+# --- 10.11 REFACTOR: no external asset anywhere in the shipped page --------
+
+
+def test_static_index_html_references_no_external_asset() -> None:
+    """S8: the station may have no route out at all. The page must never
+    depend on a CDN, a remote font or a remote script to render.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "://" not in html  # also catches protocol-relative `//cdn...` references

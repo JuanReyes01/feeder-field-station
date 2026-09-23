@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estación CICG</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, sans-serif; margin: 0; padding: 0 .75rem 2rem;
+    background: #111; color: #eee; font-size: 16px; max-width: 100vw; overflow-x: hidden;
+  }
+  header { position: sticky; top: 0; z-index: 10; background: #111; padding-top: .5rem; }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: .5rem 0; }
+
+  .banner { border-radius: 8px; padding: .75rem; margin: .5rem 0; font-size: .95rem; }
+  .banner-clock { background: #402a00; border: 1px solid #a86a00; color: #ffcf7a; }
+  .banner-capture { background: #3a0d0d; border: 2px solid #c93a3a; padding: 1rem; }
+  .banner-capture strong { font-size: 1.05rem; }
+  .banner-capture button {
+    font: inherit; min-height: 44px; min-width: 44px; padding: .6rem 1.1rem; border-radius: 6px;
+    border: 1px solid #c93a3a; background: #c93a3a; color: #fff; font-weight: 600; margin-top: .5rem;
+  }
+
+  .trap { border: 1px solid #333; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
+  .trap.no-contact { border-color: #a86a00; }
+  .state { font-weight: 700; text-transform: uppercase; font-size: .8rem; letter-spacing: .05em; }
+  .no-contact-badge { color: #ffb648; font-weight: 700; margin: .3rem 0; }
+  .pending { color: #7ec8ff; font-size: .85rem; }
+  .muted { color: #999; font-size: .85rem; }
+  .empty { color: #999; }
+
+  .actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+  button {
+    font: inherit; min-height: 44px; padding: .6rem 1rem; border-radius: 6px;
+    border: 1px solid #555; background: #222; color: #eee;
+  }
+
+  details { margin-top: .6rem; }
+  summary { cursor: pointer; padding: .5rem 0; min-height: 44px; display: flex; align-items: center; }
+  textarea {
+    width: 100%; min-height: 6rem; font: inherit; font-size: 16px; background: #1a1a1a;
+    color: #eee; border: 1px solid #444; border-radius: 6px; padding: .5rem; margin-top: .4rem;
+  }
+  .field-error { color: #ff8a8a; font-size: .85rem; margin-top: .3rem; }
+  .field-ok { color: #7ee787; font-size: .85rem; margin-top: .3rem; }
+</style>
+<header>
+  <h1>Estación CICG</h1>
+  <div id="clock-banner"></div>
+  <div id="capture-banner"></div>
+</header>
+<div id="traps">Cargando…</div>
+<script>
+const $ = (id) => document.getElementById(id);
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+async function refresh() {
+  const [traps, health] = await Promise.all([
+    fetch("/api/traps").then((r) => r.json()),
+    fetch("/health").then((r) => r.json()).catch(() => null),
+  ]);
+  renderClockBanner(health);
+  renderCaptureBanner(traps);
+  renderTraps(traps);
+}
+
+// S12: an unset clock is a banner, not a footnote -- every timestamp on this
+// page is suspect until this clears, so it renders above everything else,
+// pinned, for as long as /health says `unset`.
+function renderClockBanner(health) {
+  $("clock-banner").innerHTML = (health && health.clock_trust === "unset")
+    ? '<div class="banner banner-clock">⚠ Reloj de la estación sin confirmar. ' +
+      "Las horas en esta pantalla pueden ser incorrectas.</div>"
+    : "";
+}
+
+// S3: an unacknowledged capture is the loudest thing on the page, pinned in
+// the header so it stays visible while scrolling the trap list below, and
+// offering exactly one action.
+function renderCaptureBanner(traps) {
+  const captured = traps.filter((t) => t.capture);
+  $("capture-banner").innerHTML = captured.map((t) => `
+    <div class="banner banner-capture">
+      <strong>Trampa ${t.node_id} capturó una marca</strong><br>
+      Marca ${escapeHtml(t.capture.tag)}<br>
+      <small>${escapeHtml(t.capture.at)}</small><br>
+      <button onclick="ack(${t.node_id})">Atendida</button>
+    </div>`).join("");
+}
+
+function renderTraps(traps) {
+  $("traps").innerHTML = traps.length
+    ? traps.map(renderTrap).join("")
+    : '<p class="empty">Ninguna trampa se ha reportado todavía.</p>';
+}
+
+// S4/S11: `reachable` is a fact separate from `state` -- a trap we cannot
+// reach is never shown as simply "armed"; the two facts stay visually
+// distinct here rather than merged into one reassuring line.
+function renderTrap(t) {
+  const noContact = !t.reachable;
+  const battery = t.battery_mv != null ? `${t.battery_mv} mV` : "sin dato";
+  const version = t.targets_version != null ? t.targets_version : "—";
+  const lastSeen = t.last_seen ? escapeHtml(t.last_seen) : "nunca";
+  return `
+    <div class="trap ${noContact ? "no-contact" : ""}">
+      <div class="state">Trampa ${t.node_id} · ${t.state}</div>
+      ${noContact ? '<p class="no-contact-badge">⚠ SIN CONTACTO — este estado puede estar desactualizado</p>' : ""}
+      <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
+      ${t.pending_command ? `<p class="pending">${describePending(t)}</p>` : ""}
+      <div class="actions">
+        <button onclick="arm(${t.node_id})">Armar</button>
+        <button onclick="disarm(${t.node_id})">Desarmar</button>
+      </div>
+      <details>
+        <summary>Editar lista de objetivos</summary>
+        <textarea id="targets-${t.node_id}"
+          placeholder="Un código de 14 caracteres por línea, ej: 0384199C87EC06"></textarea>
+        <div class="actions">
+          <button onclick="saveTargets(${t.node_id})">Guardar lista</button>
+        </div>
+        <div id="targets-msg-${t.node_id}"></div>
+      </details>
+    </div>`;
+}
+
+function describePending(t) {
+  if (t.pending_command === "set_targets") {
+    return `Lista de objetivos v${t.desired_targets_version} pendiente de confirmar`;
+  }
+  const verb = t.pending_command === "arm" ? "Armado" : "Desarmado";
+  return `${verb} pendiente de confirmar`;
+}
+
+async function arm(id) { await fetch(`/api/traps/${id}/arm`, { method: "POST" }); refresh(); }
+async function disarm(id) { await fetch(`/api/traps/${id}/disarm`, { method: "POST" }); refresh(); }
+async function ack(id) { await fetch(`/api/traps/${id}/acknowledge`, { method: "POST" }); refresh(); }
+
+async function saveTargets(id) {
+  const box = $(`targets-${id}`);
+  const msg = $(`targets-msg-${id}`);
+  const tags = box.value.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+  const response = await fetch(`/api/traps/${id}/targets`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags }),
+  });
+  if (response.ok) {
+    msg.innerHTML = '<p class="field-ok">Guardada. Esperando confirmación de la trampa.</p>';
+    refresh();
+  } else {
+    msg.innerHTML = '<p class="field-error">No se pudo guardar: revisá que cada código tenga ' +
+      "14 caracteres hexadecimales, uno por línea.</p>";
+  }
+}
+
+new EventSource("/api/events").onmessage = refresh;
+refresh();
+setInterval(refresh, 30000);
+</script>
+</html>
