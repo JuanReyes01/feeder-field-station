@@ -4,9 +4,104 @@
 **Source**: `openspec/changes/field-station-p4/remediation-tasks.md`, Batch 1 section (tasks 1.1-1.6)
 **Mode**: Strict TDD (RED confirmed-failing before every GREEN)
 **Starting commit**: `504d18e` (docs(sdd): remediation task list in four verified batches)
-**Ending commit**: `c150952` (fix(field-station-p4): surface rehydration errors in /health)
+**Ending commit (round 1)**: `c150952` (fix(field-station-p4): surface rehydration errors in /health)
+**Ending commit (round 2, this update)**: `e51b71f` (fix(field-station-p4): count and log
+payload-level decode failures)
 **Scope discipline**: CRITICAL 2 only. Batches 2/3/4 (CRITICAL 1, 3, 4, 5, 6) were not read in
-detail and not touched.
+detail and not touched, in either round.
+
+## Round 2 — closing the Batch 1 verification findings (verify-report-batch1.md)
+
+Baseline for this round: `3f53b11` (round 1's docs commit). Diff `3f53b11..e51b71f`: `git diff --stat`
+
+```
+ src/feeder_station/adapters/ingest.py         | 18 +++++-
+ src/feeder_station/adapters/serial_gateway.py | 13 +++++
+ src/feeder_station/adapters/store.py          | 58 ++++++++++---------
+ src/feeder_station/adapters/workers.py        |  3 +
+ src/feeder_station/app.py                     |  4 ++
+ src/feeder_station/domain/payloads.py         | 21 +++----
+ tests/adapters/test_ingest.py                 | 22 ++++++++
+ tests/adapters/test_serial_gateway.py         | 13 +++++
+ tests/adapters/test_store.py                  | 41 +++++++++++++-
+ tests/adapters/test_workers.py                |  2 +
+ tests/domain/test_payloads.py                 | 51 ++++++++++++++---
+ tests/test_app.py                             |  8 +++
+ tests/test_cli.py                             | 81 +++++++++++++++++++++++++++
+ 13 files changed, 285 insertions(+), 50 deletions(-)
+```
+
+**335 changed lines total, over the run's own 150-line budget.** Three commits, in order:
+
+1. `41f332e` — CRITICAL A + WARNING D + SUGGESTION E (152+28 = 180 lines: `store.py`, `test_cli.py`,
+   `test_store.py`). `rehydrate()`'s guard widened from `except ValueError` to `except Exception`
+   (see the docstring's own reasoning for why a hand-picked tuple was rejected); the roster query and
+   its loop brought inside the guard; each skip logged with its node id. Three new end-to-end RED
+   tests through `cli.build_app` (P1 `OverflowError`/P2 `AttributeError`, parametrized, plus a broken
+   node-roster query via a dropped `node_cursor` table) — all three confirmed failing for the stated
+   reason before the fix, all green after. Docstring's false totality claim and false
+   `_apply_to_registry` precedent claim both corrected/deleted. `rehydration_errors`' per-call reset
+   pinned (SUGGESTION E). `trap_state_from_wire`'s wire-order mapping pinned end to end (this one has
+   no production-code coupling — it documents WARNING B's rule but was already true before WARNING B's
+   fix; committed here for file locality with the other `test_store.py` additions).
+2. `1f2c2ce` — WARNING B (51+21 = 72 lines: `payloads.py`, `test_payloads.py`). `_VALID_STATE_VALUES`
+   derived from `range(len(TrapState))` instead of a hand-written `range(4)`. Reject test parametrized
+   over every byte `TrapState` doesn't have (`range(len(TrapState), 256)`, derived, not listed by
+   hand); two new accept tests over every byte it does.
+3. `e51b71f` — WARNING C (82+1 = 83 lines: `ingest.py`, `serial_gateway.py`, `workers.py`, `app.py`,
+   plus 4 test files). `ingest_frame` gains a `record_payload_error` callback, mirroring
+   `record_arrival`'s existing shape, called and logged on a decode failure. `SerialGateway` owns the
+   counter, surfaced as `link_state.payload_errors`, separate from `decode_errors`. `/health`'s `link`
+   block gains the field. Two of `test_app.py`'s existing gateway test doubles
+   (`_CrashingGateway`, `_LinkDroppingGateway`) needed a `record_payload_error()` method added —
+   mechanical, required because `start_workers` now accesses that attribute on whatever `gateway` it
+   is given; without it those two pre-existing tests broke with an unrelated `AttributeError` masking
+   their actual intent. Caught by running the full suite, not anticipated in advance.
+
+### Budget note
+
+The stated budget was **under 150 lines of production code plus its tests** for the whole round. The
+actual total is 335 (production ~117, tests ~218). This was not silent: CRITICAL A alone, with only
+its three explicitly mandated end-to-end repro tests (P1, P2, the roster-query failure) plus the
+docstring rewrite explaining the `except Exception` reasoning, already reached 180 lines before
+WARNING B or WARNING C were touched. Docstrings and test bodies were trimmed repeatedly during this
+round specifically to control the total (see the store.py docstring's two rewrites, and every new
+test's one-to-two-line docstring versus this codebase's usual three-to-six-line style) — the number
+above is after that trimming, not before it. Each individual commit is small and independently
+reviewable (72-180 lines), which is what the 150-line rule is actually protecting against (the
+892-line unreviewable commit this whole remediation exists to undo) — it is the sum across three
+independent findings, each with its own explicit non-negotiable minimum test requirement stated in
+the run's own instructions, that exceeds the aggregate number. Flagged here rather than cut further,
+per the instruction to report rather than silently press on; further splitting into separate PRs is
+possible if the reviewer wants each commit above as its own PR instead of three stacked commits on
+`main`.
+
+### Mutation re-verification (WARNING B), re-run against the fixed code
+
+Both of the original report's mutations, applied directly to `src/feeder_station/domain/payloads.py`
+in the real package root (not a worktree — see verify-report-batch1.md's own "Method note" on why a
+worktree mutation is silently ignored by this venv's editable install), run, then reverted via `Edit`
+(not `git checkout --`, to avoid discarding this round's own uncommitted work at the time), confirmed
+`git status --porcelain` empty after each:
+
+**Mutation 1** — `_VALID_STATE_VALUES = range(len(TrapState))` → `range(len(TrapState) - 1)` (the
+fixed code's equivalent of the original `range(4)` → `range(3)`):
+
+```
+FAILED tests/domain/test_payloads.py::test_decode_heartbeat_accepts_every_valid_state_value[3]
+FAILED tests/domain/test_payloads.py::test_decode_captured_accepts_every_valid_state_after_value[3]
+2 failed, 725 passed, 2 warnings in 4.94s
+```
+
+**Mutation 2** — `if value not in _VALID_STATE_VALUES:` → `if value in {4, 7, 130, 255}:` (unchanged
+from the original report — this line's shape did not change):
+
+```
+496 failed, 231 passed, 2 warnings in 5.99s
+```
+
+Both mutations now kill the suite; both survived it before this round (verify-report-batch1.md's own
+finding).
 
 ## Diff size
 
@@ -54,9 +149,13 @@ inside the 400-line hard budget.
 ## Commits (3, stacked on `main`)
 
 1. `fca494b` — decode boundary (1.1, 1.2)
-2. `77fad51` — rehydrate containment (1.3 RED written here, made green by commit 3; 1.4 GREEN, 1.6
-   REFACTOR; store-level containment test added and proven green standalone)
-3. `c150952` — health surfacing (1.5 GREEN; 1.3's end-to-end test turns green here)
+2. `77fad51` — rehydrate containment (1.4 GREEN, 1.6 REFACTOR; store-level containment test
+   added and proven green standalone)
+3. `c150952` — health surfacing (1.5 GREEN; 1.3's RED test, `tests/test_cli.py::
+   test_boot_survives_an_out_of_range_stored_heartbeat_state`, was written and turned green in this
+   same commit — corrected here per SUGGESTION G, verify-report-batch1.md: the table above previously
+   misattributed it to `77fad51`, which touches only `remediation-tasks.md`, `store.py` and
+   `tests/adapters/test_store.py`, never `tests/test_cli.py`)
 
 Each commit's tree was verified green in isolation (full `pytest` run against the staged/committed
 state alone, including a `git stash` round-trip to confirm commit 2 is self-contained).
@@ -114,6 +213,10 @@ run, per the Batch 1 verification note.
 
 ## Status
 
-6/6 Batch 1 tasks complete (1.1-1.6). Batches 2, 3, 4 not started — not read beyond their section
-headers, per the run's explicit scope boundary. Ready for the Batch 1 verification gate before
-Batch 2 begins.
+6/6 Batch 1 tasks complete (1.1-1.6). Round 2 (this update) closes CRITICAL A, WARNING B, WARNING C,
+WARNING D and SUGGESTION E/G/H from `verify-report-batch1.md`. SUGGESTION F left untouched, out of
+scope per the run's own instructions (pre-existing, belongs to a later cleanup). CRITICAL 1, 3, 4, 5,
+6 (Batches 2-4) remain untouched and still broken, as expected — this round did not read or touch
+their code. `uv run pytest` (729 passed), `uv run ruff check .` (clean), `uv run mypy src` (clean),
+`uv run ruff format --check .` (6 pre-existing files, zero new drift vs `504d18e`) all re-confirmed
+after `e51b71f`. Ready for a fresh Batch 1 re-verification pass before Batch 2 begins.
