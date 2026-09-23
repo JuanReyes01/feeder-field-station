@@ -117,6 +117,12 @@ S7, S9 (`docs/requirements.md`).
   `decode_heartbeat`/`decode_captured`, raising the same decode-error class `frames.decode`/
   `interpret()` already use for a corrupt frame, so the existing `decode_errors` counter (surfaced in
   `/health`'s `link` block) picks it up for free — no new counter needed at this layer.
+  **Correction (verify-report-batch1, WARNING C): the sentence above was false.** `decode_errors` is
+  owned by `serial_framing.py::FrameStream` and counts COBS-level framing failures only;
+  `ingest.py::ingest_frame` caught `PayloadError` and returned with no counter anywhere, so this task
+  as written turned a loud failure into a silent one. A separate `payload_errors` counter was added
+  and surfaced in `/health`'s `link` block. Left visible rather than rewritten: a plan that quietly
+  edits away its own wrong assumption teaches nobody why the assumption was wrong.
 - [x] 1.3 RED — `tests/test_cli.py`: boot `cli.build_app` (real `TestClient`, real ASGI lifespan) on a
   store that already holds one syntactically-valid-but-out-of-range `HEARTBEAT.state` row, written
   directly to bypass the now-fixed decode boundary (simulating a bit-flip that happened before 1.2
@@ -127,6 +133,14 @@ S7, S9 (`docs/requirements.md`).
   steps in a `try/except` that skips and counts an unreadable row rather than propagating, the same
   best-effort discipline `adapters/ingest.py::_apply_to_registry` already has for the live path.
   Return or store the skip count where `app.py`'s lifespan can reach it.
+  **Correction (verify-report-batch1, WARNING D): `ingest.py::_apply_to_registry` has no exception
+  handling at all** — the "best-effort discipline it already has" cited above does not exist, and that
+  false precedent was copied verbatim into the production docstring before review caught it.
+  **Correction (verify-report-batch1, CRITICAL A): `except ValueError` was not enough.** A corrupt
+  `received_epoch` raises `OverflowError`, a non-object `fields` cell raises `AttributeError`, and the
+  node-roster query itself sat outside the guard. The implemented fix catches `Exception` — the
+  contract is indifference to the error type, so enumerating types is a whitelist that fails on the
+  next one nobody predicted.
 - [x] 1.5 GREEN — `src/feeder_station/app.py::health()`: add a `rehydration_errors` (or equivalent)
   field to the response, sourced from 1.4's count, following the same "surface it, don't hide it"
   convention the `link` block already sets for decode errors.
@@ -221,6 +235,37 @@ re-sending anything"); `trap-commands/spec.md` "Target-list delivery with versio
   ("design.md §6 step 3 as written applies to... `node_cursor`, so the design shares the defect"). Do
   not touch any other design.md line here (the reachability line, the scheduler diagram label, etc.
   are Appendix A / WARNING 14, out of scope).
+
+### Carried in from Batch 1's round-2 verification
+
+These three are Batch 2's subject matter by topic, not a separate batch: 2.8 is the direct consequence
+of the skip granularity task 2.2 has to decide anyway, and 2.9/2.10 are about what `rehydrate()`
+reports when it gives up on something.
+
+- [ ] 2.8 **WARNING J — containment must not fabricate a calm reading.** Batch 1's guard skips
+  per *step*, not per *node*, so a node whose heartbeat replay fails but whose capture replay succeeds
+  is created by `restore_capture` with `Trap.state`'s dataclass default: a trap that last reported
+  `FAULT` displays `"state": "idle"` indefinitely, with `ok: true`. `battery_mv`, `targets_version`
+  and `last_seen` all honestly go `null` in the same situation — `state` is the one field that
+  invents the least alarming value instead of admitting it does not know.
+  This is the same class of defect the first verification called CRITICAL in its own words ("a false
+  all-clear on a trap holding an animal"), so treat it at that severity even though it is reachable
+  only after a corrupt row. Decide the granularity deliberately in 2.2 rather than inheriting it, and
+  make "unknown" representable: a state the interface can render as unknown beats a default that
+  renders as safe. RED test first, driving a corrupt heartbeat row for a node that also has a good
+  capture row, asserting the view never shows `idle` for a node whose real last report was `FAULT`.
+- [ ] 2.9 **WARNING K(b) — one bad row and a lost registry must not look identical.** `/health`
+  reporting `rehydration_errors: 1` is byte-for-byte the same for "1 unreadable row out of 20 healthy
+  nodes" (`/api/traps` returns 20) and "the roster query itself died, registry empty" (`/api/traps`
+  returns 0), `ok: true` in both. The second case used to crash loudly; Batch 1 made it silent, which
+  is the same trade WARNING C caught on the ingest path. Distinguish them — a failure that loses the
+  whole registry is not an error count, it is a degraded boot, and `/health` has to say so.
+- [ ] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
+  downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
+  the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the
+  `except Exception` mitigation is pinned five ways; the *logged with its node id* half is pinned by
+  nobody — and logging is the entire reason the broad catch was acceptable. Add `caplog` assertions
+  for both.
 
 **Verification (after Batch 2, before Batch 3 starts)**: `uv run pytest`, `uv run ruff check .`,
 `uv run mypy src`. Re-run the report's own four-ordering repro plus the never-heard-node repro by
@@ -338,6 +383,47 @@ report's own AST-based "does this symbol have any non-test caller" sweep and con
 `run_rotation_round` no longer appears at all (deleted, not merely uncalled). This is the point to
 run a full `sdd-verify` pass (verify-report #3) against all six CRITICALs plus the Spec Compliance
 Matrix, since it is the first point after which every CRITICAL in this list should be closed.
+
+---
+
+## Batch 5 — CRITICAL I: a corrupt database must not brick the boot either
+
+Found by Batch 1's round-2 verification, *after* Batch 1 passed. Not a regression — Batch 1 made this
+strictly better and broke nothing — but it is the larger half of the same hole, and it blocks
+**archive**, not Batch 2.
+
+**Rule to prove**: *a boot that cannot read its store must still be a boot.* Batch 1 proved that for
+one unreadable **row**. This proves it for the store as a whole.
+
+**Evidence** (300-trial single-bit-flip sweep on a realistic 45 KB `station.db`):
+
+```
+287 (95.7%)  booted clean
+  5 ( 1.7%)  booted, contained      <- what Batch 1 bought
+  8 ( 2.7%)  BOOT FAILED: sqlite3.DatabaseError: malformed database schema
+```
+
+All 8 failures land in `Store.__init__`/`_ensure_schema`, clustered in the `sqlite_master` schema text
+on page 1 — reached from `cli.py:73`, which constructs the `Store` **before** `create_app` exists. No
+app, no lifespan, no `/health`, and under `Restart=always`/`RestartSec=2` that is CRITICAL 2's exact
+crash loop. Also reproduced deterministically six ways: corrupt header, garbage file, truncation,
+shredded mid-file pages, `chmod 000`, and path-is-a-directory.
+
+`docs/requirements.md:94` names SD-card corruption as this system's top hardware risk, and S7 is
+explicitly about surviving repeated unclean power cuts. Batch 1 covers 38% of the flips that cause any
+problem at all; this is the other 62%.
+
+**Satisfies**: `station-deployment/spec.md` S7; `event-store/spec.md`.
+
+**This one needs a design decision before tasks, not a patch.** The question is what a station does
+when its store is unreadable, and there is a real fork: refuse to serve (safe, but a dead station in
+the field), or boot degraded — serve `/health` and the interface, report the store as failed, accept
+live frames into memory, and stand up a fresh store beside the corrupt one so the next power cut does
+not also lose the new data. The second is almost certainly right for a box that nobody can drive out
+to reboot, but it trades away the guarantee that a running station is a recording station, and the
+interface then has to make that distinction impossible to miss. Decide it deliberately, in the open,
+before any code — that is what `sdd-design` is for. Do not let it be settled by whoever happens to
+write the `try`.
 
 ---
 
