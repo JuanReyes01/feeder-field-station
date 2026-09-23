@@ -834,6 +834,20 @@ def _issue_set_targets(c: TestClient, node_id: int) -> None:
     assert response.status_code == 200
 
 
+def _issue_set_targets_then_disarm(c: TestClient, node_id: int) -> None:
+    """CRITICAL 1 (verify-report-batch2c.md): the exact two-click sequence
+    that reaches `_reported_state`'s `trap.state is None` branch with zero
+    corruption. `PUT /targets` makes `restore_desired_tags` create the
+    registry entry first (`store.py:782-786`), with `state` still at its
+    own default, `None`; the `DISARM` that follows is then checked against
+    that entry on the next boot -- the only path in this parametrize table
+    that reaches the second `return None` branch in `_reported_state`
+    rather than the first (`KeyError`, for a node with no entry at all).
+    """
+    _issue_set_targets(c, node_id)
+    _issue_disarm(c, node_id)
+
+
 # CRITICAL 1 (verify-report-batch2.md): the three operator-sourced msg_types
 # `_known_node_ids()` unions in (`adapters/store.py::_OPERATOR_COMMAND_MSG_TYPES`)
 # -- read from the code, not assumed -- so a roster narrowed to a single one of
@@ -845,6 +859,13 @@ def _issue_set_targets(c: TestClient, node_id: int) -> None:
         pytest.param(_issue_arm, "arm", id="arm"),
         pytest.param(_issue_disarm, "disarm", id="disarm"),
         pytest.param(_issue_set_targets, "set_targets", id="set_targets"),
+        # CRITICAL 1 (verify-report-batch2c.md): the previous three cases only
+        # ever exercise `_reported_state`'s `KeyError` branch (no registry
+        # entry at all) -- this one exercises the *other* branch (an entry
+        # whose `state` is still `None`), which N2 proved unpinned: reverting
+        # only that second branch to a fabricated `ReportedState(armed=False,
+        # ...)` passed all 757 tests, because nothing reached it.
+        pytest.param(_issue_set_targets_then_disarm, "disarm", id="set_targets_then_disarm"),
     ],
 )
 def test_a_command_to_a_never_heard_from_node_survives_a_restart(
@@ -860,6 +881,17 @@ def test_a_command_to_a_never_heard_from_node_survives_a_restart(
     OPERATOR_ARM` passed the whole 748-test suite. Parametrized over every
     operator route that can name a never-heard node, so a roster narrowed
     to any single one of them fails here.
+
+    **Extended (CRITICAL 1, verify-report-batch2c.md): a fourth case,
+    `set_targets_then_disarm`, proves `_reported_state`'s other `None`
+    branch** -- the first three cases all reach a node with *no* registry
+    entry at all (`_reported_state`'s `KeyError` branch); the fourth issues
+    `PUT /targets` before `POST /disarm` against the same never-heard node,
+    so the registry entry already exists (`state=None`) by the time
+    `DISARM` is checked, reaching the second branch instead. Both branches
+    of the two-branch rule `_reported_state`'s own docstring states are now
+    covered by this one table, not only the branch the report's example
+    happened to exercise.
 
     Two real boots against the same `station.db`, through `build_app` both
     times (the report's own boot harness, not a hand-called
@@ -897,6 +929,45 @@ def test_a_command_to_a_never_heard_from_node_survives_a_restart(
     assert boot2_rows[never_heard_node]["pending_command"] == expected_pending
     # never reported -- not a fabricated "idle" (WARNING J's own discipline)
     assert boot2_rows[never_heard_node]["state"] is None
+
+
+def test_an_acknowledge_only_node_is_counted_in_the_roster_and_rehydrates_to_nothing(
+    tmp_path: Path,
+) -> None:
+    """SUGGESTION 2 (verify-report-batch2c.md): `OPERATOR_CAPTURE_ACKNOWLEDGED`
+    is the fourth operator `msg_type` (`domain/events.py:34-38`) --
+    `_OPERATOR_COMMAND_MSG_TYPES` names only three. N14 (narrowing
+    `_known_node_ids()`'s union to just those three) survives all 757
+    tests: nothing in `_rehydrate_desired_command` or `_rehydrate_capture`
+    reads an ACK row on its own, so an acknowledge-only node ends up with
+    no `Trap` in the registry either way -- an equivalent mutant *today*.
+    Pinned anyway, once, for symmetry: an equivalent mutant today is a real
+    one the day something *does* read this row type.
+
+    `POST /acknowledge` on a never-heard node 500s (SUGGESTION 8: durable
+    row written by `_record_operator_event` before `registry.acknowledge`
+    raises `KeyError` for a node with no entry) -- the row is durable
+    regardless, so the roster still sees it.
+    """
+    db_path = tmp_path / "station.db"
+    never_heard_node = 99
+
+    boot1, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(boot1, raise_server_exceptions=False) as c1:
+        response = c1.post(f"/api/traps/{never_heard_node}/acknowledge")
+    assert response.status_code == 500  # SUGGESTION 8: durable row written, then a KeyError
+
+    boot2, _args2 = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(boot2) as c2:
+        health = c2.get("/health").json()
+        boot2_rows = {row["node_id"]: row for row in c2.get("/api/traps").json()}
+
+    assert health["ok"] is True
+    # the ACK row still names node 99, so the roster's ground truth and its
+    # own walk agree -- N14's narrower union would agree too, which is
+    # exactly why it is an equivalent mutant for this scenario
+    assert health["roster_nodes_expected"] == health["roster_nodes_rehydrated"] == 1
+    assert never_heard_node not in boot2_rows  # nothing reads an ACK row into a Trap
 
 
 def test_an_unconfirmed_set_targets_command_survives_a_restart(tmp_path: Path) -> None:
