@@ -9,9 +9,25 @@ from fastapi.testclient import TestClient
 
 from feeder_station.app import Broadcaster, create_app
 from feeder_station.config import StationConfig
+from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.traps import Registry, TrapState
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
+
+
+class _FixedClock:
+    """A `Clock` double for route-level tests -- no real RTC or NTP probe
+    involved, same discipline `tests/adapters/test_clock.py` already uses.
+    """
+
+    def __init__(self, trust: ClockTrust) -> None:
+        self._trust = trust
+
+    def now(self) -> datetime:
+        return datetime(2026, 1, 1, tzinfo=UTC)
+
+    def trust(self) -> ClockTrust:
+        return self._trust
 
 
 def client() -> tuple[TestClient, Registry]:
@@ -22,6 +38,27 @@ def client() -> tuple[TestClient, Registry]:
 def test_health_answers() -> None:
     c, _ = client()
     assert c.get("/health").json()["ok"] is True
+
+
+# --- 9.8: /health exposes the station's own clock trust ---------------------
+
+
+def test_health_reports_clock_unset() -> None:
+    """spec.md, "Clock trust states": a fresh boot with no RTC evidence and
+    no NTP sync must show `unset` in `/health` -- the UI's own "clock
+    unset" banner (spec.md's withhold-TIME_SYNC scenario) reads this field.
+    """
+    app = create_app(clock=_FixedClock(ClockTrust.UNSET))
+    c = TestClient(app)
+
+    assert c.get("/health").json()["clock_trust"] == "unset"
+
+
+def test_health_reports_clock_trusted_once_rtc_or_ntp_backs_it() -> None:
+    app = create_app(clock=_FixedClock(ClockTrust.NTP))
+    c = TestClient(app)
+
+    assert c.get("/health").json()["clock_trust"] == "ntp"
 
 
 def test_the_page_loads_with_no_traps() -> None:

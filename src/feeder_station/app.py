@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.config import StationConfig
 from feeder_station.domain.traps import Registry
 
@@ -86,8 +87,13 @@ class Broadcaster:
                 queue.put_nowait(payload)
 
 
-def create_app(registry: Registry | None = None, config: StationConfig | None = None) -> FastAPI:
+def create_app(
+    registry: Registry | None = None,
+    config: StationConfig | None = None,
+    clock: Clock | None = None,
+) -> FastAPI:
     resolved_config = config or StationConfig.load()
+    resolved_clock: Clock = clock or StationClock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -99,10 +105,18 @@ def create_app(registry: Registry | None = None, config: StationConfig | None = 
     app = FastAPI(title="CICG field station", lifespan=lifespan)
     app.state.registry = registry or Registry(silence_after=resolved_config.silence_after)
     app.state.broadcaster = Broadcaster()
+    app.state.clock = resolved_clock
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "clock": now().isoformat()}
+        # S12/D7 (spec.md, "Clock trust states"): the operator UI's "clock
+        # unset" banner and every scheduled TIME_SYNC read this same value —
+        # never a separate, potentially-stale cache of it.
+        return {
+            "ok": True,
+            "clock": now().isoformat(),
+            "clock_trust": app.state.clock.trust().value,
+        }
 
     @app.get("/api/traps")
     def traps() -> list[dict[str, Any]]:

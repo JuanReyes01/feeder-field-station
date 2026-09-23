@@ -244,21 +244,21 @@ Hardware gate: none.
 Traces: S12, S15, S8. Files: `domain/clock_trust.py` (new, pure), `adapters/clock.py` (new),
 `tests/domain/test_clock_trust.py`, `tests/adapters/test_clock.py`.
 
-- [ ] 9.1 RED: `test_no_rtc_read_and_no_ntp_sync_yields_unset`
-- [ ] 9.2 GREEN: `ClockTrust` states (`unset`/`rtc`/`ntp`) in `domain/clock_trust.py`
-- [ ] 9.3 RED: `test_epoch_below_release_floor_is_treated_as_unset` (1970 / 2000-01-01 floor)
-- [ ] 9.4 GREEN: implement the floor-epoch check
-- [ ] 9.5 RED: `test_clock.py::test_rtc_read_failure_yields_unset_not_a_guessed_time` (fake RTC raises)
+- [x] 9.1 RED: `test_no_rtc_read_and_no_ntp_sync_yields_unset`
+- [x] 9.2 GREEN: `ClockTrust` states (`unset`/`rtc`/`ntp`) in `domain/clock_trust.py`
+- [x] 9.3 RED: `test_epoch_below_release_floor_is_treated_as_unset` (1970 / 2000-01-01 floor)
+- [x] 9.4 GREEN: implement the floor-epoch check
+- [x] 9.5 RED: `test_clock.py::test_rtc_read_failure_yields_unset_not_a_guessed_time` (fake RTC raises)
       — **hardware gate named**
-- [ ] 9.6 GREEN: `adapters/clock.py::Clock` reads `/dev/rtc0` via an injectable fake, degrades to
+- [x] 9.6 GREEN: `adapters/clock.py::Clock` reads `/dev/rtc0` via an injectable fake, degrades to
       `unset` on any failure
-- [ ] 9.7 RED: `test_time_sync_scheduling_skips_a_node_while_unset` + a withheld-log-row assertion
-- [ ] 9.8 GREEN: `may_distribute_time()` gate in `domain/clock_trust.py`; the command sender checks it
+- [x] 9.7 RED: `test_time_sync_scheduling_skips_a_node_while_unset` + a withheld-log-row assertion
+- [x] 9.8 GREEN: `may_distribute_time()` gate in `domain/clock_trust.py`; the command sender checks it
       immediately before emitting `TIME_SYNC` and writes a `station`-source withheld row via slice 4's
       `Store.append` (D7 — no refusal frame exists on the wire)
-- [ ] 9.9 RED: `test_time_sync_resumes_once_trusted`
-- [ ] 9.10 GREEN: confirm resumption once state flips
-- [ ] 9.11 REFACTOR: `adjtimex` ctypes probe with a `timedatectl show -p NTPSynchronized` fallback;
+- [x] 9.9 RED: `test_time_sync_resumes_once_trusted`
+- [x] 9.10 GREEN: confirm resumption once state flips
+- [x] 9.11 REFACTOR: `adjtimex` ctypes probe with a `timedatectl show -p NTPSynchronized` fallback;
       record in `docs/hardware/` which one was verified on the shipped image
 
 Done: all 3 clock-trust scenarios pass; `/health` exposes clock state; a withheld `TIME_SYNC` writes
