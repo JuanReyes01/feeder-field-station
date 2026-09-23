@@ -577,7 +577,31 @@ class Store:
                 self.rehydration_errors += 1
 
     def _known_node_ids(self) -> list[int]:
-        rows = self._conn.execute("SELECT node_id FROM node_cursor ORDER BY node_id").fetchall()
+        """CRITICAL 6 (sdd-verify field-station-p4 batch 2): `node_cursor`
+        alone only ever holds node-sourced rows (:meth:`append`'s own
+        ``if event.source == "node"`` guard) — a node the station has only
+        ever *commanded* (an ARM, a DISARM, a ``SET_TARGETS``), never
+        heard a frame from, had no row there and was silently dropped from
+        every rehydration walk: an operator's command durably in ``event``,
+        with nothing that ever read it back.
+
+        Union in the distinct ``node_id``s of every operator-sourced row
+        too, so a commanded-but-never-heard node is still visited. Kept
+        narrower than the report's own simplest fix (``SELECT DISTINCT
+        node_id FROM event``) specifically so this still queries
+        ``node_cursor`` directly: that is what lets
+        ``test_boot_survives_a_broken_node_roster_query`` (CRITICAL A) go
+        on proving the roster query itself sits inside ``rehydrate()``'s
+        guard, without also having to corrupt ``event``.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT node_id FROM node_cursor
+            UNION
+            SELECT DISTINCT node_id FROM event WHERE source = 'operator'
+            ORDER BY node_id
+            """
+        ).fetchall()
         return [row[0] for row in rows]
 
     def _rehydrate_heartbeat(self, node_id: int, registry: Registry) -> _ReportedFact | None:

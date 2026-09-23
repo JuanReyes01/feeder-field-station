@@ -598,6 +598,56 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
     assert health["rehydration_errors"] == 1  # only the heartbeat row was unreadable
 
 
+# --- CRITICAL 6 (verify-report-2.md): a command to a node the station has
+# never heard from must survive a restart -- `_known_node_ids()` derived the
+# roster from `node_cursor`, which `Store.append` only ever populates for
+# node-sourced events, so an operator-sourced row for a silent node was
+# invisible to every rehydration walk. ---------------------------------------
+
+
+def test_a_command_to_a_never_heard_from_node_survives_a_restart(tmp_path: Path) -> None:
+    """The rule to prove: the roster walk includes every node with *any*
+    row in the store, operator-sourced or node-sourced -- not "the
+    report's own example survives". Two real boots against the same
+    `station.db`, through `build_app` both times (the report's own boot
+    harness, not a hand-called `rehydrate()`): boot 1 arms a node this
+    station has never received a frame from and confirms it pending; boot
+    2 must still show that node, still pending, and -- since it has never
+    actually reported anything -- with `state: null`, never a fabricated
+    `"idle"` (the same WARNING J discipline, on a node with zero readable
+    rows rather than one unreadable one).
+
+    `event-store/spec.md` "Registry rehydration at boot" ("without
+    depending on the node re-sending anything"); `trap-commands/spec.md`
+    "Target-list delivery with version reconciliation" (resend continues
+    until the version is confirmed -- which cannot hold across a restart
+    if the command itself is forgotten); S1, S2.
+    """
+    db_path = tmp_path / "station.db"
+    never_heard_node = 99
+
+    boot1, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(boot1) as c1:
+        arm_response = c1.post(f"/api/traps/{never_heard_node}/arm")
+        assert arm_response.status_code == 200
+        boot1_rows = {row["node_id"]: row for row in c1.get("/api/traps").json()}
+
+    assert never_heard_node in boot1_rows, "not even boot 1 shows the command as pending"
+    assert boot1_rows[never_heard_node]["pending_command"] == "arm"
+
+    boot2, _args2 = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(boot2) as c2:
+        boot2_rows = {row["node_id"]: row for row in c2.get("/api/traps").json()}
+
+    assert never_heard_node in boot2_rows, (
+        "LOST across the restart -- _known_node_ids() only reads node_cursor, "
+        "which an operator-sourced row (never a node-sourced one) never populates"
+    )
+    assert boot2_rows[never_heard_node]["pending_command"] == "arm"
+    # never reported -- not a fabricated "idle" (WARNING J's own discipline)
+    assert boot2_rows[never_heard_node]["state"] is None
+
+
 def test_an_unconfirmed_set_targets_command_survives_a_restart(tmp_path: Path) -> None:
     """design.md section 6's third replay step. Before this fix, an edit
     (`PUT /targets`) issued between a trap's last heartbeat and a restart

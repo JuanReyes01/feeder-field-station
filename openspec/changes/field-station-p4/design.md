@@ -285,8 +285,10 @@ says exactly why.
 ## 6. Registry rehydration
 
 At boot, before the HTTP server accepts, `adapters/store.py` replays a bounded tail into a pure
-`traps.rehydrate()`. For each `node_id` in `node_cursor` — ten of them — each of these is a single
-index seek on `event_by_type(node_id, msg_type, seq DESC)`:
+`traps.rehydrate()`. For each `node_id` the roster query returns — the union of every `node_cursor`
+row and every operator-sourced event's `node_id`, so a node the station has only ever *commanded*,
+never heard from, is not dropped (CRITICAL 6) — ten of them — each of these is a single index seek on
+`event_by_type(node_id, msg_type, seq DESC)`:
 
 1. Latest `HEARTBEAT` → `registry.heartbeat(...)`: state, battery, reported `targets_version`,
    `last_seen`.
