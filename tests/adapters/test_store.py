@@ -1079,6 +1079,53 @@ def test_a_negative_stored_state_byte_counts_as_unreadable_not_a_fabricated_idle
     assert reopened.rehydration_errors == 1
 
 
+# --- BEHAVIOUR 3 (verify-report-batch2d.md, Batch 2e): a corrupt
+# battery_mv/targets_version was coerced to None and never counted. -------
+
+
+@pytest.mark.parametrize("corrupt_field", ["battery_mv", "targets_version"])
+def test_a_corrupt_heartbeat_numeric_field_counts_as_unreadable_not_a_fabricated_none(
+    tmp_path: Path, corrupt_field: str
+) -> None:
+    """BEHAVIOUR 3: `decode_heartbeat` always emits `battery_mv` and
+    `targets_version` as ints from fixed byte offsets (payloads.py) -- a
+    stored row holding a non-int for either is the same corruption class
+    `state` two lines above it already raises for. Coercing to `None`
+    read identically to a node the station has never heard a battery
+    reading from, uncounted -- on a battery-powered field system.
+    """
+    fields: dict[str, object] = {"state": 1, "battery_mv": 4000, "targets_version": 1}
+    fields[corrupt_field] = "CORRUPT"
+
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields=fields,
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    # the state candidate lives in the same row (`_rehydrate_heartbeat`'s
+    # own "one row, one atomic attempt" contract) -- a corrupt sibling
+    # field drops the whole row, not only the field that was actually bad.
+    assert 7 not in {trap.node_id for trap in registry.traps()}
+    assert reopened.rehydration_errors == 1
+
+
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------
 
 

@@ -706,14 +706,18 @@ class Store:
         (``trap_state_from_wire``) *or* a present-but-wrong-typed one
         (WARNING 1, verify-report-batch2.md — a corruption shape
         ``isinstance`` used to return ``None`` for silently, never raising,
-        never counted, never flagged); only once that has succeeded are
-        ``battery_mv``/``targets_version`` (step (b)) restored, so an
-        unreadable ``state`` field fails this whole row the same way it
-        did before this batch — CRITICAL A's own per-row-source guard in
-        ``rehydrate`` still counts it once either way, and a node with no
-        *other* readable row for it stays out of the registry entirely,
-        exactly as ``test_rehydrate_skips_and_counts_an_unreadable_row_
-        without_blocking_other_nodes`` (CRITICAL 2) already pins.
+        never counted, never flagged); ``battery_mv``/``targets_version``
+        (step (b)) are validated the same way (BEHAVIOUR 3, verify-report-
+        batch2d.md — these used to coerce silently to ``None`` instead of
+        raising) before either is restored. Any one of the three failing
+        fails this whole row — a corrupt sibling field drops the state
+        candidate too, not only the field that was actually bad — the same
+        way an unreadable ``state`` field already did before this batch —
+        CRITICAL A's own per-row-source guard in ``rehydrate`` still counts
+        it once either way, and a node with no *other* readable row for it
+        stays out of the registry entirely, exactly as
+        ``test_rehydrate_skips_and_counts_an_unreadable_row_without_
+        blocking_other_nodes`` (CRITICAL 2) already pins.
         """
         heartbeat = self.latest(node_id, payloads.HEARTBEAT)
         if heartbeat is None:
@@ -735,11 +739,19 @@ class Store:
         )
 
         battery_mv = heartbeat.fields.get("battery_mv")
+        if not isinstance(battery_mv, int):
+            # BEHAVIOUR 3 (verify-report-batch2d.md): `decode_heartbeat`
+            # always emits `battery_mv` as an int from a fixed byte offset
+            # -- a non-int here is the same corruption class `state` above
+            # already raises for, not a legitimate absence.
+            _unreadable("HEARTBEAT battery_mv", battery_mv)
         targets_version = heartbeat.fields.get("targets_version")
+        if not isinstance(targets_version, int):
+            # BEHAVIOUR 3: same correction, `targets_version` -- a field
+            # `event-store/spec.md` names explicitly.
+            _unreadable("HEARTBEAT targets_version", targets_version)
         registry.restore_heartbeat_fields(
-            node_id,
-            battery_mv=battery_mv if isinstance(battery_mv, int) else None,
-            targets_version=targets_version if isinstance(targets_version, int) else None,
+            node_id, battery_mv=battery_mv, targets_version=targets_version
         )
         return fact
 
