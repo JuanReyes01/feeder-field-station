@@ -169,7 +169,7 @@ without depending on the node re-sending anything"); `radio-gateway/spec.md` "FA
 handling" (`FAULT` MUST update reported state — including across a restart); `trap-commands/spec.md`'s
 S4 discipline ("displayed state MUST always be whatever its own most recent report said"); S3, S4, S11.
 
-- [ ] 2.1 RED — new property-shaped test (suggested home: `tests/test_cli.py`, reusing the report's
+- [x] 2.1 RED — new property-shaped test (suggested home: `tests/test_cli.py`, reusing the report's
   own harness pattern — real `cli.build_app`, `with TestClient(app)`, frames written to a real pty).
   For each of these logs, build the **live** registry by replaying the log through
   `adapters/ingest.py::_apply_to_registry`, restart through `build_app`, and assert the **rehydrated**
@@ -184,7 +184,7 @@ S4 discipline ("displayed state MUST always be whatever its own most recent repo
     covered, not just the four the report happened to print)
   Parametrize one test over all five cases — this is what makes it a property test rather than five
   copies of "this example passes."
-- [ ] 2.2 GREEN — `src/feeder_station/domain/traps.py`: add a rehydration-only `Registry` method that
+- [x] 2.2 GREEN — `src/feeder_station/domain/traps.py`: add a rehydration-only `Registry` method that
   sets `state`/`last_seen` alone from a single winning fact (mirrors `restore_capture`'s existing
   "never touch the other one's fields" discipline) — this is the counterpart `restore_capture` already
   has for the capture object, now needed for reported state.
@@ -198,10 +198,10 @@ S4 discipline ("displayed state MUST always be whatever its own most recent repo
   fields exist nowhere else; (c) `_rehydrate_capture` unchanged, still restoring the unacknowledged
   capture object independently of which row won the state race. The exact split between (a)/(b) is
   this task's to decide — 2.1's test is what pins the outcome.
-- [ ] 2.3 REFACTOR — delete the now-redundant "never `captured()`, always `restore_capture`" comment
+- [x] 2.3 REFACTOR — delete the now-redundant "never `captured()`, always `restore_capture`" comment
   in `store.py` if 2.2's restructuring makes it stale; keep the CRITICAL-1/2 provenance comments that
   still apply.
-- [ ] 2.4 **Edited assertion** — `tests/adapters/test_store.py::test_registry_reflects_last_known_
+- [x] 2.4 **Edited assertion** — `tests/adapters/test_store.py::test_registry_reflects_last_known_
   state_after_restart`. **Before this batch**: asserts `TrapState.ARMED` (edited from `FIRED` by the
   prior fix pass, correct only for ordering A, and — per the report — "exactly what hid ordering B").
   **After this batch**: this single-ordering unit test is either (a) folded into 2.1's parametrized
@@ -242,7 +242,7 @@ These three are Batch 2's subject matter by topic, not a separate batch: 2.8 is 
 of the skip granularity task 2.2 has to decide anyway, and 2.9/2.10 are about what `rehydrate()`
 reports when it gives up on something.
 
-- [ ] 2.8 **WARNING J — containment must not fabricate a calm reading.** Batch 1's guard skips
+- [x] 2.8 **WARNING J — containment must not fabricate a calm reading.** Batch 1's guard skips
   per *step*, not per *node*, so a node whose heartbeat replay fails but whose capture replay succeeds
   is created by `restore_capture` with `Trap.state`'s dataclass default: a trap that last reported
   `FAULT` displays `"state": "idle"` indefinitely, with `ok: true`. `battery_mv`, `targets_version`
