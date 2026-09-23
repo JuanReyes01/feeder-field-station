@@ -8,6 +8,8 @@ Two rules from the requirements drive every test here:
 
 from datetime import UTC, datetime, timedelta
 
+from feeder_station.domain import payloads
+from feeder_station.domain.commands import Command, CommandKind
 from feeder_station.domain.traps import Registry, TrapState
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
@@ -39,11 +41,95 @@ def test_arming_is_pending_until_the_trap_itself_reports_it() -> None:
 
     registry.command_arm(7, at=NOW)
     assert registry.trap(7).state is TrapState.IDLE
-    assert registry.trap(7).arm_pending is True
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.ARM)
 
     registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW + timedelta(seconds=30))
     assert registry.trap(7).state is TrapState.ARMED
-    assert registry.trap(7).arm_pending is False
+    assert registry.trap(7).pending_command is None
+
+
+def test_disarm_pending_clears_when_the_trap_reports_not_armed() -> None:
+    """DD15: the pre-DD15 model cleared `arm_pending` only when a heartbeat
+    reported `ARMED`, which has no way to answer a pending *disarm* -- a
+    disarmed trap never reports `ARMED`, so a disarm command would stay
+    pending forever under that rule. `command_disarm` + `Command
+    .satisfied_by` must clear it the moment the trap reports anything other
+    than armed.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
+
+    registry.command_disarm(7, at=NOW)
+    assert registry.trap(7).state is TrapState.ARMED  # S4: still what it last reported
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
+
+    # A heartbeat that still reports ARMED must NOT satisfy a pending disarm.
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW + timedelta(seconds=30))
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
+
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=NOW + timedelta(seconds=60))
+    assert registry.trap(7).state is TrapState.IDLE
+    assert registry.trap(7).pending_command is None
+
+
+def test_edit_is_pending_until_confirmed() -> None:
+    """S2: editing a trap's target list must show as pending, not delivered,
+    until a HEARTBEAT reports the new version back -- the view must
+    distinguish what the trap has confirmed from what the station desires.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=4, at=NOW)
+
+    registry.command_set_targets(7, targets_version=5, at=NOW)
+
+    view = registry.view(now=NOW)[0]
+    assert view["targets_version"] == 4  # still what the trap last confirmed
+    assert view["desired_targets_version"] == 5
+    assert view["pending_command"] == "set_targets"
+
+
+def test_resend_continues_until_version_confirmed() -> None:
+    """S2: `SET_TARGETS` sent for version N, and a HEARTBEAT still reporting
+    version N-1, must leave the command pending -- that pending state is
+    what drives the resend. Only a HEARTBEAT reporting version N clears it.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=4, at=NOW)
+    registry.command_set_targets(7, targets_version=5, at=NOW)
+
+    registry.heartbeat(
+        node_id=7, state=TrapState.ARMED, targets_version=4, at=NOW + timedelta(minutes=1)
+    )
+    assert registry.trap(7).pending_command == Command(
+        kind=CommandKind.SET_TARGETS, targets_version=5
+    )
+
+    registry.heartbeat(
+        node_id=7, state=TrapState.ARMED, targets_version=5, at=NOW + timedelta(minutes=2)
+    )
+    assert registry.trap(7).pending_command is None
+    assert registry.trap(7).targets_version == 5
+
+
+def test_split_list_is_not_marked_delivered_until_version_matches() -> None:
+    """S2: a target list split across two `SET_TARGETS` frames sharing one
+    `targets_version` is marked delivered from the version match alone --
+    the station never tracks which of the two frames arrived separately.
+    """
+    tags = [bytes([i, 0, 0, 0, 0, 0, 0]) for i in range(30)]  # > one frame's 27-tag limit
+    frames = payloads.encode_set_targets(targets_version=9, tags=tags)
+    assert len(frames) == 2  # confirms this scenario actually exercises the split
+
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=8, at=NOW)
+    registry.command_set_targets(7, targets_version=9, at=NOW)
+    assert registry.trap(7).pending_command is not None  # both frames still "in flight"
+
+    registry.heartbeat(
+        node_id=7, state=TrapState.ARMED, targets_version=9, at=NOW + timedelta(seconds=5)
+    )
+    assert registry.trap(7).pending_command is None
+    assert registry.trap(7).targets_version == 9
 
 
 def test_a_capture_stays_until_someone_acknowledges_it() -> None:

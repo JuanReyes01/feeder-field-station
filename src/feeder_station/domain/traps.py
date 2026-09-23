@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
+from .commands import Command, CommandKind, ReportedState
+
 
 class TrapState(str, Enum):
     IDLE = "idle"
@@ -40,7 +42,7 @@ class Trap:
     battery_mv: int | None = None
     targets_version: int | None = None
     last_seen: datetime | None = None
-    arm_pending: bool = False
+    pending_command: Command | None = None
     capture: Capture | None = None
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
@@ -80,16 +82,40 @@ class Registry:
         if targets_version is not None:
             trap.targets_version = targets_version
 
-        # The trap has now told us what it is, so any command we were waiting on
-        # is answered — whichever way it went.
-        if state is TrapState.ARMED:
-            trap.arm_pending = False
+        # The trap has now told us what it is, so any command we were waiting
+        # on is checked against that report (DD15) -- ARM, DISARM, and
+        # SET_TARGETS each have their own satisfied_by rule; there is no
+        # single shared "clear on ARMED" rule that could quietly leave a
+        # pending disarm stuck forever.
+        if trap.pending_command is not None:
+            report = ReportedState(
+                armed=state is TrapState.ARMED, targets_version=trap.targets_version
+            )
+            if trap.pending_command.satisfied_by(report):
+                trap.pending_command = None
 
         return trap
 
     def command_arm(self, node_id: int, at: datetime) -> None:
+        self._set_pending(node_id, Command(kind=CommandKind.ARM))
+
+    def command_disarm(self, node_id: int, at: datetime) -> None:
+        self._set_pending(node_id, Command(kind=CommandKind.DISARM))
+
+    def command_set_targets(self, node_id: int, targets_version: int, at: datetime) -> None:
+        self._set_pending(
+            node_id, Command(kind=CommandKind.SET_TARGETS, targets_version=targets_version)
+        )
+
+    def _set_pending(self, node_id: int, command: Command) -> None:
+        """Shared by every `command_*` method: create the trap on first
+        contact, same as `heartbeat()` and `captured()` already do, and
+        install the new pending command, replacing whatever was pending
+        before (an operator issuing a second command supersedes the first,
+        never queues behind it).
+        """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
-        trap.arm_pending = True
+        trap.pending_command = command
 
     def captured(self, node_id: int, tag: bytes, at: datetime) -> Capture:
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
@@ -132,7 +158,15 @@ class Registry:
                     "trustworthy": reachable,
                     "battery_mv": trap.battery_mv,
                     "targets_version": trap.targets_version,
-                    "arm_pending": trap.arm_pending,
+                    "pending_command": (
+                        trap.pending_command.kind.value if trap.pending_command else None
+                    ),
+                    "desired_targets_version": (
+                        trap.pending_command.targets_version
+                        if trap.pending_command is not None
+                        and trap.pending_command.kind is CommandKind.SET_TARGETS
+                        else None
+                    ),
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
                     "capture": (
                         {

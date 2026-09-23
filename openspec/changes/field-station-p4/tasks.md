@@ -216,21 +216,21 @@ Hardware gate: none — pty simulates the 10 nodes; true multi-node field scale 
 Traces: S1, S2. Files: `domain/commands.py` (new), `domain/traps.py` (modified), `app.py` (modified:
 disarm route), `tests/domain/test_commands.py`, `tests/domain/test_traps.py` (updated).
 
-- [ ] 8.1 RED: `test_commands.py::test_arm_is_satisfied_by_reported_state_armed`
-- [ ] 8.2 GREEN: `Command` (ARM/DISARM/SET_TARGETS) + `satisfied_by(heartbeat)` in `domain/commands.py`
-- [ ] 8.3 RED: `test_disarm_is_satisfied_by_reported_state_not_armed` — **the DD15 gap, explicit:**
+- [x] 8.1 RED: `test_commands.py::test_arm_is_satisfied_by_reported_state_armed`
+- [x] 8.2 GREEN: `Command` (ARM/DISARM/SET_TARGETS) + `satisfied_by(heartbeat)` in `domain/commands.py`
+- [x] 8.3 RED: `test_disarm_is_satisfied_by_reported_state_not_armed` — **the DD15 gap, explicit:**
       today's `Registry.heartbeat()` clears `arm_pending` only when state is `ARMED`, so it cannot
       express a pending disarm; this test fails against the current model before the fix lands
-- [ ] 8.4 GREEN: replace `Trap.arm_pending: bool` with `Trap.pending_command: Command | None`;
+- [x] 8.4 GREEN: replace `Trap.arm_pending: bool` with `Trap.pending_command: Command | None`;
       `Registry.command_arm/command_disarm` set it, every `heartbeat()` call checks `satisfied_by()`
-- [ ] 8.5 RED: `test_set_targets_is_satisfied_only_when_reported_version_matches_desired`
-- [ ] 8.6 GREEN: `SET_TARGETS` command + version-comparison in `Registry`
-- [ ] 8.7 RED: `test_edit_is_pending_until_confirmed`, `test_resend_continues_until_version_confirmed`
-- [ ] 8.8 GREEN: resend scheduling reusing slice 5's backoff pattern
-- [ ] 8.9 RED: `test_split_list_is_not_marked_delivered_until_version_matches` — chunked `SET_TARGETS`
+- [x] 8.5 RED: `test_set_targets_is_satisfied_only_when_reported_version_matches_desired`
+- [x] 8.6 GREEN: `SET_TARGETS` command + version-comparison in `Registry`
+- [x] 8.7 RED: `test_edit_is_pending_until_confirmed`, `test_resend_continues_until_version_confirmed`
+- [x] 8.8 GREEN: resend scheduling reusing slice 5's backoff pattern
+- [x] 8.9 RED: `test_split_list_is_not_marked_delivered_until_version_matches` — chunked `SET_TARGETS`
       (slice 2), all-or-nothing delivery
-- [ ] 8.10 GREEN: confirm delivery marks from version match alone; no partial-frame tracking
-- [ ] 8.11 REFACTOR: migrate `test_traps.py::test_arming_is_pending_until_the_trap_itself_reports_it`
+- [x] 8.10 GREEN: confirm delivery marks from version match alone; no partial-frame tracking
+- [x] 8.11 REFACTOR: migrate `test_traps.py::test_arming_is_pending_until_the_trap_itself_reports_it`
       to the new `Command` model without losing its intent
 
 Done: all trap-commands scenarios pass; `arm_pending: bool` fully replaced; existing traps tests

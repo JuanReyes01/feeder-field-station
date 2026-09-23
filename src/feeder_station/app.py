@@ -113,7 +113,13 @@ def create_app(registry: Registry | None = None, config: StationConfig | None = 
     def arm(node_id: int) -> dict[str, Any]:
         app.state.registry.command_arm(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
-        return {"node_id": node_id, "arm_pending": True}
+        return {"node_id": node_id, "pending_command": "arm"}
+
+    @app.post("/api/traps/{node_id}/disarm")
+    def disarm(node_id: int) -> dict[str, Any]:
+        app.state.registry.command_disarm(node_id, at=now())
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"node_id": node_id, "pending_command": "disarm"}
 
     @app.post("/api/traps/{node_id}/acknowledge")
     def acknowledge(node_id: int) -> dict[str, Any]:
@@ -174,7 +180,7 @@ async function refresh() {
       <div class="state">Trampa ${t.node_id} · ${t.state}${t.reachable ? '' : ' · SIN CONTACTO'}</div>
       ${t.capture ? `<p>Capturó ${t.capture.tag}<br><small>${t.capture.at}</small></p>
         <button onclick="ack(${t.node_id})">Atendida</button>` : ''}
-      ${t.arm_pending ? '<p><small>armado pendiente de confirmar</small></p>' : ''}
+      ${t.pending_command ? `<p><small>${t.pending_command} pendiente de confirmar</small></p>` : ''}
     </div>`).join('') : '<p>Ninguna trampa se ha reportado todavía.</p>';
 }
 async function ack(id) {

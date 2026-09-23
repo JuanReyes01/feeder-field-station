@@ -45,6 +45,27 @@ def test_a_capture_is_visible_to_a_browser_that_arrives_later() -> None:
     assert c.get("/api/traps").json()[0]["capture"] is None
 
 
+def test_arm_and_disarm_routes_set_pending_command_not_reported_state() -> None:
+    """S1/S4: issuing ARM or DISARM over HTTP must only ever set a pending
+    command in the registry -- the trap's reported `state` in `/api/traps`
+    must not move until a HEARTBEAT says so (slice 8, DD15)."""
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
+
+    arm_response = c.post("/api/traps/7/arm")
+    assert arm_response.status_code == 200
+    assert c.get("/api/traps").json()[0]["state"] == "idle"
+    assert c.get("/api/traps").json()[0]["pending_command"] == "arm"
+
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=now())
+    disarm_response = c.post("/api/traps/7/disarm")
+    assert disarm_response.status_code == 200
+    assert c.get("/api/traps").json()[0]["state"] == "armed"
+    assert c.get("/api/traps").json()[0]["pending_command"] == "disarm"
+
+
 # --- 6.1/6.2: DD11 — asyncio.Queue is documented as not thread-safe --------
 
 
