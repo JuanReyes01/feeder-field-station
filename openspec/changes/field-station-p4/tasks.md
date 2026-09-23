@@ -384,3 +384,35 @@ CI proxy: 12.3's killed-process-then-restart test; named outstanding in the veri
 ## Next
 
 `sdd-apply`, starting PR 1. Each PR is stacked on the previous one's merge to main.
+
+---
+
+## Slice 13 — `target-list-delivery` (PR 13, needs 8+12)
+
+**Added 2026-09-23, after slice 10 exposed it.** The target list is hollow: `PUT /targets`
+validates the tags, bumps `targets_version`, and **discards the bytes**. `Command` carries a version
+and never the content, `encode_set_targets` exists with nothing calling it, and nothing anywhere
+stores a desired tag list. The operator types tags, the UI shows pending and then delivered, and no
+tag was ever transmitted.
+
+That is worse than a missing feature. A feature that is visibly absent gets reported; one that
+*looks* like it worked gets trusted, and the trap sits armed for an animal it was never told about.
+
+Traces: S2, and the half of S3 that assumes a trap knows what it is hunting.
+
+- [ ] 13.1 RED: `test_the_submitted_tags_are_stored_not_just_the_version` — PUT a list, reopen the
+      store, the exact bytes are still there against that version
+- [ ] 13.2 GREEN: persist the desired tag list per node, versioned, in the store
+- [ ] 13.3 RED: `test_set_targets_frames_carry_the_stored_tags` — the sender emits the real chunked
+      frames from stored content, through `encode_set_targets`, not an empty list
+- [ ] 13.4 GREEN: the command sender reads the stored list and transmits it
+- [ ] 13.5 RED: `test_a_list_longer_than_one_frame_is_delivered_whole` — 40 tags, both frames sent,
+      and the version is only considered delivered once the node reports it
+- [ ] 13.6 GREEN: drive the multi-frame path from storage
+- [ ] 13.7 RED: `test_the_ui_shows_the_tags_a_trap_is_actually_hunting` — the page renders the
+      stored list, so an operator can see what the trap has, not only what was typed at it
+- [ ] 13.8 GREEN: expose the stored list in `view()` and render it
+
+Done: a tag list typed on a phone reaches a trap, and the interface shows what the trap holds.
+PR boundary: store schema addition, `Command`/sender changes, the UI read path.
+Hardware gate: real delivery to a node needs the firmware's `station_link`, which does not exist.
