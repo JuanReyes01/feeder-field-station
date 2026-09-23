@@ -26,7 +26,14 @@ from pathlib import Path
 from typing import Any
 
 from feeder_station.domain import payloads
-from feeder_station.domain.events import OPERATOR_CAPTURE_ACKNOWLEDGED, StationEvent
+from feeder_station.domain.commands import Command, CommandKind, ReportedState
+from feeder_station.domain.events import (
+    OPERATOR_ARM,
+    OPERATOR_CAPTURE_ACKNOWLEDGED,
+    OPERATOR_DISARM,
+    OPERATOR_SET_TARGETS,
+    StationEvent,
+)
 from feeder_station.domain.traps import Registry, TrapState
 
 # DD6: a count-bounded per-node window, never a time window — dedup must not
@@ -430,24 +437,38 @@ class Store:
     def rehydrate(self, registry: Registry) -> None:
         """Rebuild ``registry``'s per-node state from stored events.
 
-        Design.md section 6's order: latest heartbeat, then the latest
-        capture if no later acknowledgement exists for it. Reachability is
-        deliberately never rehydrated — a restarted station has not heard
-        from anyone yet (S11).
+        Design.md section 6's three-step order, all now implemented
+        (CRITICAL 1/2/verify-report's superseding note, sdd-verify
+        field-station-p4 — the "desired command state" step this
+        docstring used to call out as missing is step 3 below):
 
-        The design's own prose names a ``traps.rehydrate()`` entry point,
-        but ``domain/traps.py`` is not modified until slices 6 and 8; this
-        method drives the registry through its existing public
-        ``heartbeat()``/``captured()`` methods instead, which already do
-        everything section 6 describes. The "desired command state" step it
-        also describes is not implemented here: nothing before slice 8's
-        ``domain/commands.py`` model exists to persist a desired command as
-        a store row, so there is nothing yet to replay for that step. See
-        this slice's apply-progress notes.
+        1. Latest ``HEARTBEAT`` → the reported state, battery,
+           ``targets_version`` and ``last_seen``.
+        2. Latest unacknowledged ``CAPTURED`` → the capture alone
+           (:meth:`Registry.restore_capture`, CRITICAL 2 — this must never
+           also touch ``state``/``last_seen``: those are step 1's fact,
+           however much older or newer the capture itself is).
+        3. Latest ``operator/arm|disarm|set_targets`` → the *desired*
+           state, replayed only if step 1's own heartbeat has not already
+           satisfied it (DD15) — an edit the trap already confirmed before
+           the restart must not be resurrected as pending.
+           ``desired_tags`` (S2) is replayed on its own from the latest
+           ``OPERATOR_SET_TARGETS`` row regardless, the same independence
+           :meth:`Registry.command_set_targets` already gives it live.
+
+        Reachability is deliberately never rehydrated — a restarted
+        station has not heard from anyone yet (S11).
+
+        Called from ``app.py``'s lifespan, before the HTTP server accepts
+        (design.md section 6) — CRITICAL 1 (sdd-verify): this method had no
+        production caller at all before that wiring existed; every test
+        that exercised it fed an already-populated registry to
+        ``create_app`` by hand instead.
         """
         for node_id in self._known_node_ids():
             self._rehydrate_heartbeat(node_id, registry)
             self._rehydrate_capture(node_id, registry)
+            self._rehydrate_desired_command(node_id, registry)
 
     def _known_node_ids(self) -> list[int]:
         rows = self._conn.execute("SELECT node_id FROM node_cursor ORDER BY node_id").fetchall()
@@ -481,8 +502,79 @@ class Store:
         if acknowledged is not None and acknowledged.seq > captured.seq:
             return
 
-        registry.captured(
+        # CRITICAL 2: `restore_capture`, never `captured()` — the latter
+        # also stamps `state`/`last_seen`, which must stay the heartbeat
+        # replay's fact alone, regardless of which of the two is newer.
+        registry.restore_capture(
             node_id=node_id,
             tag=captured.tag,
             at=_epoch_to_datetime(captured.received_epoch),
         )
+
+    _OPERATOR_COMMAND_MSG_TYPES: tuple[tuple[int, CommandKind], ...] = (
+        (OPERATOR_ARM, CommandKind.ARM),
+        (OPERATOR_DISARM, CommandKind.DISARM),
+        (OPERATOR_SET_TARGETS, CommandKind.SET_TARGETS),
+    )
+
+    def _rehydrate_desired_command(self, node_id: int, registry: Registry) -> None:
+        """Design.md section 6's third replay step."""
+        latest_targets = self.latest(node_id, OPERATOR_SET_TARGETS)
+        if latest_targets is not None:
+            tags = _tags_from_fields(latest_targets.fields)
+            if tags is not None:
+                registry.restore_desired_tags(node_id, tags)
+
+        latest: StoredEvent | None = None
+        latest_kind: CommandKind | None = None
+        for msg_type, kind in self._OPERATOR_COMMAND_MSG_TYPES:
+            row = self.latest(node_id, msg_type)
+            if row is not None and (latest is None or row.seq > latest.seq):
+                latest, latest_kind = row, kind
+        if latest is None or latest_kind is None:
+            return
+
+        targets_version: int | None = None
+        if latest_kind is CommandKind.SET_TARGETS:
+            version = latest.fields.get("targets_version")
+            if not isinstance(version, int):
+                return
+            targets_version = version
+
+        if Command(kind=latest_kind, targets_version=targets_version).satisfied_by(
+            _reported_state(registry, node_id)
+        ):
+            # The trap's own already-rehydrated heartbeat confirms this
+            # command was answered before the restart (DD15) — nothing left
+            # to resend.
+            return
+
+        at = _epoch_to_datetime(latest.received_epoch)
+        if latest_kind is CommandKind.ARM:
+            registry.command_arm(node_id, at=at)
+        elif latest_kind is CommandKind.DISARM:
+            registry.command_disarm(node_id, at=at)
+        else:
+            assert targets_version is not None  # narrowed above: SET_TARGETS always sets this
+            tags = _tags_from_fields(latest.fields) or ()
+            registry.command_set_targets(node_id, targets_version=targets_version, at=at, tags=tags)
+
+
+def _reported_state(registry: Registry, node_id: int) -> ReportedState:
+    try:
+        trap = registry.trap(node_id)
+    except KeyError:
+        return ReportedState(armed=False, targets_version=None)
+    return ReportedState(armed=trap.state is TrapState.ARMED, targets_version=trap.targets_version)
+
+
+def _tags_from_fields(fields: dict[str, object]) -> tuple[bytes, ...] | None:
+    raw_tags = fields.get("tags")
+    if not isinstance(raw_tags, list):
+        return None
+    tags: list[bytes] = []
+    for item in raw_tags:
+        if not isinstance(item, str):
+            return None
+        tags.append(bytes.fromhex(item))
+    return tuple(tags)

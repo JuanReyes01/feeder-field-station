@@ -159,18 +159,33 @@ def test_run_rotation_round_terminates_with_a_single_silent_node(tmp_path: Path)
     assert len(gateway.written) == 3
 
 
-# --- 7.5: the S5 scale scenario, real bytes over a real pty -------------------
+# --- 7.5: run_rotation_round itself, real bytes over a real pty ---------------
 
 
 def _open_real_port(device: str) -> serial.Serial:
     return serial.Serial(device, baudrate=115_200, timeout=0.05)
 
 
-def test_ten_simulated_nodes_over_pty_stays_responsive(tmp_path: Path) -> None:
-    """Ten nodes, one silent, polled through a real pyserial port. The
-    rotation must complete quickly: nothing here waits for a reply — a
-    write is a write — so one silent node costs at most `retry_budget`
-    extra writes, never a stall.
+def test_run_rotation_round_completes_quickly_over_a_real_pty(tmp_path: Path) -> None:
+    """Ten nodes, one silent, polled through a real pyserial port: this
+    function's own elapsed-time bound and byte-for-byte correctness, not
+    S5's "without the operator waiting on the UI" -- proving that needs a
+    real app and a real request, which nothing here builds.
+
+    Renamed from `test_ten_simulated_nodes_over_pty_stays_responsive`
+    (sdd-verify, field-station-p4): that name claimed S5's own UI-facing
+    criterion while never constructing an app or requesting `/api/traps`;
+    "responsive" was never measured. It also predates CRITICAL 4's fix,
+    which is worth being explicit about here: `run_scheduler_loop` (the
+    real production scheduler) no longer calls `run_rotation_round` at
+    all, every tick or otherwise — a full-roster sweep at any per-tick
+    cadence cannot hold `docs/protocol/messages.md`'s airtime budget
+    regardless of how quickly the sweep itself completes locally, which is
+    all this test can honestly measure. `run_rotation_round` remains a
+    correct, independently useful primitive (this file's own tests prove
+    it), just not the one `run_scheduler_loop` calls on a timer any more;
+    see `tests/adapters/test_workers.py`'s pacing tests for that
+    production-level proof instead.
     """
     store = Store(tmp_path / "station.db")
     node_ids = tuple(range(1, 11))

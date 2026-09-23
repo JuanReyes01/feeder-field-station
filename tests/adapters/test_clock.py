@@ -105,16 +105,50 @@ def test_time_sync_scheduling_skips_a_node_while_unset() -> None:
 # --- 9.9: TIME_SYNC resumes once the clock is trusted -----------------------
 
 
+class _MutableTrustClock:
+    """A `Clock` double whose trust can change between calls -- the fixed
+    `_FixedClock` above cannot express the actual transition
+    clock-trust/spec.md's scenario names.
+    """
+
+    def __init__(self, trust: ClockTrust, at: datetime) -> None:
+        self.trust_value = trust
+        self._at = at
+
+    def now(self) -> datetime:
+        return self._at
+
+    def trust(self) -> ClockTrust:
+        return self.trust_value
+
+
 def test_time_sync_resumes_once_trusted() -> None:
+    """clock-trust/spec.md, "TIME_SYNC resumes once trusted": "GIVEN the
+    station's clock state transitions from `unset` to `rtc` or `ntp`, WHEN
+    a node is next due for `TIME_SYNC`, THEN the frame is sent." Before
+    this fix (sdd-verify, field-station-p4), this test built a clock that
+    was already `RTC` and called `attempt_time_sync` once -- no `unset`
+    state and no transition existed anywhere in it; it was
+    indistinguishable from `test_a_valid_rtc_read_with_no_ntp_yields_rtc`
+    plus a send. This drives the actual transition: withheld while unset,
+    then sent once the same clock becomes trusted.
+    """
     at = datetime(2026, 1, 1, tzinfo=UTC)
-    clock = _FixedClock(ClockTrust.RTC, at)
+    clock = _MutableTrustClock(ClockTrust.UNSET, at)
     store = _SpyStore()
     gateway = _SpyGateway()
 
+    withheld = attempt_time_sync(9, clock=clock, store=store, gateway=gateway)
+    assert withheld is False
+    assert gateway.written == []
+    assert len(store.appended) == 1
+    assert store.appended[0].msg_type == STATION_TIME_SYNC_WITHHELD
+
+    clock.trust_value = ClockTrust.RTC
     sent = attempt_time_sync(9, clock=clock, store=store, gateway=gateway)
 
     assert sent is True
-    assert store.appended == []
+    assert len(store.appended) == 1  # no second withheld row once trusted
     assert len(gateway.written) == 1
     frame = decode(gateway.written[0])
     assert frame.msg_type == TIME_SYNC

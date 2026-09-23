@@ -216,6 +216,17 @@ def create_app(
         # capture it here, not at construction time.
         app.state.broadcaster.bind_loop(asyncio.get_running_loop())
 
+        # CRITICAL 1 (sdd-verify, field-station-p4): design.md section 6,
+        # "at boot, before the HTTP server accepts" -- before this, nothing
+        # in `src/` ever called `store.rehydrate()` at all; `cli.build_app`
+        # (the real ExecStart path) built an empty `Registry` and left it
+        # empty for the life of the process. Must run before the worker
+        # threads start below: `run_scheduler_loop` derives its node roster
+        # from this same registry, so an unrehydrated registry silences the
+        # scheduler too, not only `/api/traps`.
+        if store is not None:
+            store.rehydrate(app.state.registry)
+
         # 12.0a/12.0b: nothing before this slice ever started a thread. The
         # gateway is off by default (design.md section 7) so every test
         # that never passes `store`/`gateway` keeps running this lifespan
@@ -288,11 +299,39 @@ def create_app(
         # operator having to know to look at a separate field. A worker
         # never enabled (no gateway configured) never counts against it.
         workers_ok = all(not w["enabled"] or w["alive"] for w in workers.values())
+
+        # CRITICAL 5 (sdd-verify, field-station-p4): `SerialGateway.
+        # link_state` had no reader anywhere in `src/` -- `/health` said
+        # `ok: true` with the radio unplugged, the exact inversion of
+        # radio-gateway/spec.md's "the gateway does not pretend the link is
+        # up." `None` (never a fabricated `connected: True`) when this
+        # station has no gateway configured at all (`--no-gateway`, or any
+        # pre-slice-12 test's bare `create_app()`).
+        gateway = app.state.gateway
+        link: dict[str, Any] | None = None
+        if gateway is not None:
+            state = gateway.link_state
+            link = {
+                "connected": state.connected,
+                "device": state.device,
+                "since": state.since,
+                "frames_in": state.frames_in,
+                "frames_out": state.frames_out,
+                "decode_errors": state.decode_errors,
+                "last_error": state.last_error,
+            }
+        # "fold connected into ok" (verify-report.md's own fix wording): a
+        # station with no gateway configured never counts against `ok` --
+        # the same "never enabled, never counts" discipline `workers_ok`
+        # already applies above.
+        link_ok = link is None or bool(link["connected"])
+
         return {
-            "ok": workers_ok,
+            "ok": workers_ok and link_ok,
             "clock": now().isoformat(),
             "clock_trust": app.state.clock.trust().value,
             "workers": workers,
+            "link": link,
         }
 
     @app.get("/api/traps")

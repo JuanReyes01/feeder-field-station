@@ -184,6 +184,13 @@ def test_cursor_query_returns_events_oldest_first(tmp_path: Path) -> None:
 
 
 def test_registry_reflects_last_known_state_after_restart(tmp_path: Path) -> None:
+    """`Store.rehydrate()`'s own mechanics, called directly -- the "at
+    startup" half of this scenario (that production ever calls
+    `rehydrate()` at all, CRITICAL 1) is proven through the real boot path
+    in `tests/test_cli.py::test_rehydration_runs_through_the_real_boot_path`
+    instead; this test predates that one and calling `rehydrate()` itself
+    is exactly what sdd-verify flagged it for, hence the split.
+    """
     db_path = tmp_path / "station.db"
     store = Store(db_path)
 
@@ -219,7 +226,16 @@ def test_registry_reflects_last_known_state_after_restart(tmp_path: Path) -> Non
     trap = registry.trap(7)
     assert trap.battery_mv == 3900
     assert trap.targets_version == 2
-    assert trap.state is TrapState.FIRED  # the capture is the more recent fact
+    # CRITICAL 2 (sdd-verify, field-station-p4): `state` is the heartbeat
+    # replay's fact alone, never the capture's, however much more recent
+    # the capture is -- trap-commands/spec.md, "The trap's displayed state
+    # MUST always be whatever its own most recent HEARTBEAT or HELLO
+    # reported." Before this fix, `_rehydrate_capture` called
+    # `Registry.captured()`, which also stamps `state`/`last_seen` -- this
+    # assertion used to read `TrapState.FIRED` "because the capture is the
+    # more recent fact", which is exactly the regression: a capture replay
+    # must never regress a state a later heartbeat already reported.
+    assert trap.state is TrapState.ARMED
     assert trap.capture is not None
     assert trap.capture.tag == TAG
     assert trap.capture.acknowledged is False

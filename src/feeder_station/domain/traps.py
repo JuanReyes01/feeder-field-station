@@ -146,6 +146,36 @@ class Registry:
         trap.capture = Capture(tag=tag, at=at)
         return trap.capture
 
+    def restore_capture(self, node_id: int, tag: bytes, at: datetime) -> Capture:
+        """Rehydration-only counterpart to :meth:`captured` (CRITICAL 2,
+        sdd-verify field-station-p4): a capture replayed from the store at
+        boot must never overwrite ``state``/``last_seen`` with the
+        capture's own — possibly hours-old — timestamp. Those two facts are
+        the heartbeat replay's business alone (S4, trap-commands/spec.md:
+        "The trap's displayed state MUST always be whatever its own most
+        recent HEARTBEAT or HELLO reported").
+
+        ``captured()`` itself is unchanged and still used as-is by the live
+        ingest path (``adapters/ingest.py``), where a CAPTURED frame really
+        is the trap's own latest report arriving in real time — only a
+        *replayed* one, arriving in whatever order the log happens to hold
+        it, must not be allowed to regress a fresher heartbeat already
+        rehydrated first.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.capture = Capture(tag=tag, at=at)
+        return trap.capture
+
+    def restore_desired_tags(self, node_id: int, tags: Sequence[bytes]) -> None:
+        """Rehydration-only: replay the latest ``OPERATOR_SET_TARGETS``
+        bytes into ``desired_tags`` on their own, independent of whether
+        that edit is still pending or already confirmed — the same
+        independence :meth:`command_set_targets` already gives this field
+        during live operation (never cleared by a heartbeat, S2/13.11-13.12).
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.desired_tags = tuple(tags)
+
     def fault(self, node_id: int, at: datetime) -> None:
         """A `FAULT` uplink (radio-gateway spec.md): the trap itself reported
         it, exactly the same standing as a heartbeat (S4) — not this

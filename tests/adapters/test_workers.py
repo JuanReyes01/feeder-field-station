@@ -27,9 +27,10 @@ from feeder_station.adapters.workers import (
     run_scheduler_loop,
     run_supervised,
 )
-from feeder_station.config import StationConfig
+from feeder_station.config import DEFAULT_HEARTBEAT_INTERVAL, StationConfig
 from feeder_station.domain import payloads
 from feeder_station.domain.clock_trust import ClockTrust
+from feeder_station.domain.events import STATION_TIME_SYNC_WITHHELD
 from feeder_station.domain.frames import FLAG_ACK_REQUIRED, Frame, decode, encode
 from feeder_station.domain.traps import Registry, TrapState
 
@@ -116,6 +117,7 @@ def test_run_gateway_loop_ingests_a_frame_then_honours_stop(tmp_path: Path) -> N
     gateway.stop_event = stop
     published: list[dict[str, object]] = []
 
+    last_frame_arrival: dict[int, float] = {}
     run_gateway_loop(
         gateway,  # type: ignore[arg-type]
         store=store,
@@ -124,11 +126,16 @@ def test_run_gateway_loop_ingests_a_frame_then_honours_stop(tmp_path: Path) -> N
         publish=published.append,
         clock=_FixedClock(),
         stop=stop,
+        last_frame_arrival=last_frame_arrival,
     )
 
     assert stop.is_set()
     assert registry.trap(3).state is TrapState.ARMED  # decoded from the fixture payload
     assert published  # step 9 of the S9 ordering ran
+    # CRITICAL 4 (sdd-verify): the gateway thread must record the arrival
+    # itself -- this is the fact `run_scheduler_loop`'s own `responded`
+    # check now compares against, replacing the unsound 15-minute window.
+    assert 3 in last_frame_arrival
     # step 6/7: the frame asked for an ACK (FLAG_ACK_REQUIRED) -- one must
     # have gone back out over the same gateway.
     assert any(decode(raw).msg_type == payloads.ACK for raw in gateway.write_calls)
@@ -185,6 +192,7 @@ def test_a_crashing_gateway_loop_is_caught_by_run_supervised(tmp_path: Path) -> 
             publish=lambda event: None,
             clock=_FixedClock(),
             stop=threading.Event(),
+            last_frame_arrival={},
         ),
     )
 
@@ -289,3 +297,185 @@ def test_run_scheduler_loop_stops_promptly_even_mid_tick(tmp_path: Path) -> None
 
     assert not thread.is_alive()
     assert elapsed < 1.0
+
+
+# --- CRITICAL 3 (sdd-verify, field-station-p4): TIME_SYNC resumes ----------
+
+
+class _FlippingClock:
+    """A `Clock` double whose trust starts `UNSET` and can be flipped to
+    `NTP` on demand -- the exact transition
+    `clock-trust/spec.md`'s "TIME_SYNC resumes once trusted" scenario
+    names, driven through the real `run_scheduler_loop`, not through a
+    single `attempt_time_sync` call in isolation.
+    """
+
+    def __init__(self, at: datetime) -> None:
+        self._at = at
+        self._trust = ClockTrust.UNSET
+
+    def now(self) -> datetime:
+        return self._at
+
+    def trust(self) -> ClockTrust:
+        return self._trust
+
+    def flip_to_ntp(self) -> None:
+        self._trust = ClockTrust.NTP
+
+
+def test_time_sync_resumes_once_the_scheduler_loop_sees_a_trusted_clock(
+    tmp_path: Path,
+) -> None:
+    """CRITICAL 3: `run_scheduler_loop` discarded `attempt_time_sync`'s
+    return value and marked a node synced even when the sync was withheld
+    -- boot with an unset clock (S12's own scenario: no internet yet), and
+    no node was ever offered `TIME_SYNC` again once NTP came up, however
+    long the station ran. The bug lived entirely in this loop, not in
+    `attempt_time_sync` itself (already correctly returning `bool` --
+    see `tests/adapters/test_clock.py`), which is why this drives the real
+    loop on a real thread rather than calling that function directly.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=3, state=TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _SpyGateway()
+    clock = _FlippingClock(datetime(2026, 1, 1, tzinfo=UTC))
+    config = StationConfig.load(argv=[], env={})
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": clock,
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    try:
+        # While unset: withheld, recorded, never a frame.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and store.latest(3, STATION_TIME_SYNC_WITHHELD) is None:
+            time.sleep(0.01)
+        assert store.latest(3, STATION_TIME_SYNC_WITHHELD) is not None
+        assert not any(decode(raw).msg_type == payloads.TIME_SYNC for raw in gateway.written)
+
+        clock.flip_to_ntp()
+
+        # Once trusted: the very next tick must offer TIME_SYNC again.
+        deadline = time.monotonic() + 1.0
+        resumed = False
+        while time.monotonic() < deadline:
+            if any(decode(raw).msg_type == payloads.TIME_SYNC for raw in gateway.written):
+                resumed = True
+                break
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert resumed, "TIME_SYNC never resumed after the clock became trusted"
+
+
+# --- CRITICAL 4 (sdd-verify, field-station-p4): the rotation is paced ------
+
+
+class _RealClock:
+    """A `Clock` double that reads the real wall clock -- CRITICAL 4's own
+    fix is paced by real elapsed time (`config.heartbeat_interval`), so
+    proving the pacing holds needs a clock that actually advances, unlike
+    every other fake in this file.
+    """
+
+    def __init__(self, trust: ClockTrust = ClockTrust.NTP) -> None:
+        self._trust = trust
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+    def trust(self) -> ClockTrust:
+        return self._trust
+
+
+def test_backlog_rotation_persists_across_ticks_and_is_paced(tmp_path: Path) -> None:
+    """CRITICAL 4: before this fix, `run_scheduler_loop` rebuilt
+    `backlog.start()` fresh every 1 s tick and swept the *whole* roster
+    (`run_rotation_round`) inside it -- measured 13.3-40 GET_BACKLOG
+    frames/s at ten known traps (verify-report.md). This drives the real
+    loop, on a real thread, against ten traps that never respond -- the
+    worst case the report measured -- and proves the real, paced rate
+    instead: one poll at most per `config.heartbeat_interval`, never a
+    per-tick sweep.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    for node_id in range(10):
+        registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _SpyGateway()
+    poll_interval_s = 0.1
+    config = StationConfig(heartbeat_interval=timedelta(seconds=poll_interval_s))
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _RealClock(),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    started = time.monotonic()
+    thread.start()
+    time.sleep(1.0)
+    stop.set()
+    thread.join(timeout=2.0)
+    elapsed = time.monotonic() - started
+
+    get_backlog_count = sum(
+        1 for raw in gateway.written if decode(raw).msg_type == payloads.GET_BACKLOG
+    )
+    frames_per_second = get_backlog_count / elapsed
+
+    # Before this fix: 30-40 GET_BACKLOG/s at ten known, unresponsive traps
+    # (verify-report.md, CRITICAL 4, measured on this same machine). Paced
+    # at one poll per `poll_interval_s`, the rate must land near
+    # `1 / poll_interval_s` (~10/s here) -- nowhere close to a full-roster
+    # sweep repeated every tick.
+    assert get_backlog_count >= 3, (
+        f"pacing produced only {get_backlog_count} polls in {elapsed:.2f}s"
+    )
+    assert frames_per_second < 15, f"got {frames_per_second:.1f} GET_BACKLOG frames/s"
+
+
+def test_default_backlog_pacing_holds_the_stations_own_airtime_budget() -> None:
+    """docs/protocol/messages.md: a ~50-byte frame costs 0.37 s of airtime
+    at Long Fast, and the station's own design budget keeps the channel
+    under 1% occupied. CRITICAL 4 measured 30-40 GET_BACKLOG/s under the
+    old per-tick full sweep -- 400-1500x over that budget. Pacing one
+    GET_BACKLOG poll per `config.heartbeat_interval` (5 minutes,
+    `DEFAULT_HEARTBEAT_INTERVAL`) keeps backlog polling's own contribution
+    to the budget under 0.2%, regardless of roster size -- unlike a
+    per-node interval, which would scale back up with more traps.
+    """
+    airtime_per_frame_s = 0.37  # docs/protocol/messages.md
+    channel_budget_fraction = 0.01  # docs/protocol/messages.md, "under 1% occupied"
+
+    frames_per_second = 1 / DEFAULT_HEARTBEAT_INTERVAL.total_seconds()
+    occupancy_fraction = frames_per_second * airtime_per_frame_s
+
+    assert frames_per_second == 1 / 300
+    assert occupancy_fraction < channel_budget_fraction

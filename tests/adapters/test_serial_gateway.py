@@ -165,10 +165,17 @@ def test_backoff_is_capped_at_30_seconds_once_the_schedule_is_exhausted() -> Non
 # --- 5.5/5.6: link state, including a dropped link -----------------------------
 
 
-def test_link_drop_surfaces_in_health() -> None:
-    """A "closed loopback" (radio-gateway spec.md's own scenario wording) is
-    simulated by the fake port's ``read`` raising ``SerialException`` — what
-    pyserial itself raises when the underlying device vanishes mid-read.
+def test_link_drop_is_reflected_in_the_gateways_own_link_state() -> None:
+    """The `SerialGateway`-level half of radio-gateway spec.md's "link drop
+    surfaces in `/health`" scenario: a "closed loopback" (the spec's own
+    wording) is simulated by the fake port's ``read`` raising
+    ``SerialException`` -- what pyserial itself raises when the underlying
+    device vanishes mid-read -- and ``link_state`` must reflect it.
+
+    Renamed (sdd-verify, field-station-p4, CRITICAL 5): this test never
+    touched `/health` at all despite its former name -- the real,
+    `/health`-issuing proof now lives in
+    `tests/test_app.py::test_link_drop_surfaces_in_health`.
     """
     port = _FakePort(to_read=b"\x01\x02\x00")
     gateway = SerialGateway(

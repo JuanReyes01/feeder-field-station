@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from feeder_station import app as app_module
-from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
+from feeder_station.adapters.serial_gateway import DeviceConfig, LinkState, SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.app import Broadcaster, create_app
 from feeder_station.config import StationConfig
@@ -537,6 +537,22 @@ class _CrashingGateway:
     def write_frame(self, raw_frame: bytes) -> bool:  # pragma: no cover - unreachable
         return True
 
+    @property
+    def link_state(self) -> LinkState:
+        # This gateway never even reaches `connect_once()` -- `ensure_
+        # connected` raises before it would set one up -- so the link is
+        # honestly reported down, same as a real `SerialGateway` that has
+        # never resolved a device.
+        return LinkState(
+            connected=False,
+            device=None,
+            since=None,
+            frames_in=0,
+            frames_out=0,
+            decode_errors=0,
+            last_error=None,
+        )
+
 
 def test_a_dead_gateway_thread_is_visible_in_health(tmp_path: Path) -> None:
     """12.0c, and the exact cost this slice's own tasks.md names for
@@ -558,6 +574,76 @@ def test_a_dead_gateway_thread_is_visible_in_health(tmp_path: Path) -> None:
     assert body["workers"]["gateway"]["alive"] is False
     assert body["workers"]["gateway"]["last_error"] is not None
     assert "boom" in body["workers"]["gateway"]["last_error"]
+    assert body["ok"] is False
+
+
+# --- CRITICAL 5 (sdd-verify, field-station-p4): /health surfaces link state
+
+
+class _LinkDroppingGateway:
+    """A `SerialGateway`-shaped double whose link starts connected and can
+    be dropped on demand -- the gateway thread itself never needs to do
+    anything real; this only exists to control `link_state` deterministically.
+    """
+
+    def __init__(self) -> None:
+        self._connected = True
+
+    def ensure_connected(self, *, stop: object) -> bool:
+        return True
+
+    def read_frames(self, *, size: int = 4096) -> list[bytes]:
+        return []
+
+    def write_frame(self, raw_frame: bytes) -> bool:  # pragma: no cover - unused here
+        return True
+
+    @property
+    def link_state(self) -> LinkState:
+        return LinkState(
+            connected=self._connected,
+            device="fake" if self._connected else None,
+            since=None,
+            frames_in=0,
+            frames_out=0,
+            decode_errors=0,
+            last_error=None if self._connected else "simulated link drop",
+        )
+
+    def drop(self) -> None:
+        self._connected = False
+
+
+def test_link_drop_surfaces_in_health(tmp_path: Path) -> None:
+    """radio-gateway/spec.md, "Device resolution and reconnect": "/health
+    reports link state down within the next poll interval, and the gateway
+    does not pretend the link is up." Proven through a real request against
+    a real, fully booted app -- the test with this exact name in
+    `tests/adapters/test_serial_gateway.py` was named for `/health` and
+    never once requested it; `app.state.gateway` was stored at `app.py`
+    construction time and never read by anything until this fix.
+    """
+    store = Store(tmp_path / "station.db")
+    gateway = _LinkDroppingGateway()
+    app = create_app(store=store, gateway=gateway)  # type: ignore[arg-type]
+
+    with TestClient(app) as c:
+        body = c.get("/health").json()
+        assert body["link"]["connected"] is True
+        assert body["ok"] is True
+
+        gateway.drop()
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and body["link"]["connected"]:
+            time.sleep(0.02)
+            body = c.get("/health").json()
+
+    assert body["link"]["connected"] is False
+    assert body["link"]["last_error"] == "simulated link drop"
+    # "the gateway does not pretend the link is up": a dead radio must
+    # flip the top-level `ok`, not only a field nobody without prior
+    # knowledge would think to check.
     assert body["ok"] is False
 
 

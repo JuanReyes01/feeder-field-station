@@ -52,6 +52,11 @@ class AckPort(Protocol):
 
 
 Publish = Callable[[dict[str, Any]], None]
+RecordArrival = Callable[[int, float], None]
+
+
+def _no_op_record_arrival(node_id: int, received_epoch: float) -> None:
+    return None
 
 
 def ingest_frame(
@@ -63,6 +68,7 @@ def ingest_frame(
     publish: Publish,
     received_epoch: float,
     clock_trust: str,
+    record_arrival: RecordArrival = _no_op_record_arrival,
 ) -> None:
     """Carry one raw, already-COBS-decoded frame through the S9 ordering.
 
@@ -78,6 +84,13 @@ def ingest_frame(
         # construction. The node already assumes an unreliable link and
         # retries; there is nothing more honest to do than drop this one.
         return
+
+    # CRITICAL 4 (sdd-verify, field-station-p4): the scheduler's own "did
+    # this node answer" question (adapters/workers.py) needs a fact only
+    # the gateway thread can honestly supply — it is the only place a
+    # frame ever really arrives. Best-effort, like the registry update and
+    # SSE publish below: recording it is never S9-critical.
+    record_arrival(event.node_id, received_epoch)
 
     # Steps 4-5: write + fsync. See the module docstring for why nothing
     # catches an exception from this call.

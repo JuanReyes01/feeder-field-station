@@ -48,6 +48,7 @@
 <header>
   <h1>Estación CICG</h1>
   <div id="clock-banner"></div>
+  <div id="link-banner"></div>
   <div id="capture-banner"></div>
 </header>
 <div id="traps">Cargando…</div>
@@ -66,6 +67,7 @@ async function refresh() {
     fetch("/health").then((r) => r.json()).catch(() => null),
   ]);
   renderClockBanner(health);
+  renderLinkBanner(health);
   renderCaptureBanner(traps);
   renderTraps(traps);
 }
@@ -77,6 +79,20 @@ function renderClockBanner(health) {
   $("clock-banner").innerHTML = (health && health.clock_trust === "unset")
     ? '<div class="banner banner-clock">⚠ Reloj de la estación sin confirmar. ' +
       "Las horas en esta pantalla pueden ser incorrectas.</div>"
+    : "";
+}
+
+// CRITICAL 5 (sdd-verify, field-station-p4): the station's own radio link
+// going down must be visible here, not inferred from every trap quietly
+// turning unreachable one by one -- design.md section 4, "the gateway
+// never pretends the link is up." `null` when no gateway is configured at
+// all, which is not a fault.
+function renderLinkBanner(health) {
+  const link = health && health.link;
+  $("link-banner").innerHTML = (link && link.connected === false)
+    ? '<div class="banner banner-clock">⚠ Enlace de radio de la estación caído.' +
+      (link.last_error ? ` (${escapeHtml(link.last_error)})` : "") +
+      "</div>"
     : "";
 }
 
