@@ -926,23 +926,32 @@ def _reported_state(registry: Registry, node_id: int) -> ReportedState | None:
 
 def _unreadable(what: str, value: object) -> NoReturn:
     """The single expression of "this value cannot be read" every not-
-    readable guard in this module now raises through (WARNING 1, verify-
-    report-batch2c.md) -- five call sites, previously four different
-    shapes.
+    readable guard in the rehydration walk raises through.
 
-    Before this fix, three of the five worked around the same fact
-    differently, each a plausible, calm-looking value standing in for
-    "not readable" instead of a raise: a bare ``return None``
-    (:meth:`Store._rehydrate_capture`'s ``tag``), a bare ``return``
-    (:meth:`Store._rehydrate_desired_command`'s ``targets_version``), and
-    ``... or ()`` (the same method's ``tags``, fabricating an *empty*
-    desired list) -- uncounted and unflagged, strictly worse than the two
-    sites that already raised (:meth:`Store._rehydrate_heartbeat`'s
-    ``state``, :meth:`Store._rehydrate_capture`'s ``state_after``), each
-    with its own hand-written message. Every caller here sits inside
+    **Record correction (Batch 2e, verify-report-batch2d.md Q7): the
+    previous revision of this docstring said "five call sites" and named
+    that as the total.** It was not: `rg "_unreadable" src/feeder_station/
+    adapters/store.py` at the time found eight not-readable expressions in
+    this module, and three of them -- `_rehydrate_heartbeat`'s
+    `battery_mv`/`targets_version`, `_rehydrate_desired_command`'s
+    desired-tags read -- still worked around a corrupt value silently
+    instead of raising here (BEHAVIOUR 1/3, verify-report-batch2d.md). All
+    eight now call this function, re-derived and re-counted for this fix,
+    not carried over from the previous count. A hand-maintained call-site
+    count is exactly what went stale across four consecutive verification
+    rounds: re-run the `rg` above before trusting any number cited here,
+    including this one, rather than treating this docstring as the source
+    of truth.
+
+    The rule this function exists to enforce, stated so it survives a
+    stale count: **a value this station could not have produced on the
+    wire is never represented the same way as a value it legitimately
+    never received.** A missing row is an honest `None`; a row that
+    exists but fails a type or range check is always a raise through here,
+    never a second, quieter `None`-shaped path. Every caller sits inside
     :meth:`Store.rehydrate`'s own ``except Exception`` (CRITICAL A):
-    raising, not returning early with a default, is what makes the
-    corruption counted in ``rehydration_errors`` and logged with a
+    raising, not returning early with a plausible default, is what makes
+    the corruption counted in ``rehydration_errors`` and logged with a
     traceback instead of read back as an ordinary absence of data.
     """
     raise ValueError(f"{what} is not readable: {value!r}")

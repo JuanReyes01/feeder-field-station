@@ -348,6 +348,21 @@ reports when it gives up on something.
   true, nothing on false), and `.stale-badge`'s CSS was bumped to the same weight as `.no-contact-badge`
   instead of a small italic; `_known_node_ids` now unions `source = 'station'` rows too, and
   `_count_all_known_nodes`'s docstring no longer claims the gap is impossible.
+  **Correction (verify-report-batch2d.md Q2/Q7): Batch 2d's own "all three WARNING 1 paths" and its
+  `_unreadable` docstring's "five call sites" both understated the hole -- five of eight not-readable
+  expressions were closed, not all of them.** Re-derived from source, not inherited from this list: three
+  more silent, uncounted paths remained in the same method family -- `_rehydrate_heartbeat`'s
+  `battery_mv`/`targets_version` (BEHAVIOUR 3, coerced to `None` instead of raising, on a battery-powered
+  field system) and `_rehydrate_desired_command`'s desired-tags read at `store.py:813-815` (BEHAVIOUR 1,
+  no `else` at all -- distinct from case F's already-fixed guard on the *winning* command's own tags,
+  three lines apart in the same function but reachable independently whenever a later ARM/DISARM
+  supersedes the SET_TARGETS that carried the corrupt list). Closed in Batch 2e: all eight now raise
+  through `_unreadable()`, and its own docstring states the rule rather than only a count -- a
+  hand-maintained call-site number is exactly what went stale here across four consecutive rounds.
+  A fourth, unrelated defect closed alongside in the same batch (BEHAVIOUR 2, not a WARNING 1 shape): a
+  negative `state`/`state_after` byte indexed backwards into `_WIRE_STATE_ORDER` and fabricated a valid
+  `TrapState` -- `-4` read as a confident `idle` for a row whose real report was `FAULT` -- instead of
+  being rejected the same way an out-of-range positive byte already was.
 - [x] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
   downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
   the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the
