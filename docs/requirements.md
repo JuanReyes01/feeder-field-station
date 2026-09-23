@@ -43,6 +43,7 @@ It is **not** the analysis app, and it does **not** decide when a trap fires.
 | S12 | **Never distributes a time it does not trust** | With no internet and no RTC after a power cut, the station refuses to answer `TIME_SYNC` and says its clock is unset, instead of stamping the record with a wrong time |
 | S13 | **Operable by a biologist**, not an engineer | Someone who has not seen the system arms a trap and edits a tag list without reading a manual |
 | S14 | **The data can be taken away.** The record is not trapped inside the appliance | An operator copies the whole record to a USB drive or another machine in one documented step |
+| S15 | **Carries a battery-backed RTC** (DS3231 class) | The station is powered down with the internet unplugged, left for an hour, powered up, and still knows the time to the second |
 
 ---
 
@@ -71,9 +72,23 @@ makes a sound, or the station itself drives a buzzer, which needs nothing open a
 **A Raspberry Pi has no real-time clock.** It loses the time on every power cut and normally gets it
 back from the internet. We removed the GPS from the nodes and made the station the time authority,
 so a station that boots with a wrong clock would hand a wrong time to every trap and quietly corrupt
-the scientific record. Two ways out, and we need one of them: **a battery-backed RTC on the station**,
-or S12's refusal to answer at all while the clock is unset. The RTC costs a few dollars and is the
-better answer; S12 stays as the safety net.
+the scientific record.
+
+Intermittent internet is the worst case for this, worse than none at all. With no internet you know
+you cannot trust the clock and design for it. With intermittent internet the station works for weeks,
+and then one power cut coincides with one outage and it silently starts stamping the record with
+1970 — or worse, with a plausible wrong time. **A failure that appears only when two ordinary events
+coincide is one that will happen in the field and never on the bench.**
+
+Hence the three layers, S15 and S12 together:
+
+1. **The RTC** carries the time across outages. A DS3231 drifts about 2 ppm, a minute a year.
+2. **NTP** corrects the RTC whenever the internet happens to be up.
+3. **S12** is the net underneath: if neither has ever set the clock, the station refuses to answer
+   `TIME_SYNC` and says so, instead of handing out a time it invented.
+
+The chain ends up being NTP → the station's RTC → `TIME_SYNC` → each node's PCF8523. Every link
+knows whether it is trusted.
 
 **A Raspberry Pi's SD card is the least reliable part of the system.** They corrupt under power loss,
 which is how most Pi deployments eventually fail. S9's acceptance criterion — pulling the plug
@@ -90,7 +105,7 @@ a USB stick for the database is cheaper still.
 |---|----------|-----------------|
 | ~~1~~ | ~~Who receives a capture alert, on what device, and how fast?~~ | **Answered 2026-09-23:** immediately, in the browser of whoever has the interface open, over plain HTTP on the local network. No internet needed for alerting. |
 | ~~2~~ | ~~Is there permanent power where the station will sit?~~ | **Answered 2026-09-23:** yes, mains power is available. A UPS is no longer required, only recommended — see the SD card risk. |
-| 3 | Is there a route to the internet, or only a local network? | Whether the clock can be disciplined by NTP, or the station needs an RTC to satisfy S12 |
+| ~~3~~ | ~~Is there a route to the internet, or only a local network?~~ | **Answered 2026-09-23:** there is internet, but it is intermittent. This makes a battery-backed RTC on the station **required**, not optional — see below. |
 | 4 | How many people operate it, and do they need separate accounts? | Whether the UI needs any notion of users |
 | 5 | How long must the station keep events before they are collected? | Storage sizing, and whether anything is ever deleted |
 
