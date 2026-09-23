@@ -1126,6 +1126,65 @@ def test_a_corrupt_heartbeat_numeric_field_counts_as_unreadable_not_a_fabricated
     assert reopened.rehydration_errors == 1
 
 
+# --- BEHAVIOUR 1 (verify-report-batch2d.md, Batch 2e): the second `tags`
+# read in `_rehydrate_desired_command` was never routed through
+# `_unreadable()`. ------------------------------------------------------
+
+
+def test_a_corrupt_desired_tags_list_counts_as_unreadable_even_when_a_later_arm_wins(
+    tmp_path: Path,
+) -> None:
+    """BEHAVIOUR 1: `_rehydrate_desired_command` reads `tags` from the
+    latest `OPERATOR_SET_TARGETS` row at *two* sites -- the desired-tags
+    restore (`:813-815`, this test) and the winning command's own tags
+    (case F, above, `:857-864`). Case F's guard only runs when SET_TARGETS
+    is itself the winning command by `seq`; an operator's `PUT /targets`
+    followed by a later `POST /arm` makes ARM win that race instead, so a
+    corrupt `tags` field on the superseded SET_TARGETS row never reached
+    case F's guard at all -- read here and silently dropped, uncounted.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_SET_TARGETS,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={"targets_version": 5, "tags": "CORRUPT"},  # not a list
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened = Store(db_path)
+    reopened.rehydrate(registry)
+
+    assert reopened.rehydration_errors == 1  # counted, not silent
+    # the whole desired-command step is one atomic attempt (matching case
+    # E/F's own granularity): a corrupt sibling row drops the ARM replay
+    # too, rather than resending a command built from a half-read state.
+    assert 77 not in {trap.node_id for trap in registry.traps()}
+
+
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------
 
 

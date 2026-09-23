@@ -832,8 +832,17 @@ class Store:
         latest_targets = self.latest(node_id, OPERATOR_SET_TARGETS)
         if latest_targets is not None:
             tags = _tags_from_fields(latest_targets.fields)
-            if tags is not None:
-                registry.restore_desired_tags(node_id, tags)
+            if tags is None:
+                # BEHAVIOUR 1 (verify-report-batch2d.md): the same
+                # `SET_TARGETS.tags` field is read at two sites -- this one
+                # (the desired-tags list, independent of which command
+                # wins below) and the winning command's own tags (case F,
+                # further down). This site used to have no `else`: an
+                # unreadable desired list silently rendered as "no
+                # targets" while a later ARM/DISARM superseded the command
+                # race, with nothing counted or flagged.
+                _unreadable("SET_TARGETS tags", latest_targets.fields.get("tags"))
+            registry.restore_desired_tags(node_id, tags)
 
         latest: StoredEvent | None = None
         latest_kind: CommandKind | None = None
