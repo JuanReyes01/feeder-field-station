@@ -694,14 +694,53 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
 # invisible to every rehydration walk. ---------------------------------------
 
 
-def test_a_command_to_a_never_heard_from_node_survives_a_restart(tmp_path: Path) -> None:
+def _issue_arm(c: TestClient, node_id: int) -> None:
+    response = c.post(f"/api/traps/{node_id}/arm")
+    assert response.status_code == 200
+
+
+def _issue_disarm(c: TestClient, node_id: int) -> None:
+    response = c.post(f"/api/traps/{node_id}/disarm")
+    assert response.status_code == 200
+
+
+def _issue_set_targets(c: TestClient, node_id: int) -> None:
+    response = c.put(f"/api/traps/{node_id}/targets", json={"tags": ["0384199C87EC06"]})
+    assert response.status_code == 200
+
+
+# CRITICAL 1 (verify-report-batch2.md): the three operator-sourced msg_types
+# `_known_node_ids()` unions in (`adapters/store.py::_OPERATOR_COMMAND_MSG_TYPES`)
+# -- read from the code, not assumed -- so a roster narrowed to a single one of
+# them cannot pass this parametrize table, only the un-parametrized single-case
+# version the report measured.
+@pytest.mark.parametrize(
+    ("issue_command", "expected_pending"),
+    [
+        pytest.param(_issue_arm, "arm", id="arm"),
+        pytest.param(_issue_disarm, "disarm", id="disarm"),
+        pytest.param(_issue_set_targets, "set_targets", id="set_targets"),
+    ],
+)
+def test_a_command_to_a_never_heard_from_node_survives_a_restart(
+    tmp_path: Path,
+    issue_command: object,
+    expected_pending: str,
+) -> None:
     """The rule to prove: the roster walk includes every node with *any*
     row in the store, operator-sourced or node-sourced -- not "the
-    report's own example survives". Two real boots against the same
-    `station.db`, through `build_app` both times (the report's own boot
-    harness, not a hand-called `rehydrate()`): boot 1 arms a node this
-    station has never received a frame from and confirms it pending; boot
-    2 must still show that node, still pending, and -- since it has never
+    report's own example survives". CRITICAL 1 (verify-report-batch2.md):
+    an un-parametrized version of this test proved only the `ARM` example
+    -- a roster narrowed to `source = 'operator' AND msg_type =
+    OPERATOR_ARM` passed the whole 748-test suite. Parametrized over every
+    operator route that can name a never-heard node, so a roster narrowed
+    to any single one of them fails here.
+
+    Two real boots against the same `station.db`, through `build_app` both
+    times (the report's own boot harness, not a hand-called
+    `rehydrate()`): boot 1 issues the command against a node this station
+    has never received a frame from and confirms it pending; boot 2 must
+    still show that node, still pending, and -- since it has never
     actually reported anything -- with `state: null`, never a fabricated
     `"idle"` (the same WARNING J discipline, on a node with zero readable
     rows rather than one unreadable one).
@@ -717,22 +756,21 @@ def test_a_command_to_a_never_heard_from_node_survives_a_restart(tmp_path: Path)
 
     boot1, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
     with TestClient(boot1) as c1:
-        arm_response = c1.post(f"/api/traps/{never_heard_node}/arm")
-        assert arm_response.status_code == 200
+        issue_command(c1, never_heard_node)  # type: ignore[operator]
         boot1_rows = {row["node_id"]: row for row in c1.get("/api/traps").json()}
 
     assert never_heard_node in boot1_rows, "not even boot 1 shows the command as pending"
-    assert boot1_rows[never_heard_node]["pending_command"] == "arm"
+    assert boot1_rows[never_heard_node]["pending_command"] == expected_pending
 
     boot2, _args2 = build_app(["--db-path", str(db_path), "--no-gateway"])
     with TestClient(boot2) as c2:
         boot2_rows = {row["node_id"]: row for row in c2.get("/api/traps").json()}
 
     assert never_heard_node in boot2_rows, (
-        "LOST across the restart -- _known_node_ids() only reads node_cursor, "
-        "which an operator-sourced row (never a node-sourced one) never populates"
+        "LOST across the restart -- the roster query does not cover every "
+        "operator-sourced msg_type"
     )
-    assert boot2_rows[never_heard_node]["pending_command"] == "arm"
+    assert boot2_rows[never_heard_node]["pending_command"] == expected_pending
     # never reported -- not a fabricated "idle" (WARNING J's own discipline)
     assert boot2_rows[never_heard_node]["state"] is None
 

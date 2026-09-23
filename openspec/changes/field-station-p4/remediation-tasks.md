@@ -254,6 +254,17 @@ re-sending anything"); `trap-commands/spec.md` "Target-list delivery with versio
   **Batch 2b**: took the union option (narrower), specifically so
   `test_boot_survives_a_broken_node_roster_query` (CRITICAL A) keeps proving the roster query itself
   sits inside `rehydrate()`'s guard without modification.
+  **Correction (verify-report-batch2.md, CRITICAL 1): the code was correct but the proof was not.**
+  The RED test for 2.5 issued only `POST /arm`, so a roster narrowed to `source = 'operator' AND
+  msg_type = OPERATOR_ARM` passed all 748 tests — the ARM example, not the "every node with any row"
+  rule `apply-progress-batch2b.md` claimed proved. Closed in Batch 2c: the test parametrized over
+  `POST /arm` / `POST /disarm` / `PUT /targets` (every `_OPERATOR_COMMAND_MSG_TYPES` entry). Doing so
+  surfaced a second, real defect the roster fix itself had never touched: `_reported_state`'s
+  `KeyError` fallback (`armed=False`) silently satisfied a pending `DISARM` for a never-heard node on
+  rehydration, dropping it — the roster now carries the node correctly, but DD15's own satisfied-by
+  check discarded the command anyway. Fixed alongside (`_reported_state` now returns `None`, not a
+  fabricated default, when nothing is known about a node; `_rehydrate_desired_command` never asks
+  `satisfied_by` anything in that case).
 - [x] 2.7 GREEN — `openspec/changes/field-station-p4/design.md`, line ~288: amend "For each `node_id`
   in `node_cursor`" to match 2.6's actual roster derivation. This is the one design.md edit that is
   **in scope for this batch**, not deferred to Appendix A — the report ties it directly to CRITICAL 6

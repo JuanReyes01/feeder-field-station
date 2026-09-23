@@ -736,9 +736,13 @@ class Store:
                 return
             targets_version = version
 
-        if Command(kind=latest_kind, targets_version=targets_version).satisfied_by(
-            _reported_state(registry, node_id)
-        ):
+        reported = _reported_state(registry, node_id)
+        # `reported is None` (see its own docstring): nothing is known about
+        # this node yet, so there is no report to check the command against
+        # -- it stays pending, the same as any other unconfirmed command.
+        if reported is not None and Command(
+            kind=latest_kind, targets_version=targets_version
+        ).satisfied_by(reported):
             # The trap's own already-rehydrated heartbeat confirms this
             # command was answered before the restart (DD15) — nothing left
             # to resend.
@@ -755,11 +759,32 @@ class Store:
             registry.command_set_targets(node_id, targets_version=targets_version, at=at, tags=tags)
 
 
-def _reported_state(registry: Registry, node_id: int) -> ReportedState:
+def _reported_state(registry: Registry, node_id: int) -> ReportedState | None:
+    """``None`` when nothing about ``node_id`` is known yet -- no row at
+    all has ever named it a real report, whether because the registry has
+    no entry (``KeyError``) or because it has one with ``state`` still at
+    its own honest default (WARNING J).
+
+    CRITICAL 1 (verify-report-batch2.md, discovered while parametrizing
+    ``test_a_command_to_a_never_heard_from_node_survives_a_restart`` over
+    ``POST /disarm``): the previous fallback, ``ReportedState(armed=False,
+    ...)``, happened to keep a pending ``ARM`` correctly pending (any
+    non-``ARMED`` reading does) but silently satisfied -- and dropped -- a
+    pending ``DISARM`` on the very first rehydration of a node nobody has
+    ever heard from. The node's own silence is not a report of "not
+    armed"; S4's "reported, never assumed" applies exactly as much to "no
+    report at all" as to a report that says something specific.
+    :func:`_rehydrate_desired_command` must never ask ``satisfied_by``
+    anything when this returns ``None`` -- an unconfirmed command stays
+    pending until a real report confirms it, never until the station runs
+    out of information about the node.
+    """
     try:
         trap = registry.trap(node_id)
     except KeyError:
-        return ReportedState(armed=False, targets_version=None)
+        return None
+    if trap.state is None:
+        return None
     return ReportedState(armed=trap.state is TrapState.ARMED, targets_version=trap.targets_version)
 
 
