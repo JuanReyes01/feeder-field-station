@@ -142,18 +142,18 @@ Traces: S5, S11 (device resolution + reconnect). Files: `adapters/serial_gateway
 `tests/adapters/test_serial_gateway.py` (Protocol fake), `tests/adapters/test_serial_gateway_pty.py`
 (real pty, DD16). `pyproject.toml`: add `pyserial`, `types-pyserial` (dev).
 
-- [ ] 5.1 RED: `test_resolves_explicit_path_then_by_id_then_vid_pid_then_down` (Protocol fake)
-- [ ] 5.2 GREEN: implement the 4-step device-resolution order in `adapters/serial_gateway.py`
-- [ ] 5.3 RED: `test_reconnects_with_backoff_after_serial_exception` — injected `sleep`, backoff
+- [x] 5.1 RED: `test_resolves_explicit_path_then_by_id_then_vid_pid_then_down` (Protocol fake)
+- [x] 5.2 GREEN: implement the 4-step device-resolution order in `adapters/serial_gateway.py`
+- [x] 5.3 RED: `test_reconnects_with_backoff_after_serial_exception` — injected `sleep`, backoff
       `1,2,4,8,16,30…` capped, re-resolves from step 1 on every attempt
-- [ ] 5.4 GREEN: implement the reconnect loop with injected `sleep`/`open_port`
-- [ ] 5.5 RED: `test_link_drop_surfaces_in_health` — closed loopback → link state down
-- [ ] 5.6 GREEN: track `connected/device/since/frames_in/frames_out/decode_errors/last_error`
-- [ ] 5.7 RED (pty tier, DD16): `test_serial_gateway_pty.py::test_real_bytes_survive_real_pyserial`
-- [ ] 5.8 GREEN: fix any framing/partial-read edge case the real pty exposes
-- [ ] 5.9 RED: `test_replugged_device_is_found_under_a_new_node_name` (pty + by-id symlink) —
+- [x] 5.4 GREEN: implement the reconnect loop with injected `sleep`/`open_port`
+- [x] 5.5 RED: `test_link_drop_surfaces_in_health` — closed loopback → link state down
+- [x] 5.6 GREEN: track `connected/device/since/frames_in/frames_out/decode_errors/last_error`
+- [x] 5.7 RED (pty tier, DD16): `test_serial_gateway_pty.py::test_real_bytes_survive_real_pyserial`
+- [x] 5.8 GREEN: fix any framing/partial-read edge case the real pty exposes
+- [x] 5.9 RED: `test_replugged_device_is_found_under_a_new_node_name` (pty + by-id symlink) —
       **hardware gate named**
-- [ ] 5.10 GREEN: confirm resolve-by-symlink retries on every reconnect attempt
+- [x] 5.10 GREEN: confirm resolve-by-symlink retries on every reconnect attempt
 
 Done: both test tiers green; `pyproject.toml` carries the new runtime + dev dependency; `/health`
 exposes every link field.
