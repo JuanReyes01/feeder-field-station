@@ -643,6 +643,16 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
     specifically, the same technique WARNING B's own parametrized
     `payloads.py` tests use. Nothing anywhere can honestly supply a state
     fact for this node; the capture object itself is still restored (S3).
+
+    **Shifted assertion (WARNING 1, verify-report-batch2.md): both rows
+    now count as unreadable, not only the heartbeat.** Before that fix, a
+    `CAPTURED` row's missing `state_after` returned `None` silently --
+    `_rehydrate_capture` never raised, so only the heartbeat's
+    out-of-range `state` byte was counted. WARNING 1 closed exactly this
+    gap: a row that cannot be read must be counted whether the code
+    expresses that by raising or by returning `None`, so this node's
+    `rehydration_errors` is now `2`, not `1` -- both of its two rows are
+    genuinely unreadable, and the previous count under-reported that.
     """
     db_path = tmp_path / "station.db"
     seed = Store(db_path)
@@ -684,7 +694,7 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
     trap = rows[7]
     assert trap["state"] is None  # honest "we do not know" -- never a fabricated "idle"
     assert trap["capture"]["tag"] == "0384199C87EC06"  # S3 still holds
-    assert health["rehydration_errors"] == 1  # only the heartbeat row was unreadable
+    assert health["rehydration_errors"] == 2  # WARNING 1: both rows are unreadable, not just one
 
 
 # --- CRITICAL 6 (verify-report-2.md): a command to a node the station has

@@ -641,10 +641,13 @@ class Store:
     def _rehydrate_heartbeat(self, node_id: int, registry: Registry) -> _ReportedFact | None:
         """One row, one atomic attempt: the state candidate (step (a)) is
         computed first and may raise on an out-of-range byte
-        (``trap_state_from_wire``); only once that has succeeded are
-        ``battery_mv``/``targets_version`` (step (b)) restored, so a
-        corrupt ``state`` byte fails this whole row the same way it did
-        before this batch — CRITICAL A's own per-row-source guard in
+        (``trap_state_from_wire``) *or* a present-but-wrong-typed one
+        (WARNING 1, verify-report-batch2.md — a corruption shape
+        ``isinstance`` used to return ``None`` for silently, never raising,
+        never counted, never flagged); only once that has succeeded are
+        ``battery_mv``/``targets_version`` (step (b)) restored, so an
+        unreadable ``state`` field fails this whole row the same way it
+        did before this batch — CRITICAL A's own per-row-source guard in
         ``rehydrate`` still counts it once either way, and a node with no
         *other* readable row for it stays out of the registry entirely,
         exactly as ``test_rehydrate_skips_and_counts_an_unreadable_row_
@@ -655,14 +658,18 @@ class Store:
             return None
 
         state_value = heartbeat.fields.get("state")
-        fact = (
-            _ReportedFact(
-                seq=heartbeat.seq,
-                state=trap_state_from_wire(state_value),
-                at=_epoch_to_datetime(heartbeat.received_epoch),
-            )
-            if isinstance(state_value, int)
-            else None
+        if not isinstance(state_value, int):
+            # WARNING 1: a row that cannot be read is a row that cannot be
+            # read, whether the code expresses that by raising or by
+            # returning `None` — this now raises into the same
+            # `except Exception` guard `rehydrate()` already counts and
+            # flags a fresher sibling row's failure through, instead of
+            # answering "no fact" as if nothing were wrong.
+            raise TypeError(f"HEARTBEAT state field is not an int: {state_value!r}")
+        fact = _ReportedFact(
+            seq=heartbeat.seq,
+            state=trap_state_from_wire(state_value),
+            at=_epoch_to_datetime(heartbeat.received_epoch),
         )
 
         battery_mv = heartbeat.fields.get("battery_mv")
@@ -683,6 +690,14 @@ class Store:
         discarded until this fix), *regardless* of acknowledgement:
         acknowledging a capture clears the capture object, never the
         reported state, matching ``Registry.acknowledge()``'s own scope.
+
+        The capture object (above) is restored *before* ``state_after`` is
+        checked, so a corrupt ``state_after`` (WARNING 1: raised below,
+        rather than returned as a silent ``None``) still leaves S3's own
+        capture-object guarantee intact — only the state-race candidate
+        this row could have contributed is lost, exactly as a corrupt
+        ``state_after`` already cost step (a) before this fix, never step
+        (c).
         """
         captured = self.latest(node_id, payloads.CAPTURED)
         if captured is None or captured.tag is None:
@@ -698,7 +713,10 @@ class Store:
 
         state_after = captured.fields.get("state_after")
         if not isinstance(state_after, int):
-            return None
+            # WARNING 1 (verify-report-batch2.md): same correction as
+            # `_rehydrate_heartbeat` — a row that cannot be read must be
+            # counted and flagged, not answered as "no fact" in silence.
+            raise TypeError(f"CAPTURED state_after field is not an int: {state_after!r}")
         return _ReportedFact(
             seq=captured.seq,
             state=trap_state_from_wire(state_after),

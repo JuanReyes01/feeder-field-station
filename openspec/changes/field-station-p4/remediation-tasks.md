@@ -303,6 +303,16 @@ reports when it gives up on something.
   race and displayed as current with nothing saying so. `Trap.state_may_be_stale`, set by `rehydrate()`
   when the winning fact had an unreadable sibling, surfaced in `/api/traps`, cleared by the node's next
   live report.
+  **Correction (verify-report-batch2.md, WARNING 1 / WARNING 2): the WARNING-C half of this tick
+  overstated what shipped.** `state_may_be_stale` was only ever set from `rehydrate()`'s `except`
+  branch — the module's *other* not-readable path (two `isinstance` guards returning `None` for a
+  present-but-wrong-typed field, never raising) produced a silent, uncounted false all-clear, strictly
+  worse than the case the flag was added for. The flag also reached no operator
+  (`static/index.html`'s `renderTrap` never read it) and was pinned by no test above the `Registry`
+  unit level — mutations emitting the flag unconditionally `False` and unconditionally `True` both
+  survived the whole 748-test suite (M15, M26). Closed for real in Batch 2c: both `isinstance` guards
+  now raise into the same counted/flagged path as every other unreadable row, `renderTrap` renders a
+  distinct badge keyed on the flag, and an `/api/traps`-level test pins both directions.
 - [x] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
   downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
   the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the

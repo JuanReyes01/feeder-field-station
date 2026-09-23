@@ -707,6 +707,118 @@ def test_a_fresh_live_report_clears_the_possibly_stale_flag(tmp_path: Path) -> N
     assert registry.trap(7).state_may_be_stale is False
 
 
+# --- WARNING 1 (verify-report-batch2.md): WARNING C's own fix only counts
+# the module's `except`-raising not-readable path (`store.py:553-559`). Two
+# `isinstance` guards (`_rehydrate_heartbeat`, `_rehydrate_capture`) return
+# `None` for a present-but-wrong-typed field *without* raising -- a row that
+# cannot be read, read silently as "no fact", never counted, never flagged: a
+# false all-clear strictly worse than the case the flag was added for. -------
+
+
+def test_a_captured_rows_non_int_state_after_counts_as_unreadable_not_silent(
+    tmp_path: Path,
+) -> None:
+    """Measured (verify-report-batch2.md, WARNING 1, case B): before this
+    fix, a newest `CAPTURED` row whose `state_after` is present but not an
+    `int` (a corruption shape `decode_captured` could never itself
+    produce, the same simulated-corruption technique WARNING J's own test
+    already uses) returned `None` from `_rehydrate_capture` without
+    raising -- the older, readable `HEARTBEAT` won the state race with
+    nothing saying a fresher, unreadable report existed. `rehydration_errors`
+    stayed `0` and `state_may_be_stale` stayed `False`: a silent, uncounted
+    false all-clear, one corruption shape over from the case WARNING C was
+    raised to fix.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 1},  # 1 -> ARMED
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.CAPTURED,
+            msg_id=2,
+            node_epoch=None,
+            tag=TAG,
+            fields={"state_after": "CORRUPT"},  # present, wrong type -- never raises today
+            payload=b"",
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.ARMED  # the older, readable report -- still the best fact there is
+    assert trap.state_may_be_stale is True  # ... but a newer one existed and could not be read
+    assert reopened.rehydration_errors == 1  # counted, not silent
+
+
+def test_a_heartbeats_non_int_state_counts_as_unreadable_not_silent(tmp_path: Path) -> None:
+    """Measured (verify-report-batch2.md, WARNING 1, case C): the mirror of
+    the case above -- the newest row (`HEARTBEAT`, `state=None`) is the one
+    that cannot be read, and an older `CAPTURED` wins the race. Same false
+    all-clear, opposite report-type direction.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.CAPTURED,
+            msg_id=1,
+            node_epoch=None,
+            tag=TAG,
+            fields={"state_after": 0},  # 0 -> IDLE
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=2,
+            node_epoch=None,
+            tag=None,
+            fields={"state": None, "battery_mv": 4000, "targets_version": 1},  # present, wrong type
+            payload=b"",
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.state is TrapState.IDLE  # the older, readable CAPTURED report
+    assert trap.state_may_be_stale is True
+    assert reopened.rehydration_errors == 1
+
+
 def test_trap_state_from_wire_maps_every_valid_byte_to_the_right_state() -> None:
     """WARNING B: the wire-order mapping, pinned end to end."""
     assert [trap_state_from_wire(v) for v in range(len(TrapState))] == [
