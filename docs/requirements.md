@@ -26,7 +26,7 @@ It is **not** the analysis app, and it does **not** decide when a trap fires.
 |----|-------------|---------------|
 | S1 | Arm and disarm a named trap (R2) | An operator arms a trap from the UI; the trap's next heartbeat reports `armed`, and the UI shows it as armed rather than as commanded |
 | S2 | Edit the target-tag list of a trap (R3) | An edited list reaches the trap and the UI distinguishes **delivered** from **pending** by comparing the version the trap reports with the version the station holds |
-| S3 | Notify a person on capture, naming the trap (R4) | A capture on any trap reaches a person's device within the agreed time, and says which trap and which tag |
+| S3 | Notify a person on capture, naming the trap (R4) | A capture appears **at once** in every browser that has the interface open, over plain HTTP on the local network, naming the trap and the tag — **and** is still there for anyone who opens the interface hours later |
 | S4 | Show which traps are armed (R5) | The UI shows, per trap: armed state, battery, clock, target-list version and time since last contact — all sourced from the trap's own heartbeat, never from what the station last commanded |
 | S5 | Serve at least 10 traps (R6) | Ten traps report and are commanded without the operator waiting on the UI |
 | S6 | Write the raw file format the analysis app ingests (R8's station half) | `feeder-analysis` ingests a station export with no code changes and no warnings |
@@ -46,6 +46,26 @@ It is **not** the analysis app, and it does **not** decide when a trap fires.
 
 ---
 
+## A capture is a state, not an event
+
+S3 has two halves on purpose, and the second one is the important one.
+
+If a capture is modelled as a notification that flies past, it only exists for whoever happened to
+be looking. The trap fires at three in the morning, no browser is open, and the animal waits until
+somebody turns on a screen.
+
+So the trap **stays** in an unacknowledged `fired` state until a person clears it. Anyone who opens
+the interface sees it, whether it happened two minutes or six hours ago. The live push is an
+accelerator, not the mechanism. It is the same rule as S4: read what the device says it *is*, never
+what it once *said*.
+
+Mechanically that means the server stores the capture first and pushes second, and pushes over
+Server-Sent Events — one-way, plain HTTP, reconnects on its own.
+
+**The gap this leaves**, recorded so nobody is surprised by it: with nobody on site and no screen on,
+the delay is however long until someone looks. Two cheap ways to close it when it matters — the page
+makes a sound, or the station itself drives a buzzer, which needs nothing open anywhere.
+
 ## Two risks that this document exists to catch
 
 **A Raspberry Pi has no real-time clock.** It loses the time on every power cut and normally gets it
@@ -60,13 +80,17 @@ which is how most Pi deployments eventually fail. S9's acceptance criterion — 
 repeatedly and checking the database still opens — is there to force this into the design rather
 than discover it in the field.
 
+Mains power at the site does not retire S7 or S9: grids fail, breakers trip and people unplug things.
+It only lowers the pressure. A small UPS remains the cheapest insurance for the card, and an SSD or
+a USB stick for the database is cheaper still.
+
 ## Open questions
 
 | # | Question | What it decides |
 |---|----------|-----------------|
-| 1 | Who receives a capture alert, on what device, and how fast? | Whether the station needs internet, a phone on the local network, SMS/LTE, or something audible on site |
-| 2 | Is there permanent power where the station will sit? | Whether it needs a UPS, and how hard S7 and S9 have to work |
-| 3 | Is there a route to the internet, or only a local network? | Whether alerting can leave the site at all, and how the clock is disciplined |
+| ~~1~~ | ~~Who receives a capture alert, on what device, and how fast?~~ | **Answered 2026-09-23:** immediately, in the browser of whoever has the interface open, over plain HTTP on the local network. No internet needed for alerting. |
+| ~~2~~ | ~~Is there permanent power where the station will sit?~~ | **Answered 2026-09-23:** yes, mains power is available. A UPS is no longer required, only recommended — see the SD card risk. |
+| 3 | Is there a route to the internet, or only a local network? | Whether the clock can be disciplined by NTP, or the station needs an RTC to satisfy S12 |
 | 4 | How many people operate it, and do they need separate accounts? | Whether the UI needs any notion of users |
 | 5 | How long must the station keep events before they are collected? | Storage sizing, and whether anything is ever deleted |
 
