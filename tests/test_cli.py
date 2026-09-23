@@ -12,7 +12,11 @@ flag produced without actually starting a server.
 from __future__ import annotations
 
 import logging
+import os
+import pty
+import select
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,6 +35,7 @@ from feeder_station.domain.events import (
     StationEvent,
     interpret,
 )
+from feeder_station.domain.serial_framing import cobs_decode
 from feeder_station.domain.traps import Registry
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -1159,3 +1164,112 @@ def test_a_confirmed_set_targets_command_is_not_resurrected_on_restart(tmp_path:
     trap = rows[5]
     assert trap["pending_command"] is None  # already confirmed -- nothing left to resend
     assert trap["targets"] == ["0384199C87EC06"]  # desired_tags still shown (S2), regardless
+
+
+# --- CRITICAL 3 (sdd-verify field-station-p4, batch 3a): the station's own
+# --- total transmit rate, measured for real off the wire -------------------
+
+
+def test_station_total_frame_rate_holds_the_channel_budget_off_the_real_wire(
+    tmp_path: Path,
+) -> None:
+    """3.1: the rule to prove is the station's *total* transmit rate --
+    across GET_BACKLOG, command resends and TIME_SYNC -- staying under
+    docs/protocol/messages.md's channel budget, measured off the wire
+    through the real `cli.build_app` path, not computed from two
+    constants. That is the exact failure mode verify-report-2.md named in
+    the test this one supersedes
+    (`test_default_backlog_pacing_holds_the_stations_own_airtime_budget`,
+    rewritten -- not deleted -- in tests/adapters/test_workers.py, task
+    3.6): "it measures nothing... is arithmetic asserting arithmetic."
+    Real measured occupancy at the time of that report: 11.68%, against a
+    ~1% budget.
+
+    Ten traps, ARMed through the real HTTP route and never confirming
+    (nothing ever reports back a HEARTBEAT with `state=armed`) -- the
+    report's own worst case -- driven through a real pty, a real
+    `SerialGateway`, and the real worker threads `with TestClient(app)`
+    starts via the ASGI lifespan (the only way the real boot path runs at
+    all, per this change's own CRITICAL 1 finding).
+
+    `--channel-budget-frames-per-s` is set here, not left at the real
+    default (~0.027/s): the *mechanism* under test -- the total across all
+    three transmitters converges on the configured budget, not on any one
+    driver's own pace -- does not depend on which rate is configured, and
+    proving it against the unaccelerated default would need this test to
+    run for minutes (`pacing.DEFAULT_CAPACITY` / rate). The real,
+    unaccelerated default is measured separately, off this same real path,
+    and its numbers are recorded in this batch's apply-progress rather
+    than paid for on every `pytest` run.
+
+    This sandbox's own clock resolves `UNSET` (no `/dev/rtc0`, no NTP) --
+    the same S12 scenario messages.md itself describes as normal -- so
+    TIME_SYNC is not expected to contribute a frame here; it is proven
+    separately, under a controlled trusted clock, by
+    `test_time_sync_alone_is_capped_by_the_shared_budget` in
+    tests/adapters/test_workers.py.
+    """
+    db_path = tmp_path / "station.db"
+    master_fd, slave_fd = pty.openpty()
+    slave_name = os.ttyname(slave_fd)
+    os.close(slave_fd)
+    channel_budget_frames_per_s = 3.0
+
+    app, _args = build_app(
+        [
+            "--db-path",
+            str(db_path),
+            "--serial-device",
+            slave_name,
+            "--channel-budget-frames-per-s",
+            str(channel_budget_frames_per_s),
+        ]
+    )
+
+    try:
+        with TestClient(app) as c:
+            for node_id in range(1, 11):
+                assert c.post(f"/api/traps/{node_id}/arm").status_code == 200
+
+            # The backoff burst allowed to settle, then a steady-state
+            # window measured off the wire -- verify-report-2.md's own
+            # methodology, reused deliberately rather than measuring from
+            # t=0 (this fix's own bucket starts full, DEFAULT_CAPACITY, so
+            # an initial burst is expected and allowed).
+            settle_deadline = time.monotonic() + 1.5
+            while time.monotonic() < settle_deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.05)
+                if ready:
+                    os.read(master_fd, 4096)  # drain, discard
+
+            wire = b""
+            window_started = time.monotonic()
+            deadline = window_started + 3.0
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.05)
+                if ready:
+                    wire += os.read(master_fd, 4096)
+            elapsed = time.monotonic() - window_started
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+    blocks = [block for block in wire.split(bytes([0x00])) if block]
+    decoded = [frames.decode(cobs_decode(block)) for block in blocks]
+    frames_per_second = len(decoded) / elapsed
+    airtime_occupancy = frames_per_second * 0.37  # docs/protocol/messages.md
+
+    assert frames_per_second <= channel_budget_frames_per_s * 1.5, (
+        f"got {frames_per_second:.2f} total frames/s off the real wire, "
+        f"configured budget is {channel_budget_frames_per_s}/s "
+        f"({airtime_occupancy:.1%} occupancy)"
+    )
+    # Real proof this is the station's *total*, not one driver: at least
+    # two different categories contributed real frames on the real wire --
+    # if only one had, this would prove nothing beyond what the test it
+    # supersedes already claimed (falsely) to prove.
+    observed_types = {f.msg_type for f in decoded}
+    assert payloads.ARM in observed_types
+    assert payloads.GET_BACKLOG in observed_types
