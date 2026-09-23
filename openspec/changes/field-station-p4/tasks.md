@@ -50,16 +50,16 @@ any other domain module exists, so no later slice can quietly import `sqlite3` o
 Traces: S3, S4, S11. Files: `domain/payloads.py` (new), `tests/domain/test_architecture_purity.py`
 (new), `tests/domain/test_payloads.py` (new).
 
-- [ ] 1.1 RED: `test_architecture_purity.py` walks `domain/`, fails on import of `fastapi`, `serial`,
+- [x] 1.1 RED: `test_architecture_purity.py` walks `domain/`, fails on import of `fastapi`, `serial`,
       `sqlite3`, `socket`, `pathlib`, `os`, or use of `datetime.now` — lands before any other new module
-- [ ] 1.2 GREEN: confirm it passes today (only `frames.py`/`traps.py` exist); fix any offending import
-- [ ] 1.3 RED: `test_decodes_a_heartbeat_payload` — byte vector shared with `components/link_frame`
-- [ ] 1.4 GREEN: decode `HEARTBEAT` in `domain/payloads.py`
-- [ ] 1.5 RED: decode vectors for `HELLO`, `VISIT`, `CAPTURED`, `FAULT`, `ACK`
-- [ ] 1.6 GREEN: implement each decoder
-- [ ] 1.7 RED: `test_rejects_a_truncated_captured_payload` — decode error, no partial value
-- [ ] 1.8 GREEN: length validation raising a decode error before any field is read
-- [ ] 1.9 REFACTOR: shared length-check helper across decoders
+- [x] 1.2 GREEN: confirm it passes today (only `frames.py`/`traps.py` exist); fix any offending import
+- [x] 1.3 RED: `test_decodes_a_heartbeat_payload` — byte vector shared with `components/link_frame`
+- [x] 1.4 GREEN: decode `HEARTBEAT` in `domain/payloads.py`
+- [x] 1.5 RED: decode vectors for `HELLO`, `VISIT`, `CAPTURED`, `FAULT`, `ACK`
+- [x] 1.6 GREEN: implement each decoder
+- [x] 1.7 RED: `test_rejects_a_truncated_captured_payload` — decode error, no partial value
+- [x] 1.8 GREEN: length validation raising a decode error before any field is read
+- [x] 1.9 REFACTOR: shared length-check helper across decoders
 
 Done: all uplink scenarios green against firmware byte vectors; purity test passes.
 PR boundary: `domain/payloads.py` (uplink half) + the two test files. No wiring elsewhere.
