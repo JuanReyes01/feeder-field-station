@@ -26,3 +26,29 @@ existing pipeline and its parity gate keep working.
 - Which radio the Pi uses, and whether it is a USB/SPI LoRa hat or an ESP32 acting as a serial
   bridge.
 - How an alert reaches a person when nobody is looking at the screen.
+
+## Running it
+
+```bash
+uv sync
+uv run feeder-station          # serves on 0.0.0.0:8000
+uv run pytest -q               # the tests
+```
+
+Open `http://<the station's address>:8000` from a phone on the same network.
+
+## Layout
+
+```
+src/feeder_station/
+  domain/frames.py   the wire frame, the Python half of the firmware's link_frame
+  domain/traps.py    what the station believes about each trap, and why
+  app.py             HTTP and Server-Sent Events
+  cli.py             entry point
+```
+
+`domain/` is pure logic with no FastAPI and no I/O, which is what makes it
+testable without a radio, a trap or a browser.
+
+**The frame tests use the firmware's own byte vectors.** Two languages implement
+one contract; `tests/domain/test_frames.py` is what stops them drifting apart.

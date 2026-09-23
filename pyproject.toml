@@ -1,0 +1,43 @@
+[project]
+name = "feeder-field-station"
+dynamic = ["version"]
+description = "Field station for the CICG feeder network: radio gateway, operator UI and event store."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[project.scripts]
+feeder-station = "feeder_station.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.9,<1",
+    "mypy>=1.14,<2",
+    "httpx>=0.28,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.32,<2"]
+build-backend = "hatchling.build"
+
+# Single-sourced version: `__version__` in src/feeder_station/__init__.py is the
+# only place it is written, as in feeder-analysis.
+[tool.hatch.version]
+path = "src/feeder_station/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/feeder_station"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
