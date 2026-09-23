@@ -265,6 +265,17 @@ re-sending anything"); `trap-commands/spec.md` "Target-list delivery with versio
   check discarded the command anyway. Fixed alongside (`_reported_state` now returns `None`, not a
   fabricated default, when nothing is known about a node; `_rehydrate_desired_command` never asks
   `satisfied_by` anything in that case).
+  **Correction (verify-report-batch2c.md, CRITICAL 1): the `_reported_state` fix above was correct
+  but only half proven.** The rule has two branches -- no registry entry at all (`KeyError`), or an
+  entry whose `state` is still `None` -- and the never-heard-node parametrize only ever reached the
+  first: every case issued a single command against a node with no prior row. Reverting only the
+  second branch (`if trap.state is None: return None` -> a fabricated `ReportedState(armed=False,
+  ...)`) passed all 757 tests (N2) and is reachable with zero corruption: `PUT /targets` then
+  `POST /disarm` against the same never-heard node creates the registry entry first (`state=None`),
+  and the DISARM issued after it is checked against that entry on the next boot -- silently dropping
+  a pending DISARM, the exact defect this fix was written for, on the branch it did not pin. Closed
+  in Batch 2d: a fourth parametrize case (`set_targets_then_disarm`) reaches the second branch; N2
+  now dies.
 - [x] 2.7 GREEN — `openspec/changes/field-station-p4/design.md`, line ~288: amend "For each `node_id`
   in `node_cursor`" to match 2.6's actual roster derivation. This is the one design.md edit that is
   **in scope for this batch**, not deferred to Appendix A — the report ties it directly to CRITICAL 6
@@ -317,6 +328,26 @@ reports when it gives up on something.
   un-taken close — WARNING 4, Batch 2c): `roster_lost` catches only a roster *query* that raises, not
   a query that succeeds while returning fewer nodes than the store holds. `Store.roster_nodes_expected`/
   `roster_nodes_rehydrated`, surfaced in `/health` and folded into `ok`, close it.
+  **Correction (verify-report-batch2c.md, WARNING 1 / WARNING 2 / WARNING 4): the Batch 2c closures
+  above were each narrower than claimed.** WARNING 1's rule ("a row that cannot be read is a row that
+  cannot be read, whether the code expresses that by raising or by returning `None`") had three more
+  expressions in `store.py` still silent: a null `CAPTURED` tag (`:734`, a bare `return None`), a
+  corrupt `SET_TARGETS` `targets_version` (`:799-802`, a bare `return`, dropping the whole pending
+  command), and a corrupt `tags` list (`:823`, `... or ()`, fabricating an *empty* desired list) --
+  none counted, none flagged. WARNING 2's `/api/traps`-level test above genuinely pins the flag
+  end to end, but the *UI* pin (`tests/test_app.py`) only asserted the ternary's condition mentions
+  the flag, constraining neither branch's content: inverting it (the badge shipping on the *confident*
+  trap, silent on the doubtful one) and emptying both branches both passed all 757 tests (N5, N6).
+  WARNING 4's fix is genuinely closed for the measured case, but `_known_node_ids`/
+  `_count_all_known_nodes` differ *by design* on `source = 'station'` rows, not only through
+  corruption -- a station-sourced-only node read `ok: false` permanently with nothing naming the
+  cause, and `_count_all_known_nodes`'s own docstring claimed that could not happen.
+  Closed in Batch 2d: all three WARNING 1 paths now raise through one shared `_unreadable()` helper
+  (unifying the two guards WARNING 1 already fixed too, not a third bespoke shape) into the same
+  counted/logged path; the UI test now anchors the whole ternary (condition, the stale-badge markup on
+  true, nothing on false), and `.stale-badge`'s CSS was bumped to the same weight as `.no-contact-badge`
+  instead of a small italic; `_known_node_ids` now unions `source = 'station'` rows too, and
+  `_count_all_known_nodes`'s docstring no longer claims the gap is impossible.
 - [x] 2.10 **WARNING K(a) — pin the logging.** Two mutations survived the whole 729-test suite:
   downgrading `rehydrate`'s skip log to `logger.debug` while dropping the node id and traceback, and
   the same on `ingest`'s drop log. `rg 'caplog' tests/` finds nothing. The *counted* half of the
@@ -334,6 +365,17 @@ reports when it gives up on something.
   drove `FrameError`, so a mutation special-casing it and downgrading the other two survived. Closed
   in Batch 2c: one more `caplog` test per gap (a corrupted `OPERATOR_ARM` row for the second store.py
   site; a too-short HEARTBEAT payload, raising `PayloadError`, for the ingest.py site).
+  **Correction (verify-report-batch2c.md, WARNING 3): "per log site" closed 3 of 4, not all of them.**
+  `store.py` has *three* `logger.exception` sites, not two -- the state-race loop (`:572`) and
+  `_rehydrate_desired_command` (`:626`) were each pinned in Batch 2c, but the roster-failure site
+  (`:556`, the same one `test_boot_survives_a_broken_node_roster_query` already exercises for
+  `rehydration_errors`/`roster_lost`) was never checked through its own log record. N7 (downgrading it
+  to `logger.debug`, dropping the traceback) survived all 757 tests. Closed in Batch 2d: enumerated
+  exhaustively from the source rather than assumed from this list (`rg 'logger\.(exception|warning)'`
+  across `store.py`/`ingest.py`) -- exactly four skip/drop log sites exist (three `logger.exception` in
+  `store.py`: `:556`, `:572`, `:626`; one `logger.warning` in `ingest.py`: `:100`), and all four are now
+  pinned. One `caplog` assertion added to the existing roster-failure test, matching the shape the
+  other two `store.py` sites already use.
 
 **Verification (after Batch 2, before Batch 3 starts)**: `uv run pytest`, `uv run ruff check .`,
 `uv run mypy src`. Re-run the report's own four-ordering repro plus the never-heard-node repro by
