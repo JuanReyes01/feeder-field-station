@@ -43,3 +43,18 @@ def test_unknown_argv_flags_are_ignored_not_rejected() -> None:
     config = StationConfig.load(argv=["--db-path", "/tmp/station.db"], env={})
 
     assert config.heartbeat_interval == StationConfig().heartbeat_interval
+
+
+def test_backlog_retry_budget_defaults_to_three() -> None:
+    """7.7: the backlog rotation's retry budget, named once, here — not a
+    bare literal inside `adapters/scheduler.py`.
+    """
+    config = StationConfig.load(argv=[], env={})
+
+    assert config.backlog_retry_budget == 3
+
+
+def test_env_overrides_the_backlog_retry_budget() -> None:
+    config = StationConfig.load(argv=[], env={"FEEDER_STATION_BACKLOG_RETRY_BUDGET": "5"})
+
+    assert config.backlog_retry_budget == 5

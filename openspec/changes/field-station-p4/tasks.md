@@ -198,14 +198,14 @@ Hardware gate: none new — builds on slices 4/5's proxies.
 Traces: S5, S9. Files: `domain/backlog.py` (new, pure), adapter wiring in `adapters/ingest.py` or a
 new `adapters/scheduler.py`, `tests/domain/test_backlog.py`, `tests/adapters/test_backlog_rotation.py`.
 
-- [ ] 7.1 RED: `test_rotation_visits_each_node_once_per_round`
-- [ ] 7.2 GREEN: pure round-robin rotation in `domain/backlog.py`
-- [ ] 7.3 RED: `test_one_silent_node_does_not_block_the_rotation` — 10 nodes, one never responds
-- [ ] 7.4 GREEN: skip-and-retry-next-round logic, retry budget from `config.py`
-- [ ] 7.5 RED: `test_ten_simulated_nodes_over_pty_stays_responsive` (S5 scale scenario)
-- [ ] 7.6 GREEN: wire rotation to `GET_BACKLOG` encode (slice 2) + gateway write (slice 5) + store
+- [x] 7.1 RED: `test_rotation_visits_each_node_once_per_round`
+- [x] 7.2 GREEN: pure round-robin rotation in `domain/backlog.py`
+- [x] 7.3 RED: `test_one_silent_node_does_not_block_the_rotation` — 10 nodes, one never responds
+- [x] 7.4 GREEN: skip-and-retry-next-round logic, retry budget from `config.py`
+- [x] 7.5 RED: `test_ten_simulated_nodes_over_pty_stays_responsive` (S5 scale scenario)
+- [x] 7.6 GREEN: wire rotation to `GET_BACKLOG` encode (slice 2) + gateway write (slice 5) + store
       cursor query (slice 4)
-- [ ] 7.7 REFACTOR: retry-budget constant moves into `config.py` if not already there
+- [x] 7.7 REFACTOR: retry-budget constant moves into `config.py` if not already there
 
 Done: 10-node rotation scenario passes without stalling; skip-and-retry scenario passes.
 PR boundary: `domain/backlog.py` + adapter wiring + tests.

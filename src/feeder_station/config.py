@@ -27,14 +27,22 @@ from datetime import timedelta
 DEFAULT_HEARTBEAT_INTERVAL = timedelta(minutes=5)
 DEFAULT_SILENCE_AFTER = timedelta(minutes=15)
 
+# Slice 7 (backlog-rotation): how many consecutive silent GET_BACKLOG
+# attempts a node gets before the rotation moves on without it — echoes
+# S11's own "three missed beats" shape, named once here rather than as a
+# bare literal inside adapters/scheduler.py.
+DEFAULT_BACKLOG_RETRY_BUDGET = 3
+
 ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
 ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
+ENV_BACKLOG_RETRY_BUDGET = "FEEDER_STATION_BACKLOG_RETRY_BUDGET"
 
 
 @dataclass(frozen=True)
 class StationConfig:
     heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL
     silence_after: timedelta = DEFAULT_SILENCE_AFTER
+    backlog_retry_budget: int = DEFAULT_BACKLOG_RETRY_BUDGET
 
     @classmethod
     def load(
@@ -55,6 +63,7 @@ class StationConfig:
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--heartbeat-interval-s", type=float, default=None)
         parser.add_argument("--silence-after-s", type=float, default=None)
+        parser.add_argument("--backlog-retry-budget", type=int, default=None)
         args, _unknown = parser.parse_known_args(list(argv) if argv is not None else [])
 
         return cls(
@@ -68,6 +77,11 @@ class StationConfig:
                 resolved_env.get(ENV_SILENCE_AFTER_S),
                 DEFAULT_SILENCE_AFTER,
             ),
+            backlog_retry_budget=_resolve_int(
+                args.backlog_retry_budget,
+                resolved_env.get(ENV_BACKLOG_RETRY_BUDGET),
+                DEFAULT_BACKLOG_RETRY_BUDGET,
+            ),
         )
 
 
@@ -78,4 +92,12 @@ def _resolve_seconds(
         return timedelta(seconds=from_argv)
     if from_env is not None:
         return timedelta(seconds=float(from_env))
+    return default
+
+
+def _resolve_int(from_argv: int | None, from_env: str | None, default: int) -> int:
+    if from_argv is not None:
+        return from_argv
+    if from_env is not None:
+        return int(from_env)
     return default
