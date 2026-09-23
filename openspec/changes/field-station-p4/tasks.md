@@ -85,11 +85,11 @@ Hardware gate: none.
 
 Traces: S9 (link integrity only). Files: `domain/serial_framing.py`, `tests/domain/test_serial_framing.py`.
 
-- [ ] 3.1 RED: `test_round_trips_a_maximum_size_frame` — 200-byte payload
-- [ ] 3.2 GREEN: implement `cobs_encode`/`cobs_decode`
-- [ ] 3.3 RED: `test_resyncs_after_a_corrupted_frame` — corrupted frame, then a well-formed one
-- [ ] 3.4 GREEN: implement `FrameStream`, a byte-in/blocks-out state machine resyncing at the next `0x00`
-- [ ] 3.5 REFACTOR: consolidate the resync scan; docstring names the invariant it holds
+- [x] 3.1 RED: `test_round_trips_a_maximum_size_frame` — 200-byte payload
+- [x] 3.2 GREEN: implement `cobs_encode`/`cobs_decode`
+- [x] 3.3 RED: `test_resyncs_after_a_corrupted_frame` — corrupted frame, then a well-formed one
+- [x] 3.4 GREEN: implement `FrameStream`, a byte-in/blocks-out state machine resyncing at the next `0x00`
+- [x] 3.5 REFACTOR: consolidate the resync scan; docstring names the invariant it holds
 
 Done: round-trip and resync scenarios green; byte vectors shared with firmware's COBS tests.
 PR boundary: `domain/serial_framing.py` + tests only.
