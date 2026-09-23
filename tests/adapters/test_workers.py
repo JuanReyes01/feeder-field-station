@@ -20,6 +20,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from feeder_station.adapters.store import Store
 from feeder_station.adapters.workers import (
     WorkerStatus,
@@ -599,3 +601,91 @@ def test_time_sync_alone_is_capped_by_the_shared_budget(tmp_path: Path) -> None:
     # many of the ten nodes are simultaneously eligible.
     assert time_sync_count <= 3, f"{time_sync_count} of 10 nodes synced in one tick"
     assert 0 < time_sync_count, "the budget must not refuse every attempt either"
+
+
+# --- CRITICAL 4 (sdd-verify field-station-p4, batch 3b): the withheld
+# --- TIME_SYNC path's own write cadence -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("node_count", "window_s"),
+    [(3, 0.4), (3, 0.8), (10, 0.4), (10, 0.8)],
+)
+def test_withheld_time_sync_rows_are_bounded_by_the_heartbeat_cadence_not_the_tick_rate(
+    tmp_path: Path, node_count: int, window_s: float
+) -> None:
+    """CRITICAL 4: before this fix, every unsynced node was re-attempted on
+    *every* tick with an unset clock, and `attempt_time_sync` unconditionally
+    writes a `STATION_TIME_SYNC_WITHHELD` row before returning `False`
+    (clock-trust/spec.md's own "MUST log each withheld send" -- the log
+    itself is correct; the defect is that the scheduler made every node due
+    once per tick, not once per send). Measured at production settings: 10
+    traps, a 1 s tick, unset clock -> 10.0 fsync'd rows/s, ~189 MB/day
+    (verify-report-2.md).
+
+    This is property-shaped, not "at least one row exists" --
+    `test_time_sync_resumes_once_the_scheduler_loop_sees_a_trusted_clock`
+    above already covers that, correctly, and is untouched by this task. The
+    property here is a *rate* bound that must hold regardless of roster size
+    (parametrized 3 and 10 nodes) or how long the loop has been running: a
+    `tick_s` far shorter than `window_s` means each window covers many tens
+    of ticks, so a fix that only capped a *count* per run (rather than a
+    genuine per-node cadence) would still show a rate that rises with a
+    longer window at the same roster size -- exactly what the two `window_s`
+    values per `node_count` are here to catch.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    for node_id in range(node_count):
+        registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _SpyGateway()
+    heartbeat_interval_s = 0.15
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=heartbeat_interval_s),
+        # Isolates the withheld-log cadence itself, not the shared airtime
+        # budget (CRITICAL 3, already proven separately) -- a withheld
+        # attempt spends no token either way (see workers.py's own
+        # `would_send` gate), so this value is irrelevant to what this test
+        # measures.
+        channel_budget_frames_per_s=1000.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _RealClock(trust=ClockTrust.UNSET),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,  # far shorter than heartbeat_interval_s: many ticks per window
+        },
+        daemon=True,
+    )
+    started = time.monotonic()
+    thread.start()
+    time.sleep(window_s)
+    stop.set()
+    thread.join(timeout=2.0)
+    elapsed = time.monotonic() - started
+
+    assert not thread.is_alive()
+    withheld_count = store._conn.execute(
+        "SELECT COUNT(*) FROM event WHERE msg_type = ?", (STATION_TIME_SYNC_WITHHELD,)
+    ).fetchone()[0]
+    rows_per_second = withheld_count / elapsed
+
+    # Attempting each unsynced node at most once per `heartbeat_interval_s`
+    # bounds the rate to roughly `node_count / heartbeat_interval_s`,
+    # independent of `tick_s` -- a 2x safety margin absorbs the one extra
+    # immediate attempt each node gets at boot. The old, unbounded behaviour
+    # attempted every node on every 0.01s tick (`node_count / 0.01` --
+    # 200-1000/s here), an order of magnitude past this bound either way.
+    max_rows_per_second = 2.0 * (node_count / heartbeat_interval_s)
+    assert rows_per_second <= max_rows_per_second, (
+        f"{withheld_count} withheld rows in {elapsed:.2f}s = {rows_per_second:.1f} rows/s, "
+        f"expected at most {max_rows_per_second:.1f} rows/s for {node_count} nodes"
+    )

@@ -471,16 +471,26 @@ itself); S9 (indirectly, via the fsync-inside-the-lock interaction with WARNING 
   category competing, and counts real frames off a `_SpyGateway`. A companion test,
   `test_time_sync_alone_is_capped_by_the_shared_budget`, proves the same shared budget caps TIME_SYNC
   too. See apply-progress for why deletion was rejected.
-- [ ] 3.7 RED — new test bounding `STATION_TIME_SYNC_WITHHELD` row-write rate with an unset clock and
+- [x] 3.7 RED — new test bounding `STATION_TIME_SYNC_WITHHELD` row-write rate with an unset clock and
   a multi-node roster over a multi-tick window (property-shaped: an upper bound on rows/second that
   holds regardless of roster size or tick count — not "at least one row exists," which is what
   `test_time_sync_resumes_once_the_scheduler_loop_sees_a_trusted_clock` currently checks and is not
   touched by this task, since that test's own claim about *resuming* is correct and stays).
-- [ ] 3.8 GREEN — `src/feeder_station/adapters/workers.py::run_scheduler_loop`: give the withheld
+  **Done** (batch 3b): `tests/adapters/test_workers.py::test_withheld_time_sync_rows_are_bounded_by_
+  the_heartbeat_cadence_not_the_tick_rate`, parametrized over `node_count` (3, 10) × `window_s`
+  (0.4, 0.8) — four cases, all measuring a real rate off `store._conn`, none asserting mere presence.
+- [x] 3.8 GREEN — `src/feeder_station/adapters/workers.py::run_scheduler_loop`: give the withheld
   `TIME_SYNC` path its own retry cadence — attempt an unsynced node at most once per
   `config.heartbeat_interval`, or log the withholding once per node per transition into `unset` rather
   than once per attempt (report's two named options; either preserves CRITICAL 3's fix — the node
   stays eligible — without the 1 Hz write amplification).
+  **Done** (batch 3b): took the first option — a per-node `last_withheld_attempt_at: dict[int, float]`
+  (driven by `time.monotonic()`, the same reasoning `SharedBudget` already established for its own
+  refill clock, not the injected `Clock`, which several tests and a real `unset` station legitimately
+  freeze or distrust), consumed at the one call site in `run_scheduler_loop`'s `time_sync` branch
+  rather than reinventing a second pacing primitive — `domain/pacing.py`'s `TokenBucket` was
+  deliberately left alone since it is a *rate* limiter and this is a *per-node cadence* gate, the same
+  shape `next_poll_due_at` already uses for GET_BACKLOG.
 
 **Verification (after Batch 3, before Batch 4 starts)**: `uv run pytest`, `uv run ruff check .`,
 `uv run mypy src`. Re-run the report's own three-row occupancy table (10 traps unconfirmed ARM; 1 trap

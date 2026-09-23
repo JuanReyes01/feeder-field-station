@@ -293,6 +293,13 @@ def run_scheduler_loop(
     last_polled_at: dict[int, datetime] = {}
     arrivals: dict[int, float] = {} if last_frame_arrival is None else last_frame_arrival
     synced_node_ids: set[int] = set()
+    # CRITICAL 4 (sdd-verify field-station-p4, batch 3b): `time.monotonic()`
+    # per node id, last time a *withheld* TIME_SYNC attempt was made --
+    # never `clock.now()`. The withheld cadence has to keep advancing even
+    # while the business clock itself is frozen or untrusted (the exact
+    # `unset` case this cadence exists to bound), the same reasoning
+    # `SharedBudget` above already applies to its own refill clock.
+    last_withheld_attempt_at: dict[int, float] = {}
     budget = SharedBudget(
         pacing.start(
             capacity=pacing.DEFAULT_CAPACITY,
@@ -353,7 +360,37 @@ def run_scheduler_loop(
                             # row, not a frame, and must not compete for
                             # airtime it never uses.
                             would_send = may_distribute_time(clock.trust())
-                            if would_send and not budget.try_send():
+                            if not would_send:
+                                # CRITICAL 4: `attempt_time_sync` writes a
+                                # `STATION_TIME_SYNC_WITHHELD` row on every
+                                # call (clock-trust/spec.md's own "MUST log
+                                # each withheld send") -- and, before this
+                                # gate, every unsynced node was "due" on
+                                # every tick, so a ten-node roster with an
+                                # unset clock wrote 10 fsync'd rows/s
+                                # (~189 MB/day, verify-report-2.md). The
+                                # spec pins the log, not the cadence -- the
+                                # defect is volume, not the log itself --
+                                # so this attempts (and logs) a withheld
+                                # node at most once per
+                                # `config.heartbeat_interval`, the same
+                                # cadence GET_BACKLOG's own per-node polling
+                                # already uses above, without touching the
+                                # log call or the "stays eligible" fix
+                                # CRITICAL 3 already made.
+                                monotonic_now = time.monotonic()
+                                last_attempt = last_withheld_attempt_at.get(node_id)
+                                cadence_s = config.heartbeat_interval.total_seconds()
+                                if last_attempt is not None and (
+                                    monotonic_now - last_attempt < cadence_s
+                                ):
+                                    continue
+                                last_withheld_attempt_at[node_id] = monotonic_now
+                                attempt_time_sync(
+                                    node_id, clock=clock, store=store, gateway=gateway
+                                )
+                                continue
+                            if not budget.try_send():
                                 continue
                             # CRITICAL 3: only a frame actually sent counts
                             # as synced -- a withheld attempt must stay
