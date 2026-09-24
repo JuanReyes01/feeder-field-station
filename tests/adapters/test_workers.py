@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from itertools import groupby
 from pathlib import Path
 
 import pytest
@@ -208,8 +209,19 @@ def test_a_crashing_gateway_loop_is_caught_by_run_supervised(tmp_path: Path) -> 
 
 
 class _SpyGateway:
-    def __init__(self) -> None:
+    """`last_frame_arrival`/`responsive_node_ids` (CRITICAL 5, batch 4) are
+    optional: when set, a responsive node's poll marks its own "arrival,"
+    simulating the reply `run_gateway_loop` would record, single-threaded.
+    """
+
+    def __init__(
+        self,
+        last_frame_arrival: dict[int, float] | None = None,
+        responsive_node_ids: set[int] | None = None,
+    ) -> None:
         self.written: list[bytes] = []
+        self._arrival = last_frame_arrival
+        self._responsive_node_ids = responsive_node_ids or set()
 
     def ensure_connected(self, *, stop: Callable[[], bool]) -> bool:
         return True
@@ -219,6 +231,11 @@ class _SpyGateway:
 
     def write_frame(self, raw_frame: bytes) -> bool:
         self.written.append(raw_frame)
+        if self._arrival is not None:
+            frame = decode(raw_frame)
+            is_backlog = frame.msg_type == payloads.GET_BACKLOG
+            if is_backlog and frame.node_id in self._responsive_node_ids:
+                self._arrival[frame.node_id] = time.time()
         return True
 
 
@@ -412,12 +429,17 @@ class _RealClock:
 def test_backlog_rotation_persists_across_ticks_and_is_paced(tmp_path: Path) -> None:
     """CRITICAL 4: before this fix, `run_scheduler_loop` rebuilt
     `backlog.start()` fresh every 1 s tick and swept the *whole* roster
-    (`run_rotation_round`) inside it -- measured 13.3-40 GET_BACKLOG
-    frames/s at ten known traps (verify-report.md). This drives the real
-    loop, on a real thread, against ten traps that never respond -- the
-    worst case the report measured -- and proves the real, paced rate
-    instead: one poll at most per `config.heartbeat_interval`, never a
-    per-tick sweep.
+    (the now-deleted `run_rotation_round`) inside it -- measured 13.3-40
+    GET_BACKLOG frames/s at ten known traps (verify-report.md). This
+    drives the real loop, on a real thread, against ten traps that never
+    respond -- the worst case the report measured -- and proves the real,
+    paced rate instead: one poll at most per `config.heartbeat_interval`,
+    never a per-tick sweep.
+
+    **CRITICAL 5 (sdd-verify field-station-p4, batch 4): "persists... and
+    is paced" promises more than this checks** -- it counts frames, never
+    poll order. Kept as-is, a coarse rate regression guard; order is
+    proved by the sibling test immediately below instead.
     """
     store = Store(tmp_path / "station.db")
     registry = Registry(silence_after=timedelta(minutes=15))
@@ -473,6 +495,92 @@ def test_backlog_rotation_persists_across_ticks_and_is_paced(tmp_path: Path) -> 
         f"pacing produced only {get_backlog_count} polls in {elapsed:.2f}s"
     )
     assert frames_per_second < 15, f"got {frames_per_second:.1f} GET_BACKLOG frames/s"
+
+
+def test_backlog_rotation_skips_a_silent_node_within_its_retry_budget_and_continues(
+    tmp_path: Path,
+) -> None:
+    """CRITICAL 5 (sdd-verify field-station-p4, batch 4): moves the deleted
+    `run_rotation_round`'s poll-order coverage onto its production
+    replacement, `run_scheduler_loop`, the sole caller of `poll_node`. Ten
+    known traps, node 5 never responding; the other nine have their reply
+    simulated via `_SpyGateway`'s arrival hook. `retry_budget=3`
+    (`config.backlog_retry_budget`'s default).
+
+    Empirically confirmed (not assumed from the deleted primitive's own
+    example, which does not reproduce here): every node's *first-ever*
+    poll registers as unheard regardless of responsiveness -- no
+    `last_polled_at` baseline exists yet -- so lap 1 is skipped, and this
+    asserts laps 2-3, where the real distinction holds: node 5 retried
+    exactly `retry_budget` times, every other node exactly once, repeating
+    lap after lap -- "one silent node does not block the rotation,"
+    radio-gateway spec.md.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    node_ids = tuple(range(1, 11))
+    silent_node = 5
+    for node_id in node_ids:
+        registry.heartbeat(node_id, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+
+    last_frame_arrival: dict[int, float] = {}
+    responsive_node_ids = set(node_ids) - {silent_node}
+    gateway = _SpyGateway(last_frame_arrival, responsive_node_ids)
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.03),
+        channel_budget_frames_per_s=1000.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _RealClock(trust=ClockTrust.UNSET),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.005,
+            "last_frame_arrival": last_frame_arrival,
+        },
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        # 10 runs for the transient first lap + 20 for two full steady
+        # laps, plus one more run starting so the 30th is known to have
+        # ended (its own successor run has begun).
+        while time.monotonic() < deadline:
+            order = [decode(raw).node_id for raw in gateway.written]
+            if sum(1 for _ in groupby(order)) >= 31:
+                break
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    order = [decode(raw).node_id for raw in gateway.written]
+    observed_runs = [(node_id, len(list(g))) for node_id, g in groupby(order)]
+
+    assert len(observed_runs) >= 31, (
+        f"only {len(observed_runs)} poll-runs observed; not enough to reach steady state"
+    )
+    first_lap_ids = [node_id for node_id, _ in observed_runs[:10]]
+    assert first_lap_ids == list(node_ids), (
+        "the first lap must still visit every node once, in round-robin order, "
+        "even though every node's retry count during it is a first-contact artifact"
+    )
+
+    steady_lap = [(node_id, 3 if node_id == silent_node else 1) for node_id in node_ids]
+    assert observed_runs[10:30] == steady_lap * 2, (
+        "laps 2 and 3 must each retry only the silent node, exactly retry_budget times, "
+        "visit every other node exactly once, and repeat identically -- proving it "
+        "neither blocks the rotation nor is permanently dropped from it"
+    )
 
 
 # --- CRITICAL 3 (sdd-verify field-station-p4, batch 3a): the shared budget
