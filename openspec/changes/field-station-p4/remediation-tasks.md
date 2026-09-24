@@ -42,6 +42,17 @@ Chain strategy: stacked-to-main
 | 3 | CRITICAL 3 + CRITICAL 4 | `adapters/workers.py`, `domain/commands.py`, new `domain/` pacer module, `config.py`, 3 test files | **280–380** | **Medium — closest to budget** | Yes, but see split contingency below |
 | 4 | CRITICAL 5 | `adapters/scheduler.py` (deletion), `tests/adapters/test_backlog_rotation.py`, `tests/adapters/test_workers.py` | **150–250** | Low | Yes |
 
+**Correction (apply-progress-batch3b-4.md): Batch 4's actual diff is 398 changed lines, over both the
+150–250 forecast and the 300-line hard ceiling.** The forecast undercounted
+`tests/adapters/test_backlog_rotation.py` — it estimated as if the file held only the four
+`run_rotation_round`-based tests this batch's own task list named; it actually holds six (251 lines),
+three of which test `poll_node` directly and have nothing to do with the dead primitive (see 4.4's own
+correction). Deleting the whole file would have been *cheaper* (251 lines) than what shipped (170:
+161 deletions + 9 insertions, from gutting in place rather than delete-and-recreate elsewhere) but
+would have silently dropped that coverage; keeping it was the correct call and the correction is
+disclosed here rather than hidden by matching the original estimate. All discretionary docstring
+prose was trimmed aggressively before landing at 398 — see apply-progress for the accounting.
+
 **Split contingency** (only if a batch's real diff exceeds ~380 lines once written): Batch 2 splits
 into **2a — CRITICAL 1** (state-source fix + property test) and **2b — CRITICAL 6** (roster fix +
 design.md line), landed as two commits in the same order, 2a before 2b, since 2b's roster fix is a
@@ -532,32 +543,49 @@ with zero callers in `src/`.
 **Satisfies**: `radio-gateway/spec.md` "Backlog rotation across nodes" — "MUST skip a node that does
 not respond within its retry budget and continue the rotation"; S5, S9.
 
-- [ ] 4.1 GREEN (deletion path, recommended — re-wiring `run_rotation_round` as a "catch-up sweep"
-  re-introduces the exact full-roster-sweep-per-call shape that caused CRITICAL 4 originally, per the
-  report's own framing of this as "the same defect family... re-created"): delete
-  `run_rotation_round` and `poll_node`'s now-unused re-export from
-  `src/feeder_station/adapters/scheduler.py`, keeping `poll_node` itself (still used by
-  `run_scheduler_loop`).
-- [ ] 4.2 RED — before deleting the four tests in `tests/adapters/test_backlog_rotation.py`, write
-  their production-loop replacement first: a new test against `run_scheduler_loop` (or a thin wrapper
-  exposing the schedule for assertion) that drives ten known traps, one of which never responds, and
-  asserts the **poll order** `[1,1,1,2,2,2,3,3,3]` at `retry_budget=3` — the exact order the report
-  verified by hand and the exact thing the current replacement test
-  (`test_backlog_rotation_persists_across_ticks_and_is_paced`) never checks.
-- [ ] 4.3 **Edited assertion** — `tests/adapters/test_workers.py::test_backlog_rotation_persists_
+- [x] 4.1 GREEN — deleted `run_rotation_round` from `src/feeder_station/adapters/scheduler.py`,
+  keeping `poll_node` itself (still used by `run_scheduler_loop`). **Correction (apply-progress-
+  batch3b-4.md): "`poll_node`'s now-unused re-export"** never existed — `rg` found no re-export of
+  `poll_node` anywhere (`__init__.py` or otherwise); it is defined directly in `scheduler.py` and
+  stays. Also dropped the now-unused `Callable`/`Sequence`/`domain.backlog` imports the deleted
+  function alone needed.
+- [x] 4.2 GREEN (not RED — see correction below) — new test against `run_scheduler_loop` itself,
+  `tests/adapters/test_workers.py::test_backlog_rotation_skips_a_silent_node_within_its_retry_budget_
+  and_continues`: ten known traps, one never responding (the other nine simulated as replying),
+  `retry_budget=3`. **Correction: the exact array this task names, `[1,1,1,2,2,2,3,3,3]`, does not
+  reproduce against the real production loop for a true "one silent among nine responsive" roster** —
+  measured directly, five repeated runs, identical every time. That shape only appears if no node ever
+  registers a reply (all ten silent, not one), which is the deleted primitive's `responded` callback
+  semantics, not `run_scheduler_loop`'s own `heard` calculation (gated on a `last_polled_at` baseline
+  that does not exist on a node's first-ever poll). The test asserts the real, empirically-confirmed
+  invariant instead: lap 1 is a first-contact transient (skipped, not asserted on), and from lap 2
+  onward the silent node is retried exactly `retry_budget` times while every other node is visited
+  exactly once, repeating lap after lap. Confirmed by mutation (`heard` forced `True`, forced `False`,
+  and `domain/backlog.py::record_response`'s retry-budget boundary loosened by one) — all three
+  independently fail this test.
+- [x] 4.3 **Edited assertion** — `tests/adapters/test_workers.py::test_backlog_rotation_persists_
   across_ticks_and_is_paced`. **Before**: counts `GET_BACKLOG` frames and asserts `< 15/s`; never
-  inspects poll order, retry accumulation, or schedule survival despite its name promising
-  "persists... and is paced." **After**: 4.2's order assertion is added to this test (or a sibling in
-  the same file), so the name and the assertion agree. State that the frame-count assertion is kept
-  as a coarse regression guard, not removed, since 4.2 checks a different property (order, not rate).
-- [ ] 4.4 GREEN — remove `tests/adapters/test_backlog_rotation.py` (or gut it to nothing once its four
-  tests' behavior is covered by 4.2/4.3 against the live loop) once 4.1's deletion lands and 4.2 is
-  green.
-- [ ] 4.5 REFACTOR — `tests/test_app.py:446-456`'s docstring (named in WARNING 14 as one of the three
-  places that still claims a rotation round runs "slice 7" style): correct it to describe what the
-  test actually exercises post-deletion. This one docstring is in scope here because 4.1 is what makes
-  it wrong in a new way; the other WARNING 14 items (design.md's three stale lines, tasks.md,
-  `attempt_time_sync`'s docstring claim) are Appendix A, deferred.
+  inspected poll order. **After**: docstring now states explicitly that the frame-count assertion is a
+  coarse rate regression guard only, kept as-is; poll order is proved by 4.2's new sibling test
+  immediately below it instead, against the same production loop.
+- [x] 4.4 GREEN — `tests/adapters/test_backlog_rotation.py` gutted in place (not fully removed —
+  see correction) once 4.1 landed and 4.2 was green.
+  **Correction: this task's premise ("its four tests' behavior is covered by 4.2/4.3") undercounted
+  the file** — it holds six tests, not four, and three of them (`test_poll_node_asks_after_the_
+  stored_cursor`, `test_poll_node_asks_for_everything_when_no_cursor_exists_yet`,
+  `test_get_backlog_cursor_survives_a_msg_id_wrap`) test `poll_node`'s own cursor-forwarding (DD7's
+  `msg_id`-wrap regression) and never call `run_rotation_round` at all — deleting them would have been
+  an unjustified, silent coverage loss with nothing to do with this CRITICAL. Kept those three in
+  place; removed only the three tests that called `run_rotation_round`, plus their now-unused
+  pty/serial/threading imports. The real-pty test among the removed three
+  (`test_run_rotation_round_completes_quickly_over_a_real_pty`) is **not replaced** — its wire-level
+  proof that `poll_node`'s `GET_BACKLOG` cursor survives a real port is a genuine, disclosed loss under
+  this batch's line budget (see apply-progress for the budget accounting).
+- [x] 4.5 REFACTOR — `tests/test_app.py::test_the_app_starts_its_background_workers`'s docstring
+  (WARNING 14) corrected to describe `poll_node`/`run_scheduler_loop`, not "run a rotation round";
+  the `GET_BACKLOG` assertion's failure message updated to match. No behaviour change, test stays
+  green. The other WARNING 14 items (design.md's stale lines, tasks.md, `attempt_time_sync`'s
+  docstring claim) remain Appendix A, deferred.
 
 **Verification (after Batch 4 — full remediation re-verification)**: `uv run pytest`,
 `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src`, `uv build`. Re-run the

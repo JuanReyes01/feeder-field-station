@@ -1,14 +1,18 @@
-# Apply Progress — Batch 3b (CRITICAL 4) + BEHAVIOUR 4/SUGGESTION 5
+# Apply Progress — Batch 3b (CRITICAL 4) + BEHAVIOUR 4/SUGGESTION 5 + Batch 4 (CRITICAL 5)
 
 **Change**: `field-station-p4`
 **Mode**: Strict TDD.
-**HEAD before this run**: `f2c2f19`.
-**Status**: Parts 1 and 2 done, both green, independently committed. **Part 3 (Batch 4, CRITICAL 5)
-was NOT started** — stopped at the 500-line budget before touching it. See "Budget" below.
+**Status**: All of Batches 1-4 now done, all green, independently committed across two runs. Parts 1-2
+below ran first (`HEAD` before: `f2c2f19`); Part 3 (Batch 4, CRITICAL 5) ran in a later session
+(`HEAD` before: `ccb7afc`) — see that section for its own commits, budget accounting, and
+corrections. **This was the last CRITICAL in `verify-report-2.md`**; Batch 5 (CRITICAL I) remains
+explicitly descoped by the user, recorded and unscheduled in `remediation-tasks.md`.
 
-**Commits** (2):
-1. `fix(adapters): cap the withheld TIME_SYNC write rate to the heartbeat cadence` (Part 1)
-2. `fix(domain): make CAPTURED satisfy commands, keep FAULT from assuming state` (Part 2)
+**Commits** (5 total): Parts 1-2 —
+1. `fix(adapters): cap the withheld TIME_SYNC write rate to the heartbeat cadence`
+2. `fix(domain): make CAPTURED satisfy commands, keep FAULT from assuming state`
+
+Part 3 (Batch 4) — see its own section below for the 3 commits.
 
 ---
 
@@ -192,6 +196,84 @@ exactly as they were at `f2c2f19`.
 
 ---
 
+---
+
+## Part 3 (Batch 4, CRITICAL 5) — DONE (separate run, HEAD before: `ccb7afc`)
+
+**Commits** (3, each independently green): `2a06ae1` (new poll-order test), `282e006` (delete
+`run_rotation_round`, gut the dead-code test file), `ee2e3fb` (WARNING 14 docstring fix).
+
+**Caller enumeration, from source (`rg`), not from any report**: `run_rotation_round` — zero callers
+in `src/`, only its own definition and four callers inside `tests/adapters/test_backlog_rotation.py`
+(now three, post-fix). `poll_node` — exactly one production caller, `adapters/workers.py::
+run_scheduler_loop:339`; its only other caller was `run_rotation_round` itself. **`poll_node`'s
+"now-unused re-export" (task 4.1's own wording) does not exist** — `rg` found no re-export anywhere
+(`__init__.py` or otherwise); `poll_node` is defined directly in `scheduler.py`. Followed the code,
+not the task text: nothing was removed beyond the function itself and its now-unused imports.
+
+**Task 4.2, corrected**: the task's own poll order `[1,1,1,2,2,2,3,3,3]` does not reproduce against
+`run_scheduler_loop` for a true "one silent among nine responsive" roster — verified by running the
+real loop (see `probe_poll_order.py`/`probe_poll_order2.py` in this session's scratch dir, five
+repeated trials, identical every time): `run_scheduler_loop`'s `heard` check is gated on a
+`last_polled_at` baseline that does not exist on any node's first-ever poll, so lap 1 retries *every*
+node up to `retry_budget` times regardless of responsiveness — an artifact of "first contact," not of
+who is genuinely silent. The `[1,1,1,2,2,2,...]` shape only appears if *no* node ever registers a
+reply (all ten silent), which is the deleted primitive's synchronous `responded` callback semantics,
+not this loop's own. The new test therefore skips lap 1 and pins laps 2-3 instead, where the real
+distinction holds: silent node retried exactly 3 times, every other node exactly once, repeating
+identically. This is exactly the "component correct in isolation, nothing proving it against the
+running station" trap CRITICAL 5 itself is about — copying the report's array verbatim would have
+moved dead-primitive semantics onto the live loop and called it proven.
+
+**Mutation-kill proof for the new test** (`test_backlog_rotation_skips_a_silent_node_within_its_
+retry_budget_and_continues`), each applied in the real package root, run, confirmed dead, reverted,
+`git status --porcelain` empty after each:
+1. `workers.py`'s `heard = ...` forced to `True` — died (silent node showed 1 poll, not 3).
+2. `heard` forced to `False` — died (every node showed 3 polls, not 1).
+3. `domain/backlog.py::record_response`'s `attempts + 1 >= retry_budget` loosened to `>` — died
+   (silent node showed 4 polls, not 3).
+
+**Task 4.4, corrected**: the premise ("its four tests' behavior is covered by 4.2/4.3") undercounted
+the file — six tests, not four; three (`test_poll_node_asks_after_the_stored_cursor`,
+`test_poll_node_asks_for_everything_when_no_cursor_exists_yet`, `test_get_backlog_cursor_survives_a_
+msg_id_wrap`) test `poll_node`'s own DD7 cursor-forwarding and never touch `run_rotation_round`.
+Deleting the whole file would have silently dropped that coverage with nothing to do with this
+CRITICAL. Gutted in place instead: kept those three tests and their helpers untouched, removed only
+the three `run_rotation_round`-based tests and their now-unused pty/serial/threading/select/os
+imports. **Not fixed, disclosed**: the removed real-pty test's wire-level proof that a `GET_BACKLOG`
+frame's cursor survives a real serial port is not replaced — recreating it for `poll_node` alone was
+judged out of this batch's line budget (see below) and is left as a follow-up.
+
+**Budget**: this run's own ceiling was 300 changed lines (forecast 150-250). Final:
+`git diff --stat ccb7afc HEAD` → **5 files changed, 157 insertions(+), 241 deletions(-) = 398**. Over
+budget. Root cause, verified rather than assumed: the Batch 4 forecast itself undercounted
+`test_backlog_rotation.py` (assumed four tests worth of dead-code-only content; it holds six, 251
+lines). Gutting in place rather than deleting the whole file and recreating pieces elsewhere is
+*cheaper*, not more expensive (170 changed lines there vs. 251+ for delete-and-recreate), and all
+discretionary docstring prose (WARNING-14-style truth-telling in `scheduler.py`/`workers.py`) was
+trimmed repeatedly before landing at 398. Reported per instruction rather than cut further at the
+expense of the new test's rigor (its three-assertion, three-mutation-proof shape was kept intact).
+
+**Verification (Batch 4 scope)**:
+- `uv run pytest` → **808 passed** (810 baseline − 3 removed + 1 added = 808; matches exactly).
+- `uv run ruff check .` → `All checks passed!`.
+- `uv run ruff format --check .` → same **7** pre-existing files, verified by diffing before/after
+  this run's own changes at the same `HEAD` (not a stale number) — zero new drift.
+- `uv run mypy src` → `Success: no issues found in 23 source files`.
+- `uv build` → wheel and sdist built cleanly.
+- AST sweep (`ast.walk` over every `src/**/*.py`, checked both `FunctionDef` and `Name` nodes) →
+  `run_rotation_round` exists as a symbol nowhere in `src/` — deleted, not merely uncalled.
+
+### TDD Cycle Evidence (Batch 4)
+
+| Task | RED/characterization | GREEN | REFACTOR |
+|---|---|---|---|
+| 4.2 (poll-order test) | Written first against the unmodified, already-correct `run_scheduler_loop` (approval-testing shape — no new prod code needed since the report itself found the *loop* correct, only untested); ran green immediately | Confirmed green | 3 mutations applied/reverted (above) to prove it is load-bearing, not incidentally passing |
+| 4.1 (delete `run_rotation_round`) | Safety net: full suite green before deletion (810) | Deleted; `tests/adapters/test_backlog_rotation.py`'s 3 rotation tests fail collection (`ImportError`) as expected, confirming the deletion is what broke them | Unused imports removed; stale docstring claims in `scheduler.py`/`workers.py` corrected in the same commit |
+| 4.3 (edited assertion) | N/A — no assertion in the existing test changed, only its docstring, disclosing scope | Test unchanged, still green | — |
+| 4.4 (gut test file) | N/A — deletion of already-dead-code-only tests | 3 kept tests re-verified green post-edit; `ruff format` applied | — |
+| 4.5 (docstring fix) | N/A — no behaviour change | Test re-run, still green (30/30 in `test_app.py`) | — |
+
 ## Verification run (Parts 1+2 only)
 
 - `uv run pytest` → **810 passed**, 0 failed (~16 s). (786 baseline + 4 (3.7) + 2 (domain) + 18
@@ -215,10 +297,18 @@ exactly as they were at `f2c2f19`.
 | BEHAVIOUR 4 18-case property | Written, run against domain fix alone (store.py untouched): 17/18 passed, `fault/disarm` failed (`rehydrated=None` vs `live='disarm'`), confirmed | `_ReportedFact.msg_type` + FAULT gate added to `_rehydrate_desired_command`, 18/18 green | Mutation disabling the gate re-killed exactly `fault/disarm`; restored |
 | Field-enumeration guard | N/A (a refactor of an already-passing test's comparison axis) | Five-ordering test still green after the axis widened from 3 to 12 keys | Mutation (removed `pending_command` from the mapping) failed the whole module at collection, as designed; restored |
 
-## Issues found, not fixed (this run)
+## Issues found, not fixed
 
-- **Batch 4 (CRITICAL 5)** — see "Part 3" above. Deliberately not started; budget.
+- **Batch 4 (CRITICAL 5) — now DONE**, see "Part 3" above (separate run from Parts 1+2). All six
+  CRITICALs in `verify-report-2.md` are closed as of this batch; a full `sdd-verify` re-run is the
+  recommended next step per `remediation-tasks.md`'s own verification cadence.
+- **`poll_node`'s real-pty coverage** (Batch 4) — the wire-level proof that a `GET_BACKLOG` frame's
+  cursor value survives a real serial port was removed along with `run_rotation_round`'s pty test and
+  not recreated for `poll_node` alone, under this batch's line budget. `poll_node`'s cursor-forwarding
+  logic is still covered by three fake-gateway tests; only the "real bytes crossed a real port" tier
+  is gone. Recommended follow-up: a single, narrow real-pty test for `poll_node` (one node, no
+  rotation), in `tests/adapters/test_backlog_rotation.py` or a new `test_scheduler_pty.py`.
 - **Batch 5 (CRITICAL I, corrupt `station.db` bricking `Store.__init__`)** — explicitly descoped by
-  the user for this run (prototype, not yet deployed). Left in `remediation-tasks.md` as a recorded,
-  unscheduled item, untouched.
-- Nothing else was found in scope during this run that was not fixed.
+  the user (prototype, not yet deployed). Left in `remediation-tasks.md` as a recorded, unscheduled
+  item, untouched.
+- Nothing else was found in scope during Batch 4 that was not fixed.
