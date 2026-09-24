@@ -2,8 +2,8 @@
 ``domain/backlog.py``'s pure round-robin schedule into ``GET_BACKLOG`` frames
 on the wire.
 
-Two questions this module deliberately does not answer itself, both taken
-as a caller-supplied fact instead:
+One question this module deliberately does not answer itself, taken as a
+caller-supplied fact instead:
 
 - **What cursor do we ask a node to catch up from?** ``adapters/store.py::
   Store.cursor()`` already answers this correctly (design.md DD7):
@@ -14,18 +14,21 @@ as a caller-supplied fact instead:
   avoid: once a node's 16-bit ``msg_id`` wraps ``0xFFFF -> 0x0000``, a
   ``MAX`` answer is wrong forever after. This module only ever forwards
   whatever ``Store.cursor()`` returns.
-- **Did the node answer?** Whatever counts as "heard" is a fact about link
-  or registry state this module does not own; ``run_rotation_round``'s
-  caller supplies it via ``responded``.
+
+Whether a node "answered" is no longer this module's concern (CRITICAL 5,
+sdd-verify field-station-p4): that question now lives entirely in
+``adapters/workers.py::run_scheduler_loop``, ``poll_node``'s only
+production caller. ``run_rotation_round``, the primitive that used to
+answer it here, had no production caller of its own and is deleted, not
+rewired.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from feeder_station.adapters.store import Cursor
-from feeder_station.domain import backlog, frames, payloads
+from feeder_station.domain import frames, payloads
 from feeder_station.domain.frames import Frame
 
 # messages.md does not pin how many backlog events a station may ask for in
@@ -66,51 +69,3 @@ def poll_node(
         payload=payloads.encode_get_backlog(after_msg_id=after_msg_id, max_events=max_events),
     )
     return gateway.write_frame(frames.encode(frame))
-
-
-def run_rotation_round(
-    node_ids: Sequence[int],
-    *,
-    store: CursorSource,
-    gateway: BacklogGateway,
-    responded: Callable[[int], bool],
-    retry_budget: int,
-    max_events: int = DEFAULT_MAX_BACKLOG_EVENTS,
-) -> list[int]:
-    """Poll the whole roster once, in round-robin order.
-
-    Returns the node ids polled, in the order they were polled — a silent
-    node (``responded`` returns ``False`` for it) appears up to
-    ``retry_budget`` times in a row before the rotation moves on to the
-    next node; it gets another turn on the caller's next call, not blocked
-    on here (radio-gateway spec.md, "one silent node does not block the
-    rotation").
-
-    Lap completion is counted by whether a node's turn just *settled*
-    (``domain/backlog.py::record_response``'s own advance condition,
-    recomputed here) — not by comparing ``schedule.position`` before and
-    after. **Regression, slice 12:** a one-node roster's position is
-    always ``0 % 1 == 0``; comparing positions never detects that lap at
-    all, and a freshly-booted station with exactly one known trap — the
-    single most common real case this slice's own scheduler thread now
-    hits — would poll it forever and never return. Ten-node behaviour
-    (this module's own existing tests) is identical either way: for more
-    than one node, "settled" and "position changed" are the same fact.
-    """
-    schedule = backlog.start(node_ids)
-    polled: list[int] = []
-    laps_completed = 0
-    total_nodes = len(schedule.node_ids)
-
-    while laps_completed < total_nodes:
-        node_id = backlog.current_target(schedule)
-        polled.append(node_id)
-        poll_node(node_id, store=store, gateway=gateway, max_events=max_events)
-
-        heard = responded(node_id)
-        settled = heard or schedule.attempts + 1 >= retry_budget
-        schedule = backlog.record_response(schedule, heard=heard, retry_budget=retry_budget)
-        if settled:
-            laps_completed += 1
-
-    return polled

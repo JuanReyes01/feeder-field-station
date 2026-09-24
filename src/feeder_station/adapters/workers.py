@@ -215,11 +215,11 @@ def run_scheduler_loop(
        of roster size, comfortably inside budget however many traps are
        configured). ``tests/adapters/test_workers.py`` measures the
        resulting real rate and asserts the default holds the budget.
-       ``run_rotation_round`` itself is untouched and still fully tested
-       (``tests/adapters/test_backlog_rotation.py``) as a correct,
-       reusable full-sweep primitive — this loop simply no longer calls it
-       every tick, since nothing at that cadence can hold the airtime
-       budget regardless of how the sweep itself is written.
+       **CRITICAL 5 (sdd-verify field-station-p4, batch 4):**
+       ``run_rotation_round`` had zero production callers and is deleted
+       outright, not kept "untouched" as an earlier revision of this
+       docstring claimed; its poll-order coverage now targets this loop
+       directly (``tests/adapters/test_workers.py``'s own poll-order test).
 
     ``responded``, for ``domain/backlog.py::record_response``'s own retry
     accounting, is now "did this node send *any* frame since the last time
@@ -260,11 +260,11 @@ def run_scheduler_loop(
 
     ``poll_node`` and ``attempt_time_sync`` are gated here, at their one
     production call site each (confirmed by ``rg 'poll_node\\(|attempt_
-    time_sync\\('`` across ``src/`` -- ``poll_node``'s only other caller,
-    ``adapters/scheduler.py::run_rotation_round``, has no production
-    caller of its own, CRITICAL 5): a refused attempt simply is not made
-    this tick, and (for the poll) ``next_poll_due_at`` is left unadvanced
-    so the same turn is retried, not lost. ``send_due_commands`` is gated
+    time_sync\\('`` across ``src/`` -- ``poll_node``'s only caller now
+    that ``run_rotation_round`` is deleted, not merely uncalled, CRITICAL
+    5): a refused attempt simply is not made this tick, and (for the poll)
+    ``next_poll_due_at`` is left unadvanced so the same turn is retried,
+    not lost. ``send_due_commands`` is gated
     *inside* itself instead, because one call can sweep every trap in the
     roster -- a call-site check alone would not have bounded a ten-trap
     burst in a single pass. TIME_SYNC only spends a token when a send
