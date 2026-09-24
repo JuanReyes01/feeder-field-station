@@ -84,6 +84,16 @@ class SharedBudget:
         self.bucket, allowed = pacing.try_consume(self.bucket, now=time.monotonic())
         return allowed
 
+    def try_send_n(self, n: int) -> bool:
+        """BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4):
+        the one call a multi-frame send (``adapters/command_sender.py``'s
+        chunked ``SET_TARGETS``) needs -- an atomic charge of ``n`` tokens
+        for its ``n`` frames, never the flat one-token charge ``try_send()``
+        gives a single-frame caller.
+        """
+        self.bucket, allowed = pacing.try_consume_n(self.bucket, n, now=time.monotonic())
+        return allowed
+
 
 @dataclass
 class WorkerStatus:

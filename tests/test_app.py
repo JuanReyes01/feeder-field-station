@@ -328,6 +328,27 @@ def test_edit_targets_route_rejects_a_malformed_tag() -> None:
     assert response.status_code == 422
 
 
+def test_edit_targets_route_rejects_a_tag_list_the_budget_could_never_send() -> None:
+    """BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4): an
+    unbounded list is how the chunked SET_TARGETS budget bypass was
+    reachable through this route at all, and the fix on the other end
+    (adapters/command_sender.py charging N tokens for an N-chunk send)
+    only helps a list that can ever collect N tokens -- the shared bucket
+    never holds more than `pacing.DEFAULT_CAPACITY` at once, so a list
+    needing more chunks than that would be refused by the budget forever,
+    not merely paced. The route must refuse it up front instead.
+    """
+    c, _ = client()
+    one_over = app_module._MAX_TARGET_TAGS + 1
+    tags = ["0384199C87EC06"] * one_over
+    response = c.put("/api/traps/5/targets", json={"tags": tags})
+    assert response.status_code == 422
+
+    at_bound = app_module._MAX_TARGET_TAGS
+    response = c.put("/api/traps/6/targets", json={"tags": ["0384199C87EC06"] * at_bound})
+    assert response.status_code == 200
+
+
 # --- 10.5/10.6: an unacknowledged capture survives a simulated restart -----
 
 

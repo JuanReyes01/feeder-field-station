@@ -1486,3 +1486,73 @@ def test_station_total_frame_rate_holds_the_channel_budget_off_the_real_wire(
     observed_types = {f.msg_type for f in decoded}
     assert payloads.ARM in observed_types
     assert payloads.GET_BACKLOG in observed_types
+
+
+# --- BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4): the
+# --- same rule, proven through the real production wiring, not a double ---
+
+
+def test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire(
+    tmp_path: Path,
+) -> None:
+    """The unit-level proof in tests/adapters/test_command_sender.py pins
+    the charge `send_due_commands` asks the budget for; this pins the same
+    fact through the real production wiring `cli.build_app` assembles --
+    the real `SharedBudget`, the real scheduler thread, a real pty -- which
+    PROOF 2 (verify-report-final.md) names as never exercised against a
+    chunked send: the only prior split-list test uses `_AllowAllBudget()`.
+
+    Two traps, each given the largest tag list `TargetsRequest` now
+    accepts (81 tags, three `SET_TARGETS` chunks -- BEHAVIOUR 1's own
+    bound, tied to `pacing.DEFAULT_CAPACITY`), submitted before either
+    trap has ever been polled or synced. `rotation_index` starts at 0
+    (`adapters/workers.py`) and only advances once the roster is non-empty,
+    so the very first tick that sees these two traps always tries
+    `commands` before `time_sync` or `poll` (`_ROTATIONS[0]`) -- not a
+    race: the shared bucket still holds its full starting
+    `DEFAULT_CAPACITY` (3.0) when that tick's chunked sends are evaluated.
+
+    A correct charge (3 tokens for 3 chunks) lets exactly one trap's list
+    through in that tick and leaves nothing for the other's; the pre-fix
+    one-token charge lets *both* through in the same pass -- six frames
+    spent from a three-token bucket. Production defaults throughout (no
+    `--channel-budget-frames-per-s` override): the station's real,
+    unaccelerated refill rate is far too slow for either trap's second
+    attempt, or the second trap's first, to ever accumulate three fresh
+    tokens inside this test's short window, so the count below does not
+    depend on exactly how many ticks elapse while it runs.
+    """
+    db_path = tmp_path / "station.db"
+    master_fd, slave_fd = pty.openpty()
+    slave_name = os.ttyname(slave_fd)
+    os.close(slave_fd)
+    tags = [f"{i:014X}" for i in range(81)]  # BEHAVIOUR 1's own bound: 3 chunks, the max allowed
+
+    app, _args = build_app(["--db-path", str(db_path), "--serial-device", slave_name])
+
+    try:
+        with TestClient(app) as c:
+            assert c.put("/api/traps/1/targets", json={"tags": tags}).status_code == 200
+            assert c.put("/api/traps/2/targets", json={"tags": tags}).status_code == 200
+
+            wire = b""
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master_fd], [], [], 0.05)
+                if ready:
+                    wire += os.read(master_fd, 4096)
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+    blocks = [block for block in wire.split(bytes([0x00])) if block]
+    decoded = [frames.decode(cobs_decode(block)) for block in blocks]
+    set_targets_frames = [f for f in decoded if f.msg_type == payloads.SET_TARGETS]
+
+    assert len(set_targets_frames) == 3, (
+        f"got {len(set_targets_frames)} SET_TARGETS frames off the real wire for two pending "
+        "3-chunk sends drawn from a 3-token bucket -- must be exactly 3 (one trap's whole "
+        "list), never 6 (both lists -- BEHAVIOUR 1's one-token-per-trap bypass)"
+    )

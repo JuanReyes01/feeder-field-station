@@ -28,6 +28,7 @@ from feeder_station.adapters.serial_gateway import SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.adapters.workers import WorkerStatus, start_workers
 from feeder_station.config import StationConfig
+from feeder_station.domain import pacing
 from feeder_station.domain.events import (
     OPERATOR_ARM,
     OPERATOR_CAPTURE_ACKNOWLEDGED,
@@ -35,7 +36,7 @@ from feeder_station.domain.events import (
     OPERATOR_SET_TARGETS,
     StationEvent,
 )
-from feeder_station.domain.payloads import TAG_BYTES
+from feeder_station.domain.payloads import TAG_BYTES, TAGS_PER_SET_TARGETS_FRAME
 from feeder_station.domain.traps import Registry
 
 # Deliberately one self-contained page: the station must work from a phone on
@@ -48,6 +49,21 @@ _STATIC_DIR = Path(__file__).parent / "static"
 _INDEX_HTML = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
 _TAG_HEX_PATTERN = re.compile(rf"[0-9A-Fa-f]{{{TAG_BYTES * 2}}}")
+
+# BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4): the
+# other half of the fix in adapters/command_sender.py -- charging N tokens
+# for an N-chunk SET_TARGETS (domain/pacing.py::try_consume_n) only helps if
+# a chunked send can ever actually collect N tokens. The shared bucket never
+# holds more than pacing.DEFAULT_CAPACITY tokens at once, by design -- that
+# is the station's *whole* burst allowance, shared across every trap in a
+# roster of at least ten (S5), not a per-trap grant -- so a tag list needing
+# more chunks than the bucket can ever hold would be refused by the budget
+# forever, not merely paced. Bounding the list at exactly that many chunks
+# is the only value that keeps every accepted edit sendable: an operator-
+# typed list has no legitimate reason to need more (S13: this is meant to
+# stay small enough to type or paste by hand), and it caps how much of the
+# station's entire burst allowance one trap's single edit can ever claim.
+_MAX_TARGET_TAGS = int(pacing.DEFAULT_CAPACITY) * TAGS_PER_SET_TARGETS_FRAME
 
 
 def now() -> datetime:
@@ -79,6 +95,14 @@ class TargetsRequest(BaseModel):
     @field_validator("tags")
     @classmethod
     def _tags_are_well_formed(cls, tags: list[str]) -> list[str]:
+        # BEHAVIOUR 1: rejected before the version bump and the store write
+        # below, not merely paced -- an unbounded list is how the chunked
+        # SET_TARGETS budget bypass was reachable through this route at all.
+        if len(tags) > _MAX_TARGET_TAGS:
+            raise ValueError(
+                f"tag list has {len(tags)} tags, more than the {_MAX_TARGET_TAGS} this "
+                "station can ever budget tokens for in one chunked SET_TARGETS send"
+            )
         for tag in tags:
             if not _TAG_HEX_PATTERN.fullmatch(tag):
                 raise ValueError(f"tag must be {TAG_BYTES * 2} hex characters, got {tag!r}")

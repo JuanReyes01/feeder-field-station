@@ -69,6 +69,16 @@ class TransmitBudget(Protocol):
 
     def try_send(self) -> bool: ...
 
+    def try_send_n(self, n: int) -> bool:
+        """BEHAVIOUR 1 (verify-report-final.md, sdd-verify
+        field-station-p4): an atomic charge of ``n`` tokens for one
+        multi-frame send -- ``_send_set_targets`` below is the one caller,
+        because it is the one kind of command that can produce more than
+        one frame. All ``n`` or none; see :func:`domain.pacing.try_consume_n`
+        for why a partial charge is never correct here.
+        """
+        ...
+
 
 class _FieldsRow(Protocol):
     """The one attribute this module needs off a stored row --
@@ -129,7 +139,13 @@ def _stored_tags(store: CommandStore, node_id: int, targets_version: int) -> lis
 
 
 def _send_set_targets(
-    trap: Trap, command: Command, *, store: CommandStore, gateway: CommandGateway, now: datetime
+    trap: Trap,
+    command: Command,
+    *,
+    store: CommandStore,
+    gateway: CommandGateway,
+    now: datetime,
+    budget: TransmitBudget,
 ) -> bool:
     """Encode and write every chunk
     ``domain/payloads.py::encode_set_targets`` (slice 2) produces for this
@@ -142,6 +158,16 @@ def _send_set_targets(
     matching version (S2) -- so there is nothing to gain from marking a
     partial write as sent, and a real risk in doing so: it would make the
     backoff schedule believe a chunk that never left the station did.
+
+    **BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4):**
+    the budget charge is ``len(wire_frames)`` tokens, spent atomically via
+    ``budget.try_send_n`` *before* any frame is written -- never the single
+    per-trap ``try_send()`` the caller used to spend regardless of how many
+    chunks this command actually produced, which let one operator action
+    put an N-chunk list on the wire for the price of one frame. A refusal
+    here spends nothing and writes nothing: the trap stays pending, exactly
+    as the single-frame path below already behaves when its own
+    ``try_send()`` is refused.
     """
     assert command.targets_version is not None  # only None for ARM/DISARM (domain/commands.py)
     tags = _stored_tags(store, trap.node_id, command.targets_version)
@@ -154,6 +180,9 @@ def _send_set_targets(
             targets_version=command.targets_version, tags=tags
         )
     ]
+    if not budget.try_send_n(len(wire_frames)):
+        return False
+
     results = [gateway.write_frame(raw) for raw in wire_frames]
     if not all(results):
         return False
@@ -186,18 +215,28 @@ def send_due_commands(
     unconfirmed, driving 11.68% real airtime occupancy this way). A trap
     refused a token stays pending, unattempted, and due again on a later
     sweep; it is never dropped.
+
+    **BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4):**
+    that "once per trap" check is a *single* token only for the
+    single-frame kinds below (``ARM``/``DISARM``) -- ``SET_TARGETS`` can
+    produce more than one frame per trap, so its own charge is made inside
+    ``_send_set_targets`` itself, sized to the chunk count, not made here
+    as a flat one-token gate before dispatch.
     """
     sent_to: list[int] = []
     for trap in registry.traps():
         command = trap.pending_command
         if command is None or not command.due_for_resend(now):
             continue
-        if not budget.try_send():
-            continue
 
         if command.kind is CommandKind.SET_TARGETS:
-            if _send_set_targets(trap, command, store=store, gateway=gateway, now=now):
+            if _send_set_targets(
+                trap, command, store=store, gateway=gateway, now=now, budget=budget
+            ):
                 sent_to.append(trap.node_id)
+            continue
+
+        if not budget.try_send():
             continue
 
         msg_type = _WIRE_MSG_TYPE.get(command.kind)

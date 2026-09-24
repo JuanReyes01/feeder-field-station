@@ -73,10 +73,42 @@ def try_consume(bucket: TokenBucket, *, now: float) -> tuple[TokenBucket, bool]:
     the next opportunity is a later call, never a retry against the same
     ``now``. ``now`` moving backwards (two threads racing a monotonic
     clock read) is treated as zero elapsed time, never a negative refill.
+
+    A single-token special case of :func:`try_consume_n` -- kept as its own
+    name because every existing caller (``poll_node``, ``attempt_time_sync``,
+    the single-frame ARM/DISARM path) spends exactly one token per frame.
     """
+    return try_consume_n(bucket, 1, now=now)
+
+
+def try_consume_n(bucket: TokenBucket, n: int, *, now: float) -> tuple[TokenBucket, bool]:
+    """The same refill-then-spend rule as :func:`try_consume`, generalised
+    to an atomic charge of ``n`` tokens for one multi-frame send (BEHAVIOUR
+    1, sdd-verify field-station-p4: ``adapters/command_sender.py``'s
+    chunked ``SET_TARGETS`` send was charging exactly one token no matter
+    how many frames a split target list produced, so one operator action
+    could put ten frames on the wire for the price of one).
+
+    All ``n`` tokens or none: a caller that gets ``False`` back has spent
+    *nothing* and must retry the whole send later, never write some chunks
+    now and the rest once more tokens arrive. ``trap-commands/spec.md``'s
+    own delivery model already forbids tracking a split list's chunks
+    separately -- they are sent as one unit or not at all -- so a partial
+    charge here would let the budget layer split a send the frame layer
+    itself refuses to split.
+
+    ``n`` tokens can only ever be granted once the bucket has refilled to
+    at least ``n`` -- since refill is capped at ``bucket.capacity``, a
+    caller that asks for more than the bucket can ever hold would be
+    refused forever. That is a real constraint on the caller, not a bug
+    here: ``app.py::TargetsRequest`` bounds how large a single chunked send
+    may be for exactly this reason.
+    """
+    if n < 1:
+        raise ValueError("n must be at least 1")
     elapsed = max(0.0, now - bucket.last_refill_at)
     tokens = min(bucket.capacity, bucket.tokens + elapsed * bucket.frames_per_s)
     refilled = replace(bucket, tokens=tokens, last_refill_at=now)
-    if refilled.tokens < 1.0:
+    if refilled.tokens < n:
         return refilled, False
-    return replace(refilled, tokens=refilled.tokens - 1.0), True
+    return replace(refilled, tokens=refilled.tokens - n), True

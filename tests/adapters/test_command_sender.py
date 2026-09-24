@@ -53,6 +53,39 @@ class _AllowAllBudget:
     def try_send(self) -> bool:
         return True
 
+    def try_send_n(self, n: int) -> bool:
+        return True
+
+
+class _TokenLedgerBudget:
+    """A `TransmitBudget` double that records exactly how many tokens each
+    call actually asks for, mirroring the real `SharedBudget`/`TokenBucket`
+    pair's own atomic accounting: `try_send()` is a request for one token,
+    `try_send_n(n)` a request for `n`, both drawn from the same running
+    balance, all-or-nothing -- never a partial spend.
+
+    Built for BEHAVIOUR 1 (verify-report-final.md, sdd-verify
+    field-station-p4): the old `_send_set_targets` asked for one token
+    per trap regardless of `SET_TARGETS`'s own chunk count, so a ten-chunk
+    split list spent one token for ten frames on the wire -- the exact
+    bypass that let one operator action restore the pre-fix airtime
+    occupancy this whole remediation exists to close.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.remaining = capacity
+        self.charged: list[int] = []
+
+    def try_send(self) -> bool:
+        return self.try_send_n(1)
+
+    def try_send_n(self, n: int) -> bool:
+        if n > self.remaining:
+            return False
+        self.remaining -= n
+        self.charged.append(n)
+        return True
+
 
 class _CountingBudget:
     """A `TransmitBudget` double that allows exactly `capacity` sends, then
@@ -71,6 +104,13 @@ class _CountingBudget:
         if self._remaining <= 0:
             return False
         self._remaining -= 1
+        return True
+
+    def try_send_n(self, n: int) -> bool:
+        self.calls += 1
+        if self._remaining < n:
+            return False
+        self._remaining -= n
         return True
 
 
@@ -372,6 +412,65 @@ def test_a_list_longer_than_one_frame_is_delivered_whole() -> None:
     # Delivered from the version match alone -- the station never tracked
     # which half of the split list arrived separately.
     assert registry.trap(9).pending_command is None
+
+
+# --- BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4): a
+# --- chunked SET_TARGETS must charge N tokens for its N frames, atomically,
+# --- never one flat token regardless of chunk count -----------------------
+
+
+def test_a_chunked_set_targets_send_charges_n_tokens_for_n_frames_not_one() -> None:
+    """BEHAVIOUR 1: the only other split-list test above uses
+    `_AllowAllBudget()`, which is exactly why the one-token-for-N-frames
+    bypass survived -- it never inspects what the budget itself was asked
+    for. A 40-tag list needs two `SET_TARGETS` frames
+    (`TAGS_PER_SET_TARGETS_FRAME` is 27); the charge for sending both must
+    be `[2]`, one atomic two-token spend, never `[1]`.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    tags = [bytes([i, 0, 0, 0, 0, 0, 0]) for i in range(40)]  # 2 chunks
+    registry.command_set_targets(9, targets_version=9, at=NOW, tags=tags)
+    store = _set_targets_store(9, targets_version=9, tags=tags)
+    gateway = _SpyGateway()
+    budget = _TokenLedgerBudget(capacity=10)
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=budget
+    )
+
+    assert sent_to == [9]
+    assert len(gateway.written) == 2  # both chunks of the split list went out together
+    assert budget.charged == [2], (
+        f"charged {budget.charged} token(s) for a 2-chunk send -- must be exactly [2], one "
+        "atomic N-token charge, never a flat charge of 1 regardless of chunk count"
+    )
+
+
+def test_a_chunked_set_targets_send_is_refused_whole_when_fewer_than_n_tokens_remain() -> None:
+    """The other half of BEHAVIOUR 1's fix: refusing an N-chunk send must
+    write *no* chunk at all when fewer than N tokens are available.
+    trap-commands spec.md's own delivery model already forbids the station
+    from tracking which half of a split list arrived -- a partial charge
+    here would let the budget layer split a send the frame layer itself
+    refuses to split, and the trap must stay pending, unattempted, so a
+    later sweep (once the budget allows) offers the whole list again.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    tags = [bytes([i, 0, 0, 0, 0, 0, 0]) for i in range(40)]  # 2 chunks
+    registry.command_set_targets(9, targets_version=9, at=NOW, tags=tags)
+    store = _set_targets_store(9, targets_version=9, tags=tags)
+    gateway = _SpyGateway()
+    budget = _TokenLedgerBudget(capacity=1)  # only 1 token -- the send needs 2
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=budget
+    )
+
+    assert sent_to == []
+    assert gateway.written == []  # neither chunk went out -- no partial send
+    assert budget.remaining == 1  # nothing spent on the refused attempt
+    assert budget.charged == []
+    assert _pending(registry, 9).attempts == 0  # stays due, retried next sweep
 
 
 # --- CRITICAL 3 (sdd-verify field-station-p4): a shared budget bounds a
