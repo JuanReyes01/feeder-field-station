@@ -49,6 +49,33 @@ DEFAULT_ARM_DURATION = timedelta(hours=24)
 # every other DEFAULT_* in this module, so `domain/pacing.py`'s bucket is
 # sized from a config value rather than a literal buried in
 # `adapters/workers.py`.
+#
+# WARNING 2 (verify-report-final.md, sdd-verify field-station-p4): two
+# things about this constant are not what a first read suggests, recorded
+# here rather than left implied by a path that does not resolve:
+#
+# 1. `docs/protocol/messages.md` does not exist in *this* repository -- it
+#    lives in the parent monorepo, at
+#    `/home/juanc/code/cicg/docs/protocol/messages.md`. Fourteen files in
+#    this repository cite it (`rg -l 'docs/protocol/messages.md'`); this
+#    station's most load-bearing constant is not something a clone of
+#    `feeder-field-station` alone can check.
+# 2. The 1% in that document is the node *uplink* allocation -- its own
+#    arithmetic is `10 nodes x 200 events/day x 0.37 s / 86400 s = 0.857%`.
+#    This module reallocates the *whole* 1% to station *downlink*, on top
+#    of that uplink and on top of one ACK per ack-required uplink -- channel
+#    total at design load is closer to 2%, not "under 1%". Partly offset in
+#    practice: 0.37 s models a ~50-byte frame, while most station downlinks
+#    (ARM, DISARM, GET_BACKLOG) are 12-16 bytes, so this bucket over-charges
+#    its own traffic -- except SET_TARGETS at ~200 bytes, the one downlink
+#    this offset does not cover (see command_sender.py's own BEHAVIOUR 1
+#    docstring for the fix that keeps a chunked SET_TARGETS inside this
+#    same budget rather than bypassing it).
+#
+# Not re-derived here: a correct number needs a real field measurement of
+# this deployment's own channel, which this project has not taken -- this
+# comment exists so the next person sizing the real budget starts from the
+# actual arithmetic above instead of the document's own summary of it.
 AIRTIME_PER_FRAME_S = 0.37
 CHANNEL_BUDGET_FRACTION = 0.01
 DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S = CHANNEL_BUDGET_FRACTION / AIRTIME_PER_FRAME_S
