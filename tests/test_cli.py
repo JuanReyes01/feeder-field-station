@@ -242,11 +242,47 @@ _TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
+# PROOF 1 (verify-report-final.md): `Registry.view()`'s own 12 emitted keys,
+# named once here from the method's source (domain/traps.py) so the mapping
+# below is checked against what view() actually emits, not merely against
+# `Trap`'s own field names -- a mapping present but empty, or present but
+# pointing at the wrong key, satisfied the old guard just as well as a
+# correct one.
+_VIEW_KEYS = frozenset(
+    {
+        "node_id",
+        "state",
+        "state_may_be_stale",
+        "reachable",
+        "trustworthy",
+        "battery_mv",
+        "targets_version",
+        "pending_command",
+        "desired_targets_version",
+        "targets",
+        "last_seen",
+        "capture",
+    }
+)
+
+
 def _compared_view_fields() -> tuple[str, ...]:
     trap_field_names = {f.name for f in dataclasses.fields(Trap)}
     missing = trap_field_names - set(_TRAP_FIELD_TO_VIEW_KEYS)
     assert not missing, f"Trap field(s) {missing} have no view()-key mapping -- add one above"
-    return tuple(key for keys in _TRAP_FIELD_TO_VIEW_KEYS.values() for key in keys)
+    empty = [field for field, keys in _TRAP_FIELD_TO_VIEW_KEYS.items() if not keys]
+    assert not empty, (
+        f"Trap field(s) {empty} map to an empty tuple -- PROOF 1 (verify-report-final.md): "
+        "a present-but-empty mapping satisfied the old guard while dropping the field from "
+        "the comparison axis entirely"
+    )
+    compared = tuple(key for keys in _TRAP_FIELD_TO_VIEW_KEYS.values() for key in keys)
+    assert set(compared) == _VIEW_KEYS, (
+        f"mapped key(s) {set(compared) ^ _VIEW_KEYS} do not match Registry.view()'s own "
+        "emitted keys exactly -- PROOF 1: a mapping naming a real but wrong key (e.g. "
+        "another field's key) is otherwise indistinguishable from a correct one"
+    )
+    return compared
 
 
 _COMPARED_VIEW_FIELDS = _compared_view_fields()
