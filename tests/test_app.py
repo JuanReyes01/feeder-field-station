@@ -502,13 +502,16 @@ def test_the_app_starts_its_background_workers(tmp_path: Path) -> None:
     """The test this slice exists to make pass (tasks.md, slice 12): with
     a fake port and a fake clock, starting the real app -- through
     `create_app`'s own lifespan, not a hand-assembled worker call -- must
-    ingest a frame (the gateway thread, slices 5/6), run a rotation round
-    (slice 7), and resend a due command (slice 8), end to end. This is the
-    test that proves all four orphaned drivers this slice exists to start
-    actually run: the fourth, `attempt_time_sync` (slice 9), also fires
-    every tick here since the clock is trusted, but is not separately
-    asserted on -- TIME_SYNC has no user-facing effect this test can read
-    back other than one more frame type on the wire.
+    ingest a frame (the gateway thread, slices 5/6), poll a node's backlog
+    (slice 7's `poll_node`, paced by `run_scheduler_loop` -- corrected
+    here, CRITICAL 5/WARNING 14: this used to say "run a rotation round,"
+    the deleted `run_rotation_round` primitive, not what this loop calls),
+    and resend a due command (slice 8), end to end. This is the test that
+    proves all four orphaned drivers this slice exists to start actually
+    run: the fourth, `attempt_time_sync` (slice 9), also fires every tick
+    here since the clock is trusted, but is not separately asserted on --
+    TIME_SYNC has no user-facing effect this test can read back other than
+    one more frame type on the wire.
     """
     heartbeat_payload = bytes(
         [
@@ -572,7 +575,9 @@ def test_the_app_starts_its_background_workers(tmp_path: Path) -> None:
             time.sleep(0.02)
 
     assert ingested, "the gateway thread never ingested the fixture frame"
-    assert payloads.GET_BACKLOG in written_types, "the scheduler thread never ran a rotation round"
+    assert payloads.GET_BACKLOG in written_types, (
+        "the scheduler thread never polled a node's backlog"
+    )
     assert payloads.DISARM in written_types, "the scheduler thread never resent the due command"
 
 
