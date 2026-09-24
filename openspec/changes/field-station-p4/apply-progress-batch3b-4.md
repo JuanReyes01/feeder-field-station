@@ -312,3 +312,200 @@ expense of the new test's rigor (its three-assertion, three-mutation-proof shape
   the user (prototype, not yet deployed). Left in `remediation-tasks.md` as a recorded, unscheduled
   item, untouched.
 - Nothing else was found in scope during Batch 4 that was not fixed.
+
+---
+
+## Part 4 — closing slice: BEHAVIOUR 1 (CRITICAL), PROOF 1, WARNING 2 (`verify-report-final.md`)
+
+**HEAD before**: `9bc82c9`. **Mode**: Strict TDD. **Status**: all three closed, 812/812 green,
+zero new format drift, mypy clean, `uv build` clean. This is the last work item on `field-station-p4`
+per the user's own scope note — CRITICAL I stays descoped.
+
+**Commits** (3):
+1. `fix(adapters): charge N tokens for an N-chunk SET_TARGETS send` — BEHAVIOUR 1, both halves
+   (token charge + `TargetsRequest` bound), all its tests.
+2. `test(cli): require the field-view guard's mapping to be real, not just present` — PROOF 1.
+3. `docs(config): record the messages.md citation gap and the uplink/downlink math` — WARNING 2.
+
+`verify-report-final.md` committed alongside this file (it was untracked on disk at session start).
+
+### BEHAVIOUR 1 — one token, N frames
+
+**Root cause** (`adapters/command_sender.py`): `send_due_commands` spent one `budget.try_send()`
+token per trap *before* dispatching on command kind, then `_send_set_targets` wrote every chunk
+`payloads.encode_set_targets` produced unconditionally. A trap with a 270-tag list (10 chunks) put
+10 frames on the wire for the price of one token — the pre-fix 11.68% occupancy CRITICAL 3 exists to
+close, restored through the one supported operator action (`PUT /targets`) that CRITICAL 3's own fix
+never re-measured after finding the call site (`apply-progress-batch3a.md:27` records "gated... one
+budget check per trap covers the whole chunked send" without measuring the consequence).
+
+**Fix, three parts**:
+1. `domain/pacing.py::try_consume_n(bucket, n, *, now)` — the same refill-then-spend rule as
+   `try_consume`, generalised to an atomic charge of `n` tokens: all `n` or none, never a partial
+   spend. `try_consume` is now a one-token special case of it.
+2. `adapters/workers.py::SharedBudget.try_send_n(n)` — the adapter-level call `_send_set_targets`
+   needs, mirroring `try_send()`'s shape.
+3. `adapters/command_sender.py`: `TransmitBudget` gained `try_send_n`; `_send_set_targets` now
+   computes `wire_frames` first, then calls `budget.try_send_n(len(wire_frames))` *before* writing
+   anything — a refusal spends nothing and writes nothing, so the trap stays pending exactly as the
+   single-frame path already behaves on refusal. `send_due_commands` no longer pre-charges a flat
+   one-token gate for `SET_TARGETS` before dispatch; the charge moved inside `_send_set_targets`,
+   sized to the chunk count.
+
+**Fewer-than-N-tokens decision (made deliberately, not left implicit)**: refuse the *whole* send,
+spend nothing, leave the trap pending and unattempted. `trap-commands/spec.md:48-51` requires a
+split list be delivered as one unit, from the version match alone — the station never tracks which
+half of a split list arrived. Spending fewer than N tokens to write *some* chunks now and the rest
+once more tokens arrive would let the budget layer split a send the frame layer itself refuses to
+split. The alternative the verifier named ("refusing until N are available") is exactly this: the
+trap's own `due_for_resend` backoff keeps offering it every sweep until the budget actually holds N.
+
+**`TargetsRequest.tags` bound (the other half, `app.py`)**: capped at
+`int(pacing.DEFAULT_CAPACITY) * TAGS_PER_SET_TARGETS_FRAME` = `3 * 27` = **81 tags (3 chunks)**.
+Justification: the shared bucket never holds more than `DEFAULT_CAPACITY` tokens at once — that
+ceiling is deliberate, the station's *whole* burst allowance, not a per-trap grant. A tag list needing
+more chunks than the bucket can ever hold would be refused by the budget *forever*, not merely paced,
+which the atomic all-or-nothing charge above makes newly possible (it wasn't reachable as a *dead*
+edit before, since the old bug always sent every chunk regardless of count). Bounding at exactly the
+bucket's own capacity is the only value that keeps every *accepted* edit structurally sendable, and it
+also caps how much of the station's entire burst allowance one trap's single edit can claim, out of a
+roster of at least ten (S5). An operator-typed list has no legitimate reason to need more (S13: sized
+to be typed or pasted by hand). Verified at the boundary: 81 tags → `200`, 82 → `422`, 270 → `422`.
+
+**TDD evidence**:
+
+| Test | RED (against unfixed `9bc82c9`) | GREEN |
+|---|---|---|
+| `test_a_chunked_set_targets_send_charges_n_tokens_for_n_frames_not_one` (unit, real token-accounting double, not `_AllowAllBudget()`) | `charged [1]` for a 2-chunk send, expected `[2]` | `charged [2]`, both chunks written |
+| `test_a_chunked_set_targets_send_is_refused_whole_when_fewer_than_n_tokens_remain` | `sent_to == [9]` with only 1 of 2 needed tokens available, expected `[]` | `sent_to == []`, `gateway.written == []`, trap stays pending with `attempts == 0` |
+| `test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire` (integration, `cli.build_app`, real pty, real `SharedBudget`) | **6** SET_TARGETS frames observed (two pending 3-chunk sends both went through on a 3-token bucket) | **3** frames — one trap's whole list, the other left pending |
+| `test_edit_targets_route_rejects_a_tag_list_the_budget_could_never_send` (`test_app.py`) | `False and ...` bound temporarily disabled → 422 assertion failed | bound restored → 422 above bound, 200 at bound |
+
+The integration test's determinism does not depend on precise tick timing: `adapters/workers.py`'s
+`rotation_index` starts at `0` and only advances once the roster is non-empty, so the *first* tick
+that sees a populated roster always tries `commands` before `time_sync`/`poll`
+(`_ROTATIONS[0] = ("commands", "time_sync", "poll")`) — the shared bucket is still at its full
+starting `DEFAULT_CAPACITY` (3.0) when that tick's chunked sends are evaluated, deterministically, not
+by luck. Production defaults throughout (no `--channel-budget-frames-per-s` override).
+
+### Re-run of the BEHAVIOUR 1 repro (real pty, `cli.build_app`, production defaults, converged windows)
+
+The literal pre-fix repro (270 tags) is no longer reachable — the bound now rejects it outright:
+
+```
+PUT /api/traps/7/targets  {270 tags}  -> 422  "tag list has 270 tags, more than the 81 this
+                                                station can ever budget tokens for..."
+PUT /api/traps/8/targets  {81 tags}   -> 200  (at the bound)
+PUT /api/traps/9/targets  {82 tags}   -> 422  (one over)
+```
+
+Re-run at the new bound (81 tags, 3 chunks — the largest chunked send now possible at all), same
+methodology as `verify-report-final.md` (real `pty.openpty()`, real `SerialGateway`, real worker
+threads via `TestClient(app)`, real `cli.build_app`, production defaults, no rate override):
+
+```
+1 trap, 81 tags (3 chunks), 60 s settle + 180 s window
+  4 frames  (SET_TARGETS=3, GET_BACKLOG=1)   0.0222 f/s = 0.822% occupancy   budget 1.000%
+
+10 traps, 81 tags each, 60 s settle + 240 s window
+  7 frames  (TIME_SYNC=6, GET_BACKLOG=1)     0.0292 f/s = 1.079% occupancy   budget 1.000%
+
+10 traps, 81 tags each, 120 s settle + 420 s window (longer, more converged)
+  9 frames  (TIME_SYNC=8, GET_BACKLOG=1)     0.0214 f/s = 0.793% occupancy   budget 1.000%
+```
+
+Honest disclosure on the 10-trap rows: **this interactive sandbox's clock is real-NTP-synchronized**
+(`timedatectl`: `System clock synchronized: yes`, `NTP service: active`) — unlike the CI-style
+sandbox other tests in this suite document as `UNSET` (no RTC, no NTP). `clock_trust.py::
+trust_from_evidence` trusts NTP outright, so `TIME_SYNC` actively competes for the same shared budget
+here, where the existing single-trap real-pty test's own docstring assumed it would not. Across both
+10-trap windows, none of the 9 remaining pending `SET_TARGETS` commands won a turn against `TIME_SYNC`'s
+one-time-per-node sync burst — fair rotation (`_ROTATIONS`) guarantees no category is starved
+*forever*, not that every category is served within any given short window. The number that matters is
+unaffected by which category wins: **total station occupancy stayed at or under the 1.000% budget in
+every row measured**, against the pre-fix 11.68% and this report's own worse-case restoration figures
+(6.6-10.7%) at the old bug's true bound (270 tags, no longer reachable). The single-trap row (0.822%,
+no TIME_SYNC contention — that trap's own sync had already completed) is the cleanest isolated proof
+of the mechanism: a full 3-chunk resend, repeated, still holds inside budget.
+
+### PROOF 1 — field guard now proves "is compared", not "has an entry"
+
+`tests/test_cli.py::_compared_view_fields()` strengthened: added `_VIEW_KEYS`, the 12 keys
+`Registry.view()` actually emits (named from its source), and two new assertions — every mapped
+tuple must be non-empty, and the union of all mapped keys must equal `_VIEW_KEYS` exactly (not a
+subset). Both named mutations re-applied and confirmed dead:
+
+```
+"pending_command": ()              -> AssertionError at collection: "map to an empty tuple"
+"pending_command": ("node_id",)    -> AssertionError at collection: "do not match Registry.view()'s
+                                       own emitted keys exactly" (missing pending_command and
+                                       desired_targets_version from the union)
+```
+
+Both mutations applied and reverted in the real package root; `git status --porcelain` empty after
+each; full 812-test suite reconfirmed green with the correct mapping restored.
+
+### WARNING 2 — `config.py`'s own comment now states the assumption
+
+No re-derivation (needs a real field measurement this project has not taken — explicitly out of
+scope). Added a comment at `AIRTIME_PER_FRAME_S`/`CHANNEL_BUDGET_FRACTION` recording: (1)
+`docs/protocol/messages.md` does not exist in this repository — verified via
+`rg -l 'docs/protocol/messages.md'`, 14 files here cite it, none of them can open it from a clone; (2)
+the document's own 1% is the node *uplink* allocation (`10 x 200 x 0.37 / 86400 = 0.857%`), and this
+constant reallocates the whole 1% to station *downlink* on top of that uplink and its ACKs — channel
+total at design load is closer to 2%, not "under 1%". Corrected one over-claim from the task brief in
+passing: the "site survey" phrasing did not appear anywhere in this repository's own docs
+(`docs/requirements.md`'s "Open questions" section has no such item) — the comment says "a real field
+measurement this project has not taken" instead, verified rather than assumed.
+
+### Composition breakdown — over the 250-line budget, flagged as instructed
+
+`git diff --stat 9bc82c9..HEAD -- src tests`: **374 changed lines** (366 insertions, 8 deletions),
+across 8 files, 3 commits.
+
+| Area | Production | Tests | Total |
+|---|---|---|---|
+| BEHAVIOUR 1 (`pacing.py`, `workers.py`, `command_sender.py`, `app.py` + `test_command_sender.py` 99, `test_app.py` 21, `test_cli.py` integration hunk 70) | 119 | 190 | 309 |
+| PROOF 1 (`test_cli.py` guard hunk) | 0 | 38 | 38 |
+| WARNING 2 (`config.py` comment only) | 27 | 0 | 27 |
+| **Total** | **146** | **228** | **374** |
+
+**Why it's over, and why it wasn't trimmed further**: BEHAVIOUR 1 alone (309 lines) exceeds the
+budget by itself. It required a Protocol change (`TransmitBudget.try_send_n`) propagated across three
+production modules plus every test double implementing that Protocol, and — per the task's own
+explicit instruction — *two* levels of test evidence: a fast deterministic unit test (real
+token-accounting, not `_AllowAllBudget()`) and a real `cli.build_app` + real-pty integration test
+(closing PROOF 2, "nothing exercises the budget against a chunked send," which only a real-wiring
+test can close). Docstring density matches this codebase's own established convention throughout
+(every function in `pacing.py`, `command_sender.py` already carries multi-paragraph rationale before
+this change) — trimming it below that standard would have been inconsistent with the surrounding
+code, not a genuine size reduction of the *logic*. No chained/stacked PR split was applied: this is a
+closing slice on a change already `push: yes`-cleared by the final verification, not a new batch, and
+splitting one CRITICAL fix's own token-charge logic from its own bound and its own tests across
+multiple PRs would have left an intermediate PR either failing PROOF 2 again or shipping the bound
+without the charge it exists to protect.
+
+### Gates (final)
+
+`uv run pytest` **0** — 812 passed (808 baseline + 4 new: 2 unit + 1 integration + 1 bound test) ·
+`ruff check .` **0** · `mypy src` **0** — 23 files · `uv build` **0** · `ruff format --check .` **1**
+— same **7** pre-existing files, zero new drift (diffed against the pre-slice baseline at the same
+`HEAD` before this run's own changes).
+
+### Spot-check: commits verified independently green
+
+Commit 1 (`fix(adapters): charge N tokens...`) checked out detached and run alone: **812 passed**
+(the correct pre-existing `_compared_view_fields()` and pre-WARNING-2 `config.py` are still present
+at that commit, unaffected by the later two commits). Returned to `main` afterward; `git status
+--porcelain` showed only the untracked `verify-report-final.md` throughout.
+
+### Not fixed / left as-is
+
+- **CRITICAL I** — explicitly descoped by the user for this slice; untouched, per instructions.
+- The real airtime budget itself is **not re-derived** (WARNING 2) — needs a field measurement this
+  project has not taken. This was explicitly out of scope for this slice.
+- **BEHAVIOUR 2** (the pacer sized *at* the documented budget, `verify-report-final.md`) is
+  substantively the same finding as WARNING 2 above and was addressed by the same `config.py` comment;
+  no separate code change was needed or made.
+- The `poll_node` real-pty coverage gap (recorded in Part 3 above) remains open — not in this slice's
+  scope.
