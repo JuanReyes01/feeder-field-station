@@ -11,6 +11,7 @@ flag produced without actually starting a server.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import pty
@@ -24,19 +25,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station.adapters.ingest import _apply_to_registry
-from feeder_station.adapters.store import Store
+from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.cli import build_app
 from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.events import (
     OPERATOR_ARM,
+    OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
     STATION_TIME_SYNC_WITHHELD,
     StationEvent,
     interpret,
 )
 from feeder_station.domain.serial_framing import cobs_decode
-from feeder_station.domain.traps import Registry
+from feeder_station.domain.traps import Registry, Trap
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
 
@@ -219,6 +221,36 @@ def test_an_older_capture_does_not_regress_a_newer_heartbeats_state(tmp_path: Pa
 # report type -- verify-report-2.md's own diagnosis is that the prior fix
 # was validated against one example instead of this rule. --------------------
 
+# BEHAVIOUR 4 (verify-report-batch2d.md): the comparison axis below used to
+# be a hand-picked tuple, `("state", "last_seen", "reachable")` -- and
+# `pending_command` was on `Trap` from the very first version of this
+# module, yet never made it onto that tuple, which is exactly why the
+# divergence this file's own BEHAVIOUR-4 test proves hid for six rounds.
+# Enumerated from `Trap`'s own dataclass definition instead, so a field
+# added there later cannot silently fall off this axis: `assert not
+# missing` below fails the whole module at import time, not quietly.
+_TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
+    "node_id": ("node_id",),
+    "state": ("state",),
+    "state_may_be_stale": ("state_may_be_stale",),
+    "battery_mv": ("battery_mv",),
+    "targets_version": ("targets_version",),
+    "last_seen": ("last_seen", "reachable", "trustworthy"),
+    "pending_command": ("pending_command", "desired_targets_version"),
+    "capture": ("capture",),
+    "desired_tags": ("targets",),
+}
+
+
+def _compared_view_fields() -> tuple[str, ...]:
+    trap_field_names = {f.name for f in dataclasses.fields(Trap)}
+    missing = trap_field_names - set(_TRAP_FIELD_TO_VIEW_KEYS)
+    assert not missing, f"Trap field(s) {missing} have no view()-key mapping -- add one above"
+    return tuple(key for keys in _TRAP_FIELD_TO_VIEW_KEYS.values() for key in keys)
+
+
+_COMPARED_VIEW_FIELDS = _compared_view_fields()
+
 _REHYDRATION_NODE = 11
 _OLD = 6 * 3600.0
 _NEW = 120.0
@@ -340,7 +372,7 @@ def test_rehydrated_registry_matches_the_live_registry_for_every_ordering(
     live_row = live_registry.view(now=now)[0]
     rehydrated_row = rehydrated_rows[_REHYDRATION_NODE]
 
-    for field in ("state", "last_seen", "reachable"):
+    for field in _COMPARED_VIEW_FIELDS:
         assert rehydrated_row[field] == live_row[field], (
             f"{case_id}: {field} diverges -- live={live_row[field]!r} "
             f"rehydrated={rehydrated_row[field]!r}"
@@ -409,6 +441,187 @@ def test_rehydrated_registry_matches_the_live_registry_for_every_captured_state_
     # other, the CRITICAL 1 invariant this file exists to hold.
     assert live_row["state"] == expected_state, f"live: got {live_row['state']!r}"
     assert rehydrated_row["state"] == expected_state, f"rehydrated: got {rehydrated_row['state']!r}"
+
+
+# --- BEHAVIOUR 4 / SUGGESTION 5 (verify-report-batch2d.md): live and
+# rehydrated must agree on whether a report satisfies a *pending command*,
+# not only on `state`/`last_seen`/`reachable` -- `Registry.heartbeat()` ran
+# `satisfied_by`; `captured()`/`fault()` did not, so the same log gave two
+# different answers for `pending_command` depending on whether the station
+# had restarted. None of the five `_REHYDRATION_ORDERINGS` logs above has an
+# operator row at all, which is exactly why this hid for six rounds. Measured:
+# 5 of 18 combinations diverged, always by rehydration silently dropping a
+# command the live path kept pending. This table is those same 2 pending
+# commands (arm, disarm) x 9 report shapes (4 HEARTBEAT states, 4 CAPTURED
+# state_afters, 1 FAULT) = 18, re-derived here as a permanent property rather
+# than a one-off repro. -------------------------------------------------------
+
+_BEHAVIOUR_4_NODE = 33
+
+# (case_id, msg_type, fields, tag) per report shape.
+_BEHAVIOUR_4_REPORT_SHAPES: list[tuple[str, int, dict[str, object], bytes | None]] = [
+    (
+        "heartbeat_idle",
+        payloads.HEARTBEAT,
+        {"state": 0, "battery_mv": 4000, "targets_version": 1},
+        None,
+    ),
+    (
+        "heartbeat_armed",
+        payloads.HEARTBEAT,
+        {"state": 1, "battery_mv": 4000, "targets_version": 1},
+        None,
+    ),
+    (
+        "heartbeat_fired",
+        payloads.HEARTBEAT,
+        {"state": 2, "battery_mv": 4000, "targets_version": 1},
+        None,
+    ),
+    (
+        "heartbeat_fault",
+        payloads.HEARTBEAT,
+        {"state": 3, "battery_mv": 4000, "targets_version": 1},
+        None,
+    ),
+    ("captured_idle", payloads.CAPTURED, {"state_after": 0}, TAG),
+    ("captured_armed", payloads.CAPTURED, {"state_after": 1}, TAG),
+    ("captured_fired", payloads.CAPTURED, {"state_after": 2}, TAG),
+    ("captured_fault", payloads.CAPTURED, {"state_after": 3}, TAG),
+    ("fault", payloads.FAULT, {"code": 1, "detail": ""}, None),
+]
+
+
+def _apply_operator_command_to_registry(registry: Registry, command: str, at: datetime) -> None:
+    if command == "arm":
+        registry.command_arm(_BEHAVIOUR_4_NODE, at=at)
+    else:
+        registry.command_disarm(_BEHAVIOUR_4_NODE, at=at)
+
+
+def _apply_report_to_registry(
+    registry: Registry,
+    msg_type: int,
+    fields: dict[str, object],
+    tag: bytes | None,
+    at: datetime,
+) -> None:
+    if msg_type == payloads.HEARTBEAT:
+        state_value = fields["state"]
+        assert isinstance(state_value, int)
+        registry.heartbeat(
+            node_id=_BEHAVIOUR_4_NODE,
+            state=trap_state_from_wire(state_value),
+            at=at,
+            battery_mv=fields.get("battery_mv"),  # type: ignore[arg-type]
+            targets_version=fields.get("targets_version"),  # type: ignore[arg-type]
+        )
+    elif msg_type == payloads.CAPTURED:
+        state_after = fields["state_after"]
+        assert isinstance(state_after, int) and tag is not None
+        registry.captured(
+            node_id=_BEHAVIOUR_4_NODE, tag=tag, state=trap_state_from_wire(state_after), at=at
+        )
+    else:  # FAULT
+        registry.fault(_BEHAVIOUR_4_NODE, at=at)
+
+
+def _behaviour_4_expected_pending(
+    command: str, report_msg_type: int, report_fields: dict[str, object]
+) -> str | None:
+    """The rule this test proves, stated as code: a FAULT never satisfies a
+    pending command (no state field of its own, S4 -- see `Registry.fault`'s
+    own docstring); a HEARTBEAT or a CAPTURED's `state_after` does, exactly
+    like `Command.satisfied_by` already defines for a HEARTBEAT.
+    """
+    if report_msg_type == payloads.FAULT:
+        return command
+    state_key = "state" if report_msg_type == payloads.HEARTBEAT else "state_after"
+    armed = report_fields[state_key] == 1  # TrapState.ARMED's wire byte
+    satisfied = armed if command == "arm" else not armed
+    return None if satisfied else command
+
+
+@pytest.mark.parametrize("command", ["arm", "disarm"])
+@pytest.mark.parametrize(
+    ("case_id", "report_msg_type", "report_fields", "report_tag"),
+    _BEHAVIOUR_4_REPORT_SHAPES,
+    ids=[shape[0] for shape in _BEHAVIOUR_4_REPORT_SHAPES],
+)
+def test_a_pending_command_agrees_live_vs_rehydrated_for_every_report_type(
+    tmp_path: Path,
+    command: str,
+    case_id: str,
+    report_msg_type: int,
+    report_fields: dict[str, object],
+    report_tag: bytes | None,
+) -> None:
+    """BEHAVIOUR 4 (verify-report-batch2d.md): an operator issues `command`,
+    then the trap reports `report_msg_type` -- built two ways from the same
+    two-event log (live, via direct `Registry` calls; rehydrated, via a real
+    restart through `build_app`) and required to agree, and to agree with
+    the rule `_behaviour_4_expected_pending` states explicitly. Before this
+    fix: 5 of these 18 cases diverged (every `disarm` + non-`FAULT`,
+    non-armed CAPTURED case, and `arm` + `captured_armed`) -- rehydration
+    checked `satisfied_by` against a CAPTURED-won state race; the live path
+    never did. `fault` must land on the *same* pending value on both sides
+    now too (previously the mirror bug: a FAULT-won rehydration race used to
+    also incorrectly satisfy a pending `disarm`).
+    """
+    now = datetime.now(UTC)
+    now_epoch = now.timestamp()
+    command_at = datetime.fromtimestamp(now_epoch - 60.0, tz=UTC)
+    report_at = datetime.fromtimestamp(now_epoch - 30.0, tz=UTC)
+    operator_msg_type = OPERATOR_ARM if command == "arm" else OPERATOR_DISARM
+
+    db_path = tmp_path / "station.db"
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="operator",
+            node_id=_BEHAVIOUR_4_NODE,
+            msg_type=operator_msg_type,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=now_epoch - 60.0,
+        clock_trust="ntp",
+    )
+    seed.append(
+        StationEvent(
+            source="node",
+            node_id=_BEHAVIOUR_4_NODE,
+            msg_type=report_msg_type,
+            msg_id=1,
+            node_epoch=None,
+            tag=report_tag,
+            fields=report_fields,
+            payload=b"",
+        ),
+        received_epoch=now_epoch - 30.0,
+        clock_trust="ntp",
+    )
+    seed.close()
+
+    live_registry = Registry(silence_after=timedelta(minutes=15))
+    _apply_operator_command_to_registry(live_registry, command, at=command_at)
+    _apply_report_to_registry(live_registry, report_msg_type, report_fields, report_tag, report_at)
+    live_pending = live_registry.view(now=now)[0]["pending_command"]
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rehydrated_pending = {row["node_id"]: row for row in c.get("/api/traps").json()}[
+            _BEHAVIOUR_4_NODE
+        ]["pending_command"]
+
+    expected = _behaviour_4_expected_pending(command, report_msg_type, report_fields)
+    assert live_pending == expected, f"{case_id}/{command}: live pending={live_pending!r}"
+    assert rehydrated_pending == expected, (
+        f"{case_id}/{command}: rehydrated={rehydrated_pending!r} live={live_pending!r}"
+    )
 
 
 # --- CRITICAL 2 (sdd-verify, field-station-p4): a corrupt stored row must

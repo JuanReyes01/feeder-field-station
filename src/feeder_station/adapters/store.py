@@ -176,11 +176,19 @@ class _ReportedFact:
     the three is a report" reading `ingest.py::_apply_to_registry`
     already gives the live path (`registry.heartbeat()`/`captured()`/
     `fault()` each set `state` unconditionally).
+
+    ``msg_type`` (BEHAVIOUR 4 / SUGGESTION 5, verify-report-batch2d.md):
+    which report produced this fact, so `_rehydrate_desired_command` can
+    tell a HEARTBEAT/CAPTURED win (a genuinely reported fact, may satisfy
+    a pending command, mirroring `Registry.heartbeat`/`captured`) from a
+    FAULT win (no state field of its own, must never satisfy one,
+    mirroring `Registry.fault`'s own deliberate omission).
     """
 
     seq: int
     state: TrapState
     at: datetime
+    msg_type: int
 
 
 _SELECT_COLUMNS = (
@@ -618,9 +626,11 @@ class Store:
             # `received_epoch` fixture by
             # test_a_backlog_replayed_report_does_not_win_the_state_race_by_
             # the_nodes_own_older_clock.
+            winner_msg_type: int | None = None
             if facts:
                 winner = max(facts, key=lambda fact: fact.seq)
                 registry.restore_reported_state(node_id, winner.state, at=winner.at)
+                winner_msg_type = winner.msg_type
                 if a_state_row_was_unreadable:
                     # WARNING C (verify-report-batch2a.md), WARNING J's own
                     # residual: an unread sibling row could have been newer
@@ -630,7 +640,7 @@ class Store:
                     registry.mark_state_possibly_stale(node_id)
 
             try:
-                self._rehydrate_desired_command(node_id, registry)
+                self._rehydrate_desired_command(node_id, registry, winner_msg_type=winner_msg_type)
             except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
                 logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
                 self.rehydration_errors += 1
@@ -736,6 +746,7 @@ class Store:
             seq=heartbeat.seq,
             state=trap_state_from_wire(state_value),
             at=_epoch_to_datetime(heartbeat.received_epoch),
+            msg_type=payloads.HEARTBEAT,
         )
 
         battery_mv = heartbeat.fields.get("battery_mv")
@@ -802,6 +813,7 @@ class Store:
             seq=captured.seq,
             state=trap_state_from_wire(state_after),
             at=_epoch_to_datetime(captured.received_epoch),
+            msg_type=payloads.CAPTURED,
         )
 
     def _rehydrate_fault(self, node_id: int, registry: Registry) -> _ReportedFact | None:
@@ -814,7 +826,10 @@ class Store:
         if fault is None:
             return None
         return _ReportedFact(
-            seq=fault.seq, state=TrapState.FAULT, at=_epoch_to_datetime(fault.received_epoch)
+            seq=fault.seq,
+            state=TrapState.FAULT,
+            at=_epoch_to_datetime(fault.received_epoch),
+            msg_type=payloads.FAULT,
         )
 
     _OPERATOR_COMMAND_MSG_TYPES: tuple[tuple[int, CommandKind], ...] = (
@@ -823,11 +838,23 @@ class Store:
         (OPERATOR_SET_TARGETS, CommandKind.SET_TARGETS),
     )
 
-    def _rehydrate_desired_command(self, node_id: int, registry: Registry) -> None:
+    def _rehydrate_desired_command(
+        self, node_id: int, registry: Registry, *, winner_msg_type: int | None
+    ) -> None:
         """Step (d) — must run last, after the state race (a) and the
         heartbeat fields (b) have settled the node's final ``state``/
         ``targets_version``, since :func:`_reported_state` below reads
         both to decide whether a command is already satisfied (DD15).
+
+        ``winner_msg_type`` (BEHAVIOUR 4 / SUGGESTION 5, verify-report-
+        batch2d.md): which report won step (a)'s state race. The live
+        path only ever runs ``satisfied_by`` from ``Registry.heartbeat``/
+        ``captured`` — never ``fault`` (no state field of its own, S4).
+        Before this fix, this method checked the *final* winning ``state``
+        regardless of which report produced it, so a FAULT-won race
+        silently satisfied a pending command the live path would have
+        left untouched. Symmetric with :meth:`Registry.fault`'s own
+        docstring.
         """
         latest_targets = self.latest(node_id, OPERATOR_SET_TARGETS)
         if latest_targets is not None:
@@ -866,6 +893,12 @@ class Store:
             targets_version = version
 
         reported = _reported_state(registry, node_id)
+        if winner_msg_type == payloads.FAULT:
+            # BEHAVIOUR 4 / SUGGESTION 5: a FAULT carries no state field of
+            # its own (`domain/payloads.py::decode_fault` -- `code`/
+            # `detail` only) -- treat this exactly like "nothing is known"
+            # below, never like a report that can satisfy a command.
+            reported = None
         # `reported is None` (see its own docstring): nothing is known about
         # this node yet, so there is no report to check the command against
         # -- it stays pending, the same as any other unconfirmed command.

@@ -171,6 +171,49 @@ def test_a_silent_trap_is_not_reported_as_armed() -> None:
     assert view["trustworthy"] is False
 
 
+def test_disarm_pending_clears_when_a_captured_reports_not_armed() -> None:
+    """BEHAVIOUR 4 / SUGGESTION 5 (verify-report-batch2d.md): a CAPTURED's
+    own `state_after` is a genuinely reported fact (CRITICAL A), the same
+    standing as a HEARTBEAT's `state` (S4) -- so, like `heartbeat()`, this
+    must also check a pending command against it. Before this fix,
+    `captured()` never ran `satisfied_by` at all: an operator disarming a
+    trap right after it fires (the sharpest real scenario -- the trap may
+    be holding an animal) left the command pending forever on the live
+    path, resent until the shared budget's backoff wore anyone's patience
+    out.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
+
+    registry.command_disarm(7, at=NOW)
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
+
+    # state_after=0 (idle) is not armed -- a DISARM must be satisfied.
+    registry.captured(node_id=7, tag=TAG, state=TrapState.IDLE, at=NOW + timedelta(seconds=30))
+    assert registry.trap(7).pending_command is None
+
+
+def test_a_fault_report_does_not_satisfy_a_pending_disarm() -> None:
+    """BEHAVIOUR 4 / SUGGESTION 5 (verify-report-batch2d.md): a `FAULT`
+    payload carries no state field of its own
+    (`domain/payloads.py::decode_fault` -- `code`/`detail` only);
+    `fault()` sets `state = TrapState.FAULT` as this module's own
+    convention, not a reported fact. Clearing a pending DISARM from that
+    inference would mean assuming "not armed" from "something is wrong"
+    -- exactly the assumption S4 ("state is reported, never assumed",
+    this module's own docstring) rules out. A faulted trap may still be
+    physically armed, which is exactly why `fault()` deliberately does
+    NOT run `satisfied_by`, unlike `heartbeat()`/`captured()`.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
+
+    registry.command_disarm(7, at=NOW)
+    registry.fault(7, at=NOW + timedelta(seconds=30))
+
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
+
+
 def test_a_fault_uplink_sets_the_trap_to_fault_state() -> None:
     """radio-gateway spec.md: "On a FAULT uplink, the system MUST update the
     affected trap's reported state to fault." The node itself reported this

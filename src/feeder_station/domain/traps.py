@@ -180,12 +180,29 @@ class Registry:
         ``FIRED`` here is the exact assumption this module's own docstring
         (S4) rules out, and previously disagreed with
         :meth:`restore_reported_state`'s rehydrated answer for the same log.
+
+        BEHAVIOUR 4 / SUGGESTION 5 (verify-report-batch2d.md): also checks
+        a pending command against ``state_after``, the same DD15 rule
+        :meth:`heartbeat` already runs -- ``state_after`` is a genuinely
+        reported fact, the same standing as a HEARTBEAT's ``state``.
+        Before this fix, ``captured()`` never ran ``satisfied_by`` at all,
+        while ``adapters/store.py``'s rehydration path already did (from
+        the very same fact) -- the same log gave two different answers
+        depending on whether the station had restarted. Deliberately not
+        mirrored in :meth:`fault`, which carries no such reported fact --
+        see that method's own docstring.
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = state
         trap.state_may_be_stale = False  # WARNING C: a live report is always the newest one
         trap.last_seen = at
         trap.capture = Capture(tag=tag, at=at)
+        if trap.pending_command is not None:
+            report = ReportedState(
+                armed=state is TrapState.ARMED, targets_version=trap.targets_version
+            )
+            if trap.pending_command.satisfied_by(report):
+                trap.pending_command = None
         return trap.capture
 
     def restore_capture(self, node_id: int, tag: bytes, at: datetime) -> Capture:
@@ -271,6 +288,19 @@ class Registry:
         it, exactly the same standing as a heartbeat (S4) — not this
         station's own guess about a node gone quiet, which `is_reachable()`
         computes separately.
+
+        BEHAVIOUR 4 / SUGGESTION 5 (verify-report-batch2d.md): unlike
+        :meth:`heartbeat`/:meth:`captured`, this deliberately does NOT run
+        `satisfied_by` against a pending command. A `FAULT` payload
+        (`domain/payloads.py::decode_fault`) carries no state field at all
+        -- only `code`/`detail` -- so `state = TrapState.FAULT` here is
+        this module's own convention for display, not a reported fact.
+        Treating "something is wrong" as "not armed" would be exactly the
+        assumption this module's own S4 docstring rules out: a faulted
+        trap may still be physically armed. The cost of this choice is a
+        pending command that keeps resending against a trap that only
+        ever reports FAULT -- bounded by the station-wide budget
+        (CRITICAL 3/4), not by this module.
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = TrapState.FAULT

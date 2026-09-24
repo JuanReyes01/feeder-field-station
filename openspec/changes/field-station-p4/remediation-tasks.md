@@ -499,6 +499,28 @@ unconfirmed ARM; 10 traps idle `GET_BACKLOG`-only) and confirm all three now rea
 confirm rows/s is bounded, not 10.0. Note for the record (not a task): pacing changes here may shift
 WARNING 12's 50–150-minute lap time further; that is a WARNING-level follow-up, not blocking.
 
+- [x] **BEHAVIOUR 4 / SUGGESTION 5** (verify-report-batch2d.md, carried in explicitly for this batch —
+  "I recommend it be decided in Batch 3 alongside it"): `Registry.heartbeat()` ran `satisfied_by`;
+  `captured()`/`fault()` did not, while `store.py::_rehydrate_desired_command` always did (against
+  whichever report won the state race) — the asymmetry silently dropped a pending command on restart
+  in 5 of 18 measured combinations (BEHAVIOUR 4), and left a FAULT-only trap resending its command
+  forever on the live path (SUGGESTION 5). **Decision** (verified against the specs, not assumed): a
+  `CAPTURED`'s `state_after` is a genuinely reported fact (CRITICAL A already made it authoritative),
+  so `captured()` now runs `satisfied_by` exactly like `heartbeat()`. A `FAULT` carries no state field
+  at all (`domain/payloads.py::decode_fault` — `code`/`detail` only); `fault()` deliberately does NOT
+  run `satisfied_by` — inferring "not armed" from "something is wrong" is the assumption
+  `domain/traps.py`'s own S4 docstring rules out. `store.py` was made to agree: `_ReportedFact` now
+  carries `msg_type`, and `_rehydrate_desired_command` treats a FAULT-won state race exactly like "no
+  report at all" (never satisfies), matching `fault()`'s own omission. Fixed the class of bug, not the
+  instance: `tests/test_cli.py`'s five-ordering property test compared exactly `("state", "last_seen",
+  "reachable")` — a hand-picked tuple `pending_command` was never on, which is why this hid for six
+  rounds — now enumerated from `Trap`'s own dataclass fields (`assert not missing` fails the whole
+  module loudly if a future field is added without a mapping). A new 18-case property test
+  (`test_a_pending_command_agrees_live_vs_rehydrated_for_every_report_type`, 2 pending commands x 9
+  report shapes) proves live and rehydrated now agree in all 18, matching the exact rule stated in
+  code. SUGGESTION 5's "resends forever" stands as correct-but-bounded — bounded by Batch 3a's
+  station-wide budget, which is exactly why 3a landed first.
+
 ---
 
 ## Batch 4 — CRITICAL 5: delete-or-rewire the dead rotation primitive
