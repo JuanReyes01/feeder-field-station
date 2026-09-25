@@ -797,3 +797,184 @@ def test_withheld_time_sync_rows_are_bounded_by_the_heartbeat_cadence_not_the_ti
         f"{withheld_count} withheld rows in {elapsed:.2f}s = {rows_per_second:.1f} rows/s, "
         f"expected at most {max_rows_per_second:.1f} rows/s for {node_count} nodes"
     )
+
+
+# --- Scheduler-throttle bug (bench repro, docs/pending.md): a large ---------
+# --- `channel_budget_frames_per_s` must not let the loop monopolise --------
+# --- `registry_lock` ---------------------------------------------------
+
+
+class _BlockingWriteGateway:
+    """A `write_frame` that blocks until the test releases it -- simulating
+    a real serial write stalled on a full kernel TX buffer with nothing
+    draining it (pyserial's own `write_timeout=None` default,
+    `adapters/serial_gateway.py::_default_open_port`). This is the bench's
+    own mechanism, not a stand-in for it: a real write can genuinely block
+    forever, and the only question this test asks is whether
+    `registry_lock` is held while that happens.
+    """
+
+    def __init__(self) -> None:
+        self.write_started = threading.Event()
+        self.release_write = threading.Event()
+        self.written: list[bytes] = []
+
+    def ensure_connected(self, *, stop: Callable[[], bool]) -> bool:
+        return True
+
+    def read_frames(self, *, size: int = 4096) -> list[bytes]:  # pragma: no cover - unused here
+        return []
+
+    def write_frame(self, raw_frame: bytes) -> bool:
+        self.write_started.set()
+        self.release_write.wait(timeout=5.0)
+        self.written.append(raw_frame)
+        return True
+
+
+def test_a_blocked_time_sync_send_does_not_monopolise_the_registry_lock(
+    tmp_path: Path,
+) -> None:
+    """docs/pending.md's own bench repro: `--channel-budget-frames-per-s 20`
+    hung the real station -- one `/health` succeeded, then nothing responded
+    and no event was ingested again, while the default budget (~0.027/s)
+    stayed healthy indefinitely. Consequence named in that same report:
+    "TIME_SYNC cannot reach the node." The reported mechanism: the token
+    bucket is mutated under `registry_lock`, and with tokens always
+    available "the scheduler loop stops waiting and spins holding that
+    lock, starving the HTTP handlers and the ingest path" -- the budget
+    silently doubling as the loop's own throttle, which it must never be
+    (see `run_scheduler_loop`'s own docstring for the full mechanism: a
+    real write has no timeout and can block forever once a high budget
+    keeps every tick's burst full).
+
+    A trusted clock and no pending command isolates TIME_SYNC as the one
+    category that ever calls `gateway.write_frame` here: `_ROTATIONS[0]`
+    (`rotation_index` starts at `0`) tries "commands" first (a no-op, no
+    trap has a pending command) then "time_sync" -- before "poll" ever gets
+    a turn this tick. `test_a_blocked_poll_send_does_not_monopolise_the_
+    registry_lock` below isolates "poll" the same way, with the clock
+    `UNSET` instead so TIME_SYNC never reaches the gateway at all.
+
+    Proved honestly, not by a stopwatch: `_BlockingWriteGateway.write_frame`
+    blocks until released, and the real property under test -- "the loop
+    yields, and does not hold `registry_lock` while a send is in flight" --
+    is asserted by a *second* thread acquiring the very same lock, with a
+    bounded timeout, *while the fake write is still deliberately blocked*.
+    A large budget (20/s, the bench's own reported value) guarantees a send
+    is attempted on the very first tick rather than left to chance.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(1, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _BlockingWriteGateway()
+    registry_lock = threading.Lock()
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.01),
+        channel_budget_frames_per_s=20.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": registry_lock,
+            "clock": _FixedClock(trust=ClockTrust.NTP),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    acquired = False
+    try:
+        assert gateway.write_started.wait(timeout=2.0), (
+            "the loop never attempted a send -- this test proves nothing "
+            "about the lock without one in flight"
+        )
+
+        # The fake write is still blocked here, deliberately. A bounded
+        # timeout, not zero: this is a real inter-thread race between this
+        # acquire and the scheduler thread's own release-and-reacquire
+        # around other, unrelated work, not a claim that the lock is *never*
+        # briefly held anywhere in the same tick.
+        acquired = registry_lock.acquire(timeout=1.0)
+        if acquired:
+            registry_lock.release()
+    finally:
+        gateway.release_write.set()
+        stop.set()
+        thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert acquired, (
+        "registry_lock was still held while a TIME_SYNC send was blocked in "
+        "gateway.write_frame() -- the channel budget is deciding how often "
+        "the loop runs, not just what it may send"
+    )
+    assert decode(gateway.written[0]).msg_type == payloads.TIME_SYNC
+
+
+def test_a_blocked_poll_send_does_not_monopolise_the_registry_lock(
+    tmp_path: Path,
+) -> None:
+    """The sibling of the TIME_SYNC test above, isolating "poll"
+    (`GET_BACKLOG`) as the one category that reaches `gateway.write_frame`:
+    the clock is left `UNSET`, so TIME_SYNC only ever takes its withheld
+    path (a `store` write, never a `gateway` one -- see `attempt_time_sync`),
+    and no trap has a pending command, so "commands" stays a no-op. Whatever
+    the rotation order, "poll" is the only category left that can ever
+    block this loop's own gateway.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(1, TrapState.IDLE, at=datetime(2026, 1, 1, tzinfo=UTC))
+    gateway = _BlockingWriteGateway()
+    registry_lock = threading.Lock()
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.01),
+        channel_budget_frames_per_s=20.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": registry_lock,
+            "clock": _FixedClock(trust=ClockTrust.UNSET),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    acquired = False
+    try:
+        assert gateway.write_started.wait(timeout=2.0), (
+            "the loop never attempted a send -- this test proves nothing "
+            "about the lock without one in flight"
+        )
+
+        acquired = registry_lock.acquire(timeout=1.0)
+        if acquired:
+            registry_lock.release()
+    finally:
+        gateway.release_write.set()
+        stop.set()
+        thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert acquired, (
+        "registry_lock was still held while a GET_BACKLOG send was blocked "
+        "in gateway.write_frame() -- the channel budget is deciding how "
+        "often the loop runs, not just what it may send"
+    )
+    assert decode(gateway.written[0]).msg_type == payloads.GET_BACKLOG

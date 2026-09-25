@@ -282,6 +282,52 @@ def run_scheduler_loop(
     withheld attempt still costs nothing, exactly as before this fix --
     CRITICAL 4's own write-volume problem is a separate, later batch.
 
+    **Scheduler-throttle fix (bench repro, docs/pending.md):** raising
+    ``--channel-budget-frames-per-s`` past the default used to hang the
+    whole station -- one ``/health`` succeeded, then nothing responded and
+    no event was ingested again. The reported mechanism: ``poll_node``'s
+    and ``attempt_time_sync``'s calls into ``gateway.write_frame()`` used
+    to run *inside* the same ``with registry_lock:`` block that reads
+    ``registry.traps()`` -- yet neither call touches ``Registry`` or any
+    ``Trap`` at all (confirmed by their own signatures: no ``registry``
+    parameter). A real ``SerialGateway`` write has no timeout
+    (``adapters/serial_gateway.py::_default_open_port``, pyserial's own
+    ``write_timeout=None`` default): at the near-zero default rate, a
+    stalled far end never fills the OS's own TX buffer inside any
+    realistic observation window, but a high budget keeps every tick's
+    burst full continuously, and the first write that then blocks on a
+    full buffer blocks *forever* -- holding ``registry_lock`` the whole
+    time and starving every HTTP handler and the gateway thread's own
+    ``ingest_frame`` call (CRITICAL 1), which take the same lock. The
+    budget was silently doubling as the loop's own throttle, which it must
+    never be: it decides what may be *sent*, never how often -- or how
+    long -- the loop holds a lock other threads need.
+
+    Fixed by no longer taking the lock for either call: both now run after
+    the tick's own lock-protected reads (``node_ids`` up front, and, for
+    ``poll``, the single ``last_frame_arrival`` lookup it needs) are
+    already done. ``send_due_commands`` is the one category still
+    dispatched under the lock: unlike the other two, it genuinely reads
+    and writes ``Trap.pending_command``, shared with the gateway thread's
+    own heartbeat handling (``Registry.heartbeat``) -- splitting its own
+    read/send/commit the same way would need ``Command``'s
+    frozen-dataclass identity to guard against a concurrent heartbeat
+    superseding ``pending_command`` mid-send, a real, separate change,
+    flagged here rather than folded in silently. It is also the category
+    least implicated by the bench report: ``due_for_resend``'s own backoff
+    (``RESEND_BACKOFF_S``) makes it self-limiting regardless of the
+    configured budget, unlike ``poll``/``time_sync``, each due on
+    essentially every tick for as long as any node stays unpolled or
+    unsynced -- exactly the "``TIME_SYNC`` cannot reach the node" consequence
+    the bench report names.
+
+    Proved in ``tests/adapters/test_workers.py::
+    test_a_large_channel_budget_does_not_let_a_slow_send_monopolise_the_registry_lock``
+    without timing luck: a fake gateway blocks inside ``write_frame()``,
+    and the test asserts ``registry_lock`` is still acquirable from another
+    thread *while that write is still blocked* -- the actual property this
+    fix claims, not a duration compared against a threshold.
+
     **Which of the three gets the budget first, and why it rotates
     instead of a fixed order:** a strict "commands always first" priority
     was considered and rejected. ``send_due_commands`` finds a due command
@@ -320,38 +366,60 @@ def run_scheduler_loop(
     rotation_index = 0
 
     while not stop.is_set():
+        # Scheduler-throttle fix (docs/pending.md): this is the *only*
+        # registry read the tick needs up front -- everything below reads
+        # from this local tuple, never `registry` again, until "commands"
+        # takes its own, separate, narrower lock further down.
         with registry_lock:
             node_ids = tuple(trap.node_id for trap in registry.traps())
-            if node_ids:
-                now = clock.now()
 
-                if schedule is None or schedule.node_ids != node_ids:
-                    schedule = backlog.start(node_ids)
-                if next_poll_due_at is None:
-                    next_poll_due_at = now
+        if node_ids:
+            now = clock.now()
 
-                # CRITICAL 3: rotate which of the three transmitters gets
-                # first claim on the shared, scarce budget each tick -- see
-                # the docstring above for why a fixed priority was
-                # rejected. Plain sequential dispatch, not nested closures,
-                # so none of it captures a loop variable by reference.
-                order = _ROTATIONS[rotation_index % len(_ROTATIONS)]
-                rotation_index += 1
+            if schedule is None or schedule.node_ids != node_ids:
+                schedule = backlog.start(node_ids)
+            if next_poll_due_at is None:
+                next_poll_due_at = now
 
-                for category in order:
-                    if category == "poll":
-                        if now < next_poll_due_at or not budget.try_send():
-                            continue  # CRITICAL 3: stays due, retried next tick
-                        node_id = backlog.current_target(schedule)
-                        since = last_polled_at.get(node_id)
-                        heard = since is not None and arrivals.get(node_id, 0.0) > since.timestamp()
-                        last_polled_at[node_id] = now
-                        poll_node(node_id, store=store, gateway=gateway)
-                        schedule = backlog.record_response(
-                            schedule, heard=heard, retry_budget=config.backlog_retry_budget
-                        )
-                        next_poll_due_at = now + config.heartbeat_interval
-                    elif category == "commands":
+            # CRITICAL 3: rotate which of the three transmitters gets
+            # first claim on the shared, scarce budget each tick -- see
+            # the docstring above for why a fixed priority was
+            # rejected. Plain sequential dispatch, not nested closures,
+            # so none of it captures a loop variable by reference.
+            order = _ROTATIONS[rotation_index % len(_ROTATIONS)]
+            rotation_index += 1
+
+            for category in order:
+                if category == "poll":
+                    if now < next_poll_due_at or not budget.try_send():
+                        continue  # CRITICAL 3: stays due, retried next tick
+                    node_id = backlog.current_target(schedule)
+                    since = last_polled_at.get(node_id)
+                    # Scheduler-throttle fix: `last_frame_arrival` is
+                    # written by the gateway thread under this same lock
+                    # (`run_gateway_loop`) -- grabbed and released
+                    # immediately, never held across the write below.
+                    with registry_lock:
+                        last_arrival = arrivals.get(node_id, 0.0)
+                    heard = since is not None and last_arrival > since.timestamp()
+                    last_polled_at[node_id] = now
+                    # Scheduler-throttle fix: no lock held here -- see this
+                    # function's own docstring for why a blocking write
+                    # must never be able to hold `registry_lock` hostage.
+                    poll_node(node_id, store=store, gateway=gateway)
+                    schedule = backlog.record_response(
+                        schedule, heard=heard, retry_budget=config.backlog_retry_budget
+                    )
+                    next_poll_due_at = now + config.heartbeat_interval
+                elif category == "commands":
+                    # Scheduler-throttle fix: unlike "poll"/"time_sync",
+                    # `send_due_commands` genuinely reads and writes
+                    # `Trap.pending_command`, shared with the gateway
+                    # thread's own heartbeat handling -- this stays the one
+                    # category dispatched under the lock. See this
+                    # function's own docstring for why splitting its own
+                    # read/send/commit is flagged, not done here.
+                    with registry_lock:
                         send_due_commands(
                             registry,
                             store=store,
@@ -360,55 +428,54 @@ def run_scheduler_loop(
                             arm_duration_s=config.arm_duration.total_seconds(),
                             budget=budget,
                         )
-                    else:  # "time_sync"
-                        for node_id in node_ids:
-                            if node_id in synced_node_ids:
-                                continue
-                            # CRITICAL 3: only spend a token on an attempt
-                            # that would actually transmit -- a withheld
-                            # attempt (clock still unset) writes a log
-                            # row, not a frame, and must not compete for
-                            # airtime it never uses.
-                            would_send = may_distribute_time(clock.trust())
-                            if not would_send:
-                                # CRITICAL 4: `attempt_time_sync` writes a
-                                # `STATION_TIME_SYNC_WITHHELD` row on every
-                                # call (clock-trust/spec.md's own "MUST log
-                                # each withheld send") -- and, before this
-                                # gate, every unsynced node was "due" on
-                                # every tick, so a ten-node roster with an
-                                # unset clock wrote 10 fsync'd rows/s
-                                # (~189 MB/day, verify-report-2.md). The
-                                # spec pins the log, not the cadence -- the
-                                # defect is volume, not the log itself --
-                                # so this attempts (and logs) a withheld
-                                # node at most once per
-                                # `config.heartbeat_interval`, the same
-                                # cadence GET_BACKLOG's own per-node polling
-                                # already uses above, without touching the
-                                # log call or the "stays eligible" fix
-                                # CRITICAL 3 already made.
-                                monotonic_now = time.monotonic()
-                                last_attempt = last_withheld_attempt_at.get(node_id)
-                                cadence_s = config.heartbeat_interval.total_seconds()
-                                if last_attempt is not None and (
-                                    monotonic_now - last_attempt < cadence_s
-                                ):
-                                    continue
-                                last_withheld_attempt_at[node_id] = monotonic_now
-                                attempt_time_sync(
-                                    node_id, clock=clock, store=store, gateway=gateway
-                                )
-                                continue
-                            if not budget.try_send():
-                                continue
-                            # CRITICAL 3: only a frame actually sent counts
-                            # as synced -- a withheld attempt must stay
-                            # eligible for retry once trusted.
-                            if attempt_time_sync(
-                                node_id, clock=clock, store=store, gateway=gateway
+                else:  # "time_sync"
+                    for node_id in node_ids:
+                        if node_id in synced_node_ids:
+                            continue
+                        # CRITICAL 3: only spend a token on an attempt
+                        # that would actually transmit -- a withheld
+                        # attempt (clock still unset) writes a log
+                        # row, not a frame, and must not compete for
+                        # airtime it never uses.
+                        would_send = may_distribute_time(clock.trust())
+                        if not would_send:
+                            # CRITICAL 4: `attempt_time_sync` writes a
+                            # `STATION_TIME_SYNC_WITHHELD` row on every
+                            # call (clock-trust/spec.md's own "MUST log
+                            # each withheld send") -- and, before this
+                            # gate, every unsynced node was "due" on
+                            # every tick, so a ten-node roster with an
+                            # unset clock wrote 10 fsync'd rows/s
+                            # (~189 MB/day, verify-report-2.md). The
+                            # spec pins the log, not the cadence -- the
+                            # defect is volume, not the log itself --
+                            # so this attempts (and logs) a withheld
+                            # node at most once per
+                            # `config.heartbeat_interval`, the same
+                            # cadence GET_BACKLOG's own per-node polling
+                            # already uses above, without touching the
+                            # log call or the "stays eligible" fix
+                            # CRITICAL 3 already made.
+                            monotonic_now = time.monotonic()
+                            last_attempt = last_withheld_attempt_at.get(node_id)
+                            cadence_s = config.heartbeat_interval.total_seconds()
+                            if last_attempt is not None and (
+                                monotonic_now - last_attempt < cadence_s
                             ):
-                                synced_node_ids.add(node_id)
+                                continue
+                            last_withheld_attempt_at[node_id] = monotonic_now
+                            attempt_time_sync(node_id, clock=clock, store=store, gateway=gateway)
+                            continue
+                        if not budget.try_send():
+                            continue
+                        # Scheduler-throttle fix: no lock held here either
+                        # -- `attempt_time_sync` touches no `Registry`/
+                        # `Trap` state at all (see its own signature).
+                        # CRITICAL 3: only a frame actually sent counts
+                        # as synced -- a withheld attempt must stay
+                        # eligible for retry once trusted.
+                        if attempt_time_sync(node_id, clock=clock, store=store, gateway=gateway):
+                            synced_node_ids.add(node_id)
         stop.wait(tick_s)
 
 
