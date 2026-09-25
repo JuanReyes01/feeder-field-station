@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.cli import build_app
-from feeder_station.config import StationConfig
+from feeder_station.config import DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA, StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.events import (
     OPERATOR_ARM,
@@ -1551,12 +1551,15 @@ def test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire(
     A correct charge (3 tokens for 3 chunks) lets exactly one trap's list
     through in that tick and leaves nothing for the other's; the pre-fix
     one-token charge lets *both* through in the same pass -- six frames
-    spent from a three-token bucket. Production defaults throughout (no
-    `--channel-budget-frames-per-s` override): the station's real,
-    unaccelerated refill rate is far too slow for either trap's second
-    attempt, or the second trap's first, to ever accumulate three fresh
-    tokens inside this test's short window, so the count below does not
-    depend on exactly how many ticks elapse while it runs.
+    spent from a three-token bucket. The budget is pinned explicitly to
+    the LoRa constant here, not left at the real (now serial-cable, ~230/s)
+    default (Defect 2, docs/pending.md): this test's own proof needs a
+    refill slow enough that neither trap's second attempt, nor the second
+    trap's first, can ever accumulate three fresh tokens inside its short
+    observation window, which the fast cable default no longer guarantees
+    -- the *rate* configured is not what BEHAVIOUR 1 is about, so pinning
+    it to a named, slow constant keeps that arithmetic legible instead of
+    inventing a new magic number.
     """
     db_path = tmp_path / "station.db"
     master_fd, slave_fd = pty.openpty()
@@ -1564,7 +1567,16 @@ def test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire(
     os.close(slave_fd)
     tags = [f"{i:014X}" for i in range(81)]  # BEHAVIOUR 1's own bound: 3 chunks, the max allowed
 
-    app, _args = build_app(["--db-path", str(db_path), "--serial-device", slave_name])
+    app, _args = build_app(
+        [
+            "--db-path",
+            str(db_path),
+            "--serial-device",
+            slave_name,
+            "--channel-budget-frames-per-s",
+            str(DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA),
+        ]
+    )
 
     try:
         with TestClient(app) as c:

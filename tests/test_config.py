@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import pytest
 
+from feeder_station import config as config_module
 from feeder_station.config import StationConfig
 
 
@@ -79,14 +80,35 @@ def test_env_overrides_the_arm_duration() -> None:
     assert config.arm_duration == timedelta(seconds=3600)
 
 
-def test_channel_budget_frames_per_s_defaults_to_the_messages_md_budget() -> None:
-    """CRITICAL 3: docs/protocol/messages.md's own arithmetic -- a ~50-byte
-    frame costs 0.37 s of airtime, and the budget is "under 1% occupied" --
-    named once, here, not a bare literal inside `domain/pacing.py`'s caller.
+def test_channel_budget_frames_per_s_defaults_to_the_serial_cable_budget() -> None:
+    """Defect 2 (bench repro, docs/pending.md): the deployment today is a
+    USB serial cable at 115200 baud, not LoRa -- the old default modeled a
+    LoRa Long Fast link's 1% duty-cycle allowance (`docs/protocol/
+    messages.md`'s own arithmetic), throttling a cable by orders of
+    magnitude and silently doubling as the reason `TIME_SYNC` never reached
+    the node. The default now describes the link this station actually
+    ships with.
     """
     config = StationConfig.load(argv=[], env={})
 
-    assert config.channel_budget_frames_per_s == pytest.approx(0.01 / 0.37)
+    assert config.channel_budget_frames_per_s == pytest.approx(
+        config_module.DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_SERIAL
+    )
+    # The arithmetic, independent of the module's own derivation: 50 bytes
+    # x 10 bits/byte (8N1) / 115200 baud = one frame's wire time; at no
+    # duty cycle (a point-to-point cable, not a shared radio channel), the
+    # budget is the full inverse of that.
+    assert config.channel_budget_frames_per_s == pytest.approx(115_200 / (50 * 10))
+
+
+def test_lora_channel_budget_constant_is_still_available_for_a_future_radio_deployment() -> None:
+    """docs/design.md still lists LoRa as an open decision pending a site
+    survey (requirements.md R1: the client may need to move beyond Wi-Fi
+    range later) -- the LoRa-derived budget is kept, named and computed,
+    not deleted, for an operator to pass explicitly via
+    `--channel-budget-frames-per-s` once that survey happens.
+    """
+    assert config_module.DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA == pytest.approx(0.01 / 0.37)
 
 
 def test_env_overrides_the_channel_budget() -> None:

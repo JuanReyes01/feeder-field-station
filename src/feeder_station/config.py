@@ -42,13 +42,26 @@ DEFAULT_BACKLOG_RETRY_BUDGET = 3
 # already requires for SET_TARGETS.
 DEFAULT_ARM_DURATION = timedelta(hours=24)
 
-# CRITICAL 3 (sdd-verify field-station-p4): docs/protocol/messages.md's own
-# arithmetic (also quoted in adapters/workers.py's docstring) -- a ~50-byte
-# frame costs 0.37 s of airtime at Long Fast, and the design budget is
-# "keep the channel under 1% occupied". Named once, here, exactly like
-# every other DEFAULT_* in this module, so `domain/pacing.py`'s bucket is
-# sized from a config value rather than a literal buried in
-# `adapters/workers.py`.
+# CRITICAL 3 (sdd-verify field-station-p4), revised by the scheduler-
+# throttle bench fix (docs/pending.md): this budget models one *link*, and
+# every number below says plainly which one -- the original version of
+# this comment named only LoRa, silently making its 1% duty-cycle
+# allowance the default for every deployment, including the USB serial
+# cable this project has actually shipped with since day one. Throttling a
+# cable by the same rule a battery-powered radio needs is why `TIME_SYNC`
+# never reached the node (docs/pending.md: "raising the channel budget
+# hangs the station" -- the *other* half of that bug is the concurrency
+# fix in `adapters/workers.py::run_scheduler_loop`; this half is the
+# number itself being wrong for the link in use).
+#
+# --- LoRa Long Fast (not the current deployment; kept for the radio this
+# --- project may still need -- docs/design.md lists LoRa as an open
+# --- decision pending a site survey, and requirements.md's R1 is that the
+# --- client may need to move beyond Wi-Fi range later). A shared radio
+# --- channel, unlike a point-to-point cable: airtime is a scarce resource
+# --- every node on the channel competes for, and regulators (or, here,
+# --- this project's own battery-life budget) cap how much of it any one
+# --- device may occupy.
 #
 # WARNING 2 (verify-report-final.md, sdd-verify field-station-p4): two
 # things about this constant are not what a first read suggests, recorded
@@ -76,9 +89,57 @@ DEFAULT_ARM_DURATION = timedelta(hours=24)
 # this deployment's own channel, which this project has not taken -- this
 # comment exists so the next person sizing the real budget starts from the
 # actual arithmetic above instead of the document's own summary of it.
-AIRTIME_PER_FRAME_S = 0.37
-CHANNEL_BUDGET_FRACTION = 0.01
-DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S = CHANNEL_BUDGET_FRACTION / AIRTIME_PER_FRAME_S
+LORA_LONG_FAST_AIRTIME_PER_FRAME_S = 0.37
+LORA_CHANNEL_BUDGET_FRACTION = 0.01
+DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA = (
+    LORA_CHANNEL_BUDGET_FRACTION / LORA_LONG_FAST_AIRTIME_PER_FRAME_S
+)
+
+# --- USB serial cable at 115200 baud (the current deployment, confirmed
+# --- with the user: Wi-Fi reaches every feeder, and the station-to-node
+# --- link today is this cable, not a radio) -- derived, not invented:
+#
+# `SERIAL_BAUD_RATE` matches `adapters/serial_gateway.py::DEFAULT_BAUDRATE`
+# (a separate literal there, not an import of it -- domain/commands.py's
+# own `RESEND_BACKOFF_S` sets this precedent: a config-level constant
+# stays its own copy rather than reaching into `adapters/`).
+#
+# 8N1 framing (pyserial's own default, and this project's: 8 data bits, no
+# parity, 1 stop bit) puts 10 bits on the wire per byte: 1 start + 8 data +
+# 1 stop. A ~50-byte frame -- this project's own figure, the same one the
+# LoRa arithmetic above uses -- therefore costs:
+#
+#     50 bytes x 10 bits/byte / 115200 bits/s = 500 / 115200 ≈ 0.00434 s
+#
+# -- about 4 ms, matching what the bench measured directly.
+#
+# Unlike a shared radio channel, a point-to-point serial cable has no duty
+# cycle to divide: TX and RX run on separate wires (full duplex, not
+# half-duplex or CSMA over shared spectrum), there is no regulator-imposed
+# airtime allowance, and this station is the only sender on its own TX
+# line -- so the fraction of the link available to it is the whole of it,
+# not a percentage. The budget is therefore the wire's own raw throughput
+# ceiling, `1.0 / SERIAL_AIRTIME_PER_FRAME_S`, not a fraction of it.
+#
+# Not modelled here, the same "not re-derived" honesty as the LoRa
+# constant above: how fast the *node's own firmware* can actually process
+# an incoming frame is a separate, unmeasured constraint from what the
+# wire itself can carry -- this ceiling describes the cable, not the
+# microcontroller on the other end of it.
+SERIAL_BAUD_RATE = 115_200
+SERIAL_BITS_PER_BYTE = 10  # 1 start + 8 data + 1 stop, no parity (8N1)
+SERIAL_FRAME_BYTES = 50
+SERIAL_AIRTIME_PER_FRAME_S = SERIAL_FRAME_BYTES * SERIAL_BITS_PER_BYTE / SERIAL_BAUD_RATE
+SERIAL_DUTY_CYCLE_FRACTION = 1.0  # no shared-channel allowance to divide
+DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_SERIAL = SERIAL_DUTY_CYCLE_FRACTION / SERIAL_AIRTIME_PER_FRAME_S
+
+# The default describes what is actually deployed today (the cable), not
+# an aspiration -- an operator moving to LoRa passes
+# `DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA`'s value explicitly via
+# `--channel-budget-frames-per-s` (or `FEEDER_STATION_CHANNEL_BUDGET_
+# FRAMES_PER_S`); both constants stay named and computed above so that
+# switch is a value, not a re-derivation.
+DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S = DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_SERIAL
 
 ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
 ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
