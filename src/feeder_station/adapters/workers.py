@@ -31,17 +31,37 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 
 from feeder_station.adapters.clock import Clock, attempt_time_sync
 from feeder_station.adapters.command_sender import send_due_commands
 from feeder_station.adapters.ingest import Publish, ingest_frame
 from feeder_station.adapters.scheduler import poll_node
-from feeder_station.adapters.serial_gateway import SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.config import StationConfig
 from feeder_station.domain import backlog, pacing
 from feeder_station.domain.clock_trust import may_distribute_time
 from feeder_station.domain.traps import Registry
+
+
+class FrameGateway(Protocol):
+    """The one surface both transports (``SerialGateway``, one port;
+    ``NetworkGateway``, one listening socket and N connections) give this
+    module -- narrow on purpose, the same "only what this module actually
+    calls" discipline ``adapters/ingest.py``'s own ``AckPort`` and
+    ``adapters/command_sender.py``'s own ``CommandGateway`` already apply
+    one layer down. Structural (``Protocol``), not a shared base class:
+    neither concrete gateway needs to import the other, or this module, to
+    satisfy it.
+    """
+
+    def ensure_connected(self, *, stop: Callable[[], bool] = ...) -> bool: ...
+
+    def read_frames(self, *, size: int = 4096) -> list[bytes]: ...
+
+    def write_frame(self, raw_frame: bytes) -> bool: ...
+
+    def record_payload_error(self) -> None: ...
 
 # CRITICAL 3 (sdd-verify field-station-p4): the three orderings
 # `run_scheduler_loop` cycles through, one per tick, so no single
@@ -125,7 +145,7 @@ def run_supervised(status: WorkerStatus, body: Callable[[], None]) -> None:
 
 
 def run_gateway_loop(
-    gateway: SerialGateway,
+    gateway: FrameGateway,
     *,
     store: Store,
     registry: Registry,
@@ -183,7 +203,7 @@ def run_gateway_loop(
 def run_scheduler_loop(
     *,
     store: Store,
-    gateway: SerialGateway,
+    gateway: FrameGateway,
     registry: Registry,
     registry_lock: threading.Lock,
     clock: Clock,
@@ -482,7 +502,7 @@ def run_scheduler_loop(
 def start_workers(
     *,
     store: Store,
-    gateway: SerialGateway,
+    gateway: FrameGateway,
     registry: Registry,
     registry_lock: threading.Lock,
     publish: Publish,

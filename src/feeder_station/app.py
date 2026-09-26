@@ -16,7 +16,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -24,9 +24,10 @@ from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
-from feeder_station.adapters.serial_gateway import SerialGateway
+from feeder_station.adapters.network_gateway import NetworkLinkState
+from feeder_station.adapters.serial_gateway import LinkState
 from feeder_station.adapters.store import SpecimenRow, Store
-from feeder_station.adapters.workers import WorkerStatus, start_workers
+from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain import pacing
 from feeder_station.domain.events import (
@@ -305,12 +306,26 @@ def _worker_health(thread: threading.Thread | None, status: WorkerStatus | None)
     return {"enabled": True, "alive": thread.is_alive(), "last_error": status.last_error}
 
 
+class _HealthReportingGateway(FrameGateway, Protocol):
+    """``/health`` needs one thing neither ``adapters/workers.py`` call
+    site does: a snapshot of the link itself. A narrow Protocol of its
+    own, extending ``FrameGateway`` rather than widening it -- the same
+    "one Protocol per consumer" discipline ``adapters/ingest.py``'s
+    ``AckPort`` and this module's own ``FrameGateway`` already keep, so
+    ``run_gateway_loop``'s own type does not have to know this route
+    exists.
+    """
+
+    @property
+    def link_state(self) -> LinkState | NetworkLinkState: ...
+
+
 def create_app(
     registry: Registry | None = None,
     config: StationConfig | None = None,
     clock: Clock | None = None,
     store: Store | None = None,
-    gateway: SerialGateway | None = None,
+    gateway: _HealthReportingGateway | None = None,
 ) -> FastAPI:
     resolved_config = config or StationConfig.load()
     resolved_clock: Clock = clock or StationClock()
@@ -414,26 +429,67 @@ def create_app(
         # pre-slice-12 test's bare `create_app()`).
         gateway = app.state.gateway
         link: dict[str, Any] | None = None
+        link_ok = True
         if gateway is not None:
             state = gateway.link_state
-            link = {
-                "connected": state.connected,
-                "device": state.device,
-                "since": state.since,
-                "frames_in": state.frames_in,
-                "frames_out": state.frames_out,
-                "decode_errors": state.decode_errors,
-                # WARNING C (sdd-verify field-station-p4 batch 1): a
-                # payload-level decode failure, distinguishable from the
-                # COBS-level `decode_errors` above.
-                "payload_errors": state.payload_errors,
-                "last_error": state.last_error,
-            }
-        # "fold connected into ok" (verify-report.md's own fix wording): a
-        # station with no gateway configured never counts against `ok` --
-        # the same "never enabled, never counts" discipline `workers_ok`
-        # already applies above.
-        link_ok = link is None or bool(link["connected"])
+            if isinstance(state, NetworkLinkState):
+                # network-gateway (this change): 1:N, so "the link" cannot
+                # be one boolean the way a single serial port's own
+                # `connected` already can be -- docs/pending.md's closing
+                # rule, "state that was true once, presented as true now",
+                # reborn as "nine disconnected nodes presented as one
+                # connected flag" the moment more than one node exists.
+                # `ok` folds in `listening` (module docstring's own
+                # precedent: a station with no usable transport at all is
+                # the one case this layer still gets to call a failure) --
+                # never any individual node's own `connected`, the same
+                # "a trap's own reachability is a trap-level fact, not a
+                # station-level one" discipline `/api/traps` already keeps
+                # separate from `ok` today.
+                link = {
+                    "transport": "network",
+                    "listening": state.listening,
+                    "host": state.host,
+                    "port": state.port,
+                    "since": state.since,
+                    "unidentified_connections": state.unidentified_connections,
+                    "payload_errors": state.payload_errors,
+                    "last_error": state.last_error,
+                    "nodes": [
+                        {
+                            "node_id": n.node_id,
+                            "connected": n.connected,
+                            "peer_address": n.peer_address,
+                            "since": n.since,
+                            "frames_in": n.frames_in,
+                            "frames_out": n.frames_out,
+                            "decode_errors": n.decode_errors,
+                            "last_error": n.last_error,
+                        }
+                        for n in state.nodes
+                    ],
+                }
+                link_ok = state.listening
+            else:
+                link = {
+                    "transport": "serial",
+                    "connected": state.connected,
+                    "device": state.device,
+                    "since": state.since,
+                    "frames_in": state.frames_in,
+                    "frames_out": state.frames_out,
+                    "decode_errors": state.decode_errors,
+                    # WARNING C (sdd-verify field-station-p4 batch 1): a
+                    # payload-level decode failure, distinguishable from the
+                    # COBS-level `decode_errors` above.
+                    "payload_errors": state.payload_errors,
+                    "last_error": state.last_error,
+                }
+                # "fold connected into ok" (verify-report.md's own fix
+                # wording): a station with no gateway configured never
+                # counts against `ok` -- the same "never enabled, never
+                # counts" discipline `workers_ok` already applies above.
+                link_ok = bool(state.connected)
 
         # CRITICAL 2 (sdd-verify, field-station-p4): "surface it, don't
         # hide it" — the same convention `link`'s `decode_errors` already
