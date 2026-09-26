@@ -58,6 +58,29 @@ class CommandKind(str, Enum):
     SET_TARGETS = "set_targets"
 
 
+# docs/pending.md, "A command the node refuses is retried forever": the
+# node's own FAULT.code values are not numbered by messages.md at all
+# ("does not number them", feeder-node-firmware's own
+# components/station_proto/station_proto.h comment on STATION_FAULT_*) --
+# this project only has one FAULT code today that names a specific
+# *command* as refused, rather than reporting a hardware condition
+# (a stalled servo, a dead SD card): STATION_FAULT_ARM_REQUIRES_PRESENCE
+# (5). The node cannot arm itself -- a person has to place the cord over
+# the mechanism -- so every ARM downlink is answered this way, never
+# obeyed and never merely delayed.
+#
+# This mapping is therefore only as reliable as that one firmware-only
+# convention, not a protocol guarantee: a future fault code that similarly
+# names a refused command (a DISARM or SET_TARGETS this station cannot
+# satisfy) extends this dict, not this module's shape. See
+# `domain/traps.py::Registry.fault()` for how a name here is turned into a
+# cancelled `pending_command` -- and why an unrecognised code is the
+# conservative case (nothing cancelled), not the reverse.
+FAULT_CODE_REFUSES: dict[int, CommandKind] = {
+    5: CommandKind.ARM,  # STATION_FAULT_ARM_REQUIRES_PRESENCE
+}
+
+
 @dataclass(frozen=True)
 class ReportedState:
     """The one slice of a HEARTBEAT/HELLO a pending command is ever checked

@@ -31,6 +31,7 @@ from feeder_station.config import StationConfig
 from feeder_station.domain import pacing
 from feeder_station.domain.events import (
     OPERATOR_ARM,
+    OPERATOR_CANCEL_COMMAND,
     OPERATOR_CAPTURE_ACKNOWLEDGED,
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
@@ -448,6 +449,24 @@ def create_app(
             app.state.registry.acknowledge(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "acknowledged": True}
+
+    @app.post("/api/traps/{node_id}/cancel")
+    def cancel_command(node_id: int) -> dict[str, Any]:
+        """docs/pending.md, "There is no way to cancel a pending command":
+        even with (3)'s fault-driven cancellation, a command the node
+        never answers at all -- not confirmed, not refused -- has no way
+        out short of an operator doing it directly. Unconditional, unlike
+        `Registry.fault()`'s named-refusal check: any pending command may
+        be cancelled, for any reason, the same way `acknowledge()` above
+        does not special-case an unknown node either.
+        """
+        with app.state.registry_lock:
+            _record_operator_event(
+                app.state.store, app.state.clock, node_id=node_id, msg_type=OPERATOR_CANCEL_COMMAND
+            )
+            app.state.registry.cancel_command(node_id, at=now())
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"node_id": node_id, "pending_command": None}
 
     @app.put("/api/traps/{node_id}/targets")
     def set_targets(node_id: int, body: TargetsRequest) -> dict[str, Any]:

@@ -30,6 +30,7 @@ from feeder_station.domain import payloads
 from feeder_station.domain.commands import Command, CommandKind, ReportedState
 from feeder_station.domain.events import (
     OPERATOR_ARM,
+    OPERATOR_CANCEL_COMMAND,
     OPERATOR_CAPTURE_ACKNOWLEDGED,
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
@@ -878,6 +879,25 @@ class Store:
             if row is not None and (latest is None or row.seq > latest.seq):
                 latest, latest_kind = row, kind
         if latest is None or latest_kind is None:
+            return
+
+        # docs/pending.md, "There is no way to cancel a pending command":
+        # `OPERATOR_CANCEL_COMMAND` (`app.py`'s `/cancel` route,
+        # `Registry.cancel_command`) is not one of
+        # `_OPERATOR_COMMAND_MSG_TYPES`'s three kinds -- it is the
+        # *absence* of one, so it is checked separately, after the race
+        # above has already found whichever real command is newest. A
+        # cancel newer than that command means an operator's `cancel_
+        # command()` already cleared `pending_command` in memory when it
+        # happened; without this check, a restart would silently reinstate
+        # the older command from its own still-durable row, as though the
+        # cancel had never happened -- the same "state that was true once,
+        # presented as true now" defect this project keeps finding. A
+        # cancel *older* than `latest` (an operator cancelled, then issued
+        # a genuinely new command afterwards) changes nothing here: that
+        # new command is what `latest` already names.
+        cancel = self.latest(node_id, OPERATOR_CANCEL_COMMAND)
+        if cancel is not None and cancel.seq > latest.seq:
             return
 
         targets_version: int | None = None

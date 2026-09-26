@@ -39,6 +39,7 @@ from feeder_station.domain import frames, payloads
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import (
     OPERATOR_ARM,
+    OPERATOR_CANCEL_COMMAND,
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
     StationEvent,
@@ -138,6 +139,23 @@ def test_arm_and_disarm_routes_set_pending_command_not_reported_state() -> None:
     assert disarm_response.status_code == 200
     assert c.get("/api/traps").json()[0]["state"] == "armed"
     assert c.get("/api/traps").json()[0]["pending_command"] == "disarm"
+
+
+def test_cancel_command_route_clears_a_pending_command() -> None:
+    """docs/pending.md, "There is no way to cancel a pending command":
+    even with fault-driven cancellation, a command the node never answers
+    at all sits pending forever with no way out from the interface --
+    this is that way out.
+    """
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.command_disarm(7, at=now())
+    assert c.get("/api/traps").json()[0]["pending_command"] == "disarm"
+
+    response = c.post("/api/traps/7/cancel")
+    assert response.status_code == 200
+    assert c.get("/api/traps").json()[0]["pending_command"] is None
 
 
 # --- 6.1/6.2: DD11 — asyncio.Queue is documented as not thread-safe --------
@@ -270,7 +288,7 @@ def test_the_page_still_loads_with_no_traps() -> None:
 # --- 10.3/10.4: every operator route answers, targets included -------------
 
 
-def test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx() -> None:
+def test_arm_disarm_edit_targets_acknowledge_cancel_routes_all_return_2xx() -> None:
     """Route-level only -- touch-DOM interaction is not pytest's domain (see
     this module's own docstring). Proves every action S13 names reaches the
     registry through a 2xx response.
@@ -283,6 +301,7 @@ def test_arm_disarm_edit_targets_acknowledge_routes_all_return_2xx() -> None:
     assert c.post("/api/traps/7/arm").status_code // 100 == 2
     assert c.post("/api/traps/7/disarm").status_code // 100 == 2
     assert c.put("/api/traps/7/targets", json={"tags": ["0384199C87EC06"]}).status_code // 100 == 2
+    assert c.post("/api/traps/7/cancel").status_code // 100 == 2
 
     registry.captured(node_id=7, tag=TAG, state=TrapState.FIRED, at=now())
     assert c.post("/api/traps/7/acknowledge").status_code // 100 == 2
@@ -461,6 +480,27 @@ def test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant() -
         "the ternary must be t.state_may_be_stale (not inverted) rendering the "
         "stale-badge markup on true and nothing on false -- not an inverted "
         "condition or two empty branches"
+    )
+
+
+# --- docs/pending.md, "Remove the remote arm affordance" -------------------
+
+
+def test_the_cancel_button_is_rendered_only_when_a_command_is_pending() -> None:
+    """docs/pending.md, "There is no way to cancel a pending command": the
+    same ternary-pinning discipline `test_stale_state_badge_in_render_
+    trap_depends_on_the_flag_not_a_constant` above already uses for a
+    conditional badge, applied to a conditional button -- a substring
+    check alone would still pass if this button rendered unconditionally.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"""\$\{t\.pending_command \? `<button onclick="cancelCommand\(\$\{t\.node_id\}\)">"""
+        r"""[^<]*</button>` : ""\}"""
+    )
+    assert pattern.search(html), (
+        "the Cancelar button must be conditional on t.pending_command, not "
+        "rendered unconditionally or removed"
     )
 
 
@@ -837,7 +877,7 @@ def test_acknowledging_a_capture_survives_a_restart_through_the_route(tmp_path: 
     assert all(row["capture"] is None for row in rows)
 
 
-# --- 13.3/13.4: ARM/DISARM are recorded, not only applied in memory --------
+# --- 13.3/13.4: DISARM is recorded, not only applied in memory -------------
 
 
 def test_arm_and_disarm_are_recorded_as_operator_events(tmp_path: Path) -> None:
@@ -855,6 +895,22 @@ def test_arm_and_disarm_are_recorded_as_operator_events(tmp_path: Path) -> None:
     assert disarmed.source == "operator"
 
 
+def test_cancel_command_is_recorded_as_an_operator_event(tmp_path: Path) -> None:
+    """event-store spec.md's own discipline, extended to cancellation: an
+    operator cancelling a command is durable, the same as arm/disarm/
+    edit-targets/acknowledge already are -- never only an in-memory flag.
+    """
+    store = Store(tmp_path / "station.db")
+    c = TestClient(create_app(store=store))
+
+    assert c.post("/api/traps/7/disarm").status_code == 200
+    assert c.post("/api/traps/7/cancel").status_code == 200
+
+    cancelled = store.latest(7, OPERATOR_CANCEL_COMMAND)
+    assert cancelled is not None
+    assert cancelled.source == "operator"
+
+
 def test_operator_routes_still_work_with_no_store_configured() -> None:
     """Backward compatibility: every route-level test above this one calls
     `create_app` with no `store` at all -- an operator action must stay
@@ -865,6 +921,7 @@ def test_operator_routes_still_work_with_no_store_configured() -> None:
     assert c.post("/api/traps/7/arm").status_code == 200
     assert c.post("/api/traps/7/disarm").status_code == 200
     assert c.post("/api/traps/7/acknowledge").status_code == 200
+    assert c.post("/api/traps/7/cancel").status_code == 200
 
 
 # --- 13.5/13.6: PUT /targets persists the exact bytes, not just the version

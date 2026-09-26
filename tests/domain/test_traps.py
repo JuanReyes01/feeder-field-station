@@ -209,7 +209,13 @@ def test_a_fault_report_does_not_satisfy_a_pending_disarm() -> None:
     registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
 
     registry.command_disarm(7, at=NOW)
-    registry.fault(7, at=NOW + timedelta(seconds=30))
+    # code=1 (SERVO_STALLED): a generic fault, not one that names a
+    # specific command as refused (`commands.FAULT_CODE_REFUSES` only
+    # maps 5, ARM_REQUIRES_PRESENCE) -- see
+    # test_a_fault_naming_a_different_command_does_not_cancel_the_pending_one
+    # below for the sharper case, a fault that *does* name a command (ARM)
+    # other than the one pending here (DISARM).
+    registry.fault(7, at=NOW + timedelta(seconds=30), code=1)
 
     assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
 
@@ -223,11 +229,96 @@ def test_a_fault_uplink_sets_the_trap_to_fault_state() -> None:
     registry = Registry(silence_after=timedelta(minutes=5))
     registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
 
-    registry.fault(7, at=NOW + timedelta(minutes=1))
+    registry.fault(7, at=NOW + timedelta(minutes=1), code=1)
 
     trap = registry.trap(7)
     assert trap.state is TrapState.FAULT
     assert trap.last_seen == NOW + timedelta(minutes=1)
+
+
+# --- docs/pending.md, "A command the node refuses is retried forever" -----
+#
+# The node cannot arm itself (a person has to place the cord over the
+# mechanism) -- an ARM downlink is always answered with a FAULT naming
+# `STATION_FAULT_ARM_REQUIRES_PRESENCE` (5, feeder-node-firmware's
+# `station_proto.h`), never obeyed and never merely delayed. Before this
+# fix, `fault()` never touched `pending_command` at all, so
+# `command_sender.py` kept resending a command the node had already,
+# explicitly, refused: nine `FAULT` rows measured on the bench for one
+# `POST /arm`, each retry a frame `TIME_SYNC` did not get instead.
+
+
+def test_a_fault_naming_the_pending_command_cancels_it() -> None:
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.command_arm(7, at=NOW)
+
+    registry.fault(7, at=NOW + timedelta(seconds=30), code=5)
+
+    assert registry.trap(7).pending_command is None
+
+
+def test_a_fault_naming_a_different_command_does_not_cancel_the_pending_one() -> None:
+    """code 5 names only ARM (`commands.FAULT_CODE_REFUSES`) -- a pending
+    DISARM must survive it. Otherwise "a fault cancels the command it
+    names" would quietly become "any fault cancels any pending command",
+    exactly the over-correction `fault()`'s own S4 docstring already
+    warns against for `satisfied_by`.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.command_disarm(7, at=NOW)
+
+    registry.fault(7, at=NOW + timedelta(seconds=30), code=5)
+
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.DISARM)
+
+
+def test_a_fault_with_no_known_code_does_not_cancel_a_pending_command() -> None:
+    """messages.md does not number `FAULT.code` at all (feeder-node-
+    firmware's own `station_proto.h` comment) -- an unread or unrecognised
+    code is the conservative case, `code=None`: nothing is cancelled, the
+    same "stays pending until proven otherwise" default every other
+    unconfirmed command already gets.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.command_arm(7, at=NOW)
+
+    registry.fault(7, at=NOW + timedelta(seconds=30), code=None)
+
+    assert registry.trap(7).pending_command == Command(kind=CommandKind.ARM)
+
+
+# --- docs/pending.md, "There is no way to cancel a pending command" -------
+
+
+def test_cancel_command_clears_a_pending_command_the_node_never_answers() -> None:
+    """Even with fault-driven cancellation above, a command the node never
+    answers at all -- not confirmed, not refused -- sits pending forever
+    with no way out from the interface. An operator must be able to
+    cancel outright, for any reason (a misconfigured target list, a
+    command issued by mistake), not only one the node has explicitly
+    refused.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.command_arm(7, at=NOW)
+
+    registry.cancel_command(7, at=NOW + timedelta(minutes=5))
+
+    assert registry.trap(7).pending_command is None
+
+
+def test_cancel_command_does_not_touch_the_trap_reported_state() -> None:
+    """Cancelling a command is an operator decision about the *command*,
+    never a report about the trap -- S4 applies here too: `state` only
+    ever moves from what the trap itself last reported.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=NOW)
+    registry.command_disarm(7, at=NOW)
+
+    registry.cancel_command(7, at=NOW + timedelta(minutes=1))
+
+    assert registry.trap(7).pending_command is None
+    assert registry.trap(7).state is TrapState.ARMED
 
 
 def test_traps_are_listed_in_a_stable_order() -> None:

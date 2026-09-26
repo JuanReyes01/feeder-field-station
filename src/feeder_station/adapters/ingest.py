@@ -135,7 +135,14 @@ def _apply_to_registry(registry: Registry, event: StationEvent, at: datetime) ->
     elif event.msg_type == payloads.CAPTURED:
         _apply_captured(registry, event, at)
     elif event.msg_type == payloads.FAULT:
-        registry.fault(event.node_id, at=at)
+        # docs/pending.md, "A command the node refuses is retried forever":
+        # `code` is what lets `Registry.fault()` tell a named refusal from
+        # a generic hardware fault -- the same defensive `isinstance` guard
+        # `_apply_heartbeat`/`_apply_captured` already apply to their own
+        # `fields` reads, since this dict is JSON round-tripped through the
+        # store and nothing here re-proves it is still an int.
+        code = event.fields.get("code")
+        registry.fault(event.node_id, at=at, code=code if isinstance(code, int) else None)
     # HELLO, VISIT and a node's own ACK carry nothing this slice's registry
     # model represents yet — the same "not every event type touches the
     # registry" precedent adapters/store.py's own rehydrate() already sets.

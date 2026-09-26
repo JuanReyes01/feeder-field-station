@@ -10,7 +10,7 @@ Protocol double (DD16's own reasoning, one layer up): no SQLite, no pyserial.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -185,6 +185,43 @@ def test_fault_uplink_updates_reported_state_to_fault() -> None:
     )
 
     assert registry.trap(5).state is TrapState.FAULT
+
+
+# --- docs/pending.md, "A command the node refuses is retried forever" -----
+
+
+def test_a_fault_naming_arm_cancels_a_pending_arm_command() -> None:
+    """Proves the full wire-to-registry wiring, not only
+    `Registry.fault()` in isolation: `code` has to survive
+    `decode_fault` -> `interpret` -> `event.fields` ->
+    `_apply_to_registry` before `fault()` ever sees it. `payload=bytes([5])`
+    is `STATION_FAULT_ARM_REQUIRES_PRESENCE` (feeder-node-firmware's
+    `station_proto.h`) -- the node refusing to arm itself, never obeyed
+    and never merely delayed.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.command_arm(5, at=datetime(2024, 9, 23, 11, 0, tzinfo=UTC))
+    raw = encode(
+        Frame(
+            msg_type=payloads.FAULT,
+            node_id=5,
+            msg_id=3,
+            flags=FLAG_ACK_REQUIRED,
+            payload=bytes([5]),
+        )
+    )
+
+    ingest_frame(
+        raw,
+        store=_StubStore(),
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert registry.trap(5).pending_command is None
 
 
 # --- ACK is only sent for frames that asked for one -------------------------

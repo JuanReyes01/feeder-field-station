@@ -35,6 +35,12 @@ OPERATOR_ARM = 0x100
 OPERATOR_DISARM = 0x101
 OPERATOR_SET_TARGETS = 0x102
 OPERATOR_CAPTURE_ACKNOWLEDGED = 0x103
+# docs/pending.md, "There is no way to cancel a pending command": an
+# operator cancelling a command outright (`domain/traps.py::Registry.
+# cancel_command`), not the node ever answering one -- see that method's
+# own docstring for why this is unconditional, unlike `Registry.fault()`'s
+# named-refusal cancellation.
+OPERATOR_CANCEL_COMMAND = 0x104
 STATION_TIME_SYNC_WITHHELD = 0x200
 
 

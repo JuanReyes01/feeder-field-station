@@ -21,9 +21,12 @@ import pytest
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.domain import payloads
+from feeder_station.domain.commands import Command, CommandKind
 from feeder_station.domain.events import (
     OPERATOR_ARM,
+    OPERATOR_CANCEL_COMMAND,
     OPERATOR_CAPTURE_ACKNOWLEDGED,
+    OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
     StationEvent,
 )
@@ -1183,6 +1186,119 @@ def test_a_corrupt_desired_tags_list_counts_as_unreadable_even_when_a_later_arm_
     # E/F's own granularity): a corrupt sibling row drops the ARM replay
     # too, rather than resending a command built from a half-read state.
     assert 77 not in {trap.node_id for trap in registry.traps()}
+
+
+# --- docs/pending.md, "There is no way to cancel a pending command" -------
+#
+# `OPERATOR_CANCEL_COMMAND` is not one of `_OPERATOR_COMMAND_MSG_TYPES`'s
+# three kinds -- it is the *absence* of one. Without its own place in the
+# "latest wins" race, an operator's cancel would appear to work until the
+# next restart replayed the older ARM/DISARM/SET_TARGETS row as though the
+# cancel had never happened -- the same "state that was true once,
+# presented as true now" defect this project keeps finding.
+
+
+def test_a_cancel_after_a_command_leaves_nothing_pending_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_CANCEL_COMMAND,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened = Store(db_path)
+    reopened.rehydrate(registry)
+
+    # Nothing else ever reported on this node, and the one command it was
+    # ever given was cancelled before any report could confirm it -- the
+    # same honest "no entry at all" a node the station has truly never
+    # heard from gets, not a fabricated pending command reinstated from a
+    # stale row.
+    assert 77 not in {trap.node_id for trap in registry.traps()}
+
+
+def test_a_cancel_older_than_a_later_command_does_not_erase_it(tmp_path: Path) -> None:
+    """A cancel is only "the latest word" if it really is the latest row --
+    an operator who cancels, then issues a *new* command afterwards, must
+    still see that new command survive a restart.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_CANCEL_COMMAND,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1500.0,
+        clock_trust="unset",
+    )
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=77,
+            msg_type=OPERATOR_DISARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=2000.0,
+        clock_trust="unset",
+    )
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    reopened = Store(db_path)
+    reopened.rehydrate(registry)
+
+    assert registry.trap(77).pending_command == Command(kind=CommandKind.DISARM)
 
 
 # --- 4.19/4.20: the kill -9 crash-consistency proxy --------------------------

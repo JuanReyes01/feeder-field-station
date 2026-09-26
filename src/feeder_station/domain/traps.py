@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from .commands import Command, CommandKind, ReportedState
+from .commands import FAULT_CODE_REFUSES, Command, CommandKind, ReportedState
 
 
 class TrapState(str, Enum):
@@ -283,7 +283,7 @@ class Registry:
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.desired_tags = tuple(tags)
 
-    def fault(self, node_id: int, at: datetime) -> None:
+    def fault(self, node_id: int, at: datetime, code: int | None) -> None:
         """A `FAULT` uplink (radio-gateway spec.md): the trap itself reported
         it, exactly the same standing as a heartbeat (S4) — not this
         station's own guess about a node gone quiet, which `is_reachable()`
@@ -297,18 +297,51 @@ class Registry:
         this module's own convention for display, not a reported fact.
         Treating "something is wrong" as "not armed" would be exactly the
         assumption this module's own S4 docstring rules out: a faulted
-        trap may still be physically armed. The cost of this choice is a
-        pending command that keeps resending against a trap that only
-        ever reports FAULT -- bounded by the station-wide budget
-        (CRITICAL 3/4), not by this module.
+        trap may still be physically armed.
+
+        docs/pending.md, "A command the node refuses is retried forever":
+        `satisfied_by` is the wrong tool for a *refusal* anyway -- it asks
+        "does the trap's state now match what we asked for", never "did
+        the trap explicitly say no". `code` answers the second question,
+        via `commands.FAULT_CODE_REFUSES`: when it names the same kind as
+        `pending_command`, the node has said, in this project's one
+        firmware-assigned vocabulary for it, that this command will never
+        be satisfied -- so it is cancelled outright, not left to resend
+        until a budget or an operator notices. `code=None`, or any code
+        this mapping has no entry for, is the conservative case: nothing
+        is cancelled, and the command stays pending exactly as it did
+        before this fix -- messages.md itself does not number `FAULT.code`
+        at all, so a code this station cannot name is not evidence of
+        anything, in either direction.
         """
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.state = TrapState.FAULT
         trap.state_may_be_stale = False  # WARNING C: a live report is always the newest one
         trap.last_seen = at
+        if (
+            trap.pending_command is not None
+            and code is not None
+            and FAULT_CODE_REFUSES.get(code) is trap.pending_command.kind
+        ):
+            trap.pending_command = None
 
     def acknowledge(self, node_id: int, at: datetime) -> None:
         self._traps[node_id].capture = None
+
+    def cancel_command(self, node_id: int, at: datetime) -> None:
+        """docs/pending.md, "There is no way to cancel a pending command":
+        even with :meth:`fault`'s named-refusal cancellation above, a
+        command the node never answers at all -- not confirmed, not
+        refused -- has no way out short of this. Unconditional, unlike
+        :meth:`fault`'s check against `FAULT_CODE_REFUSES`: an operator may
+        cancel a command for any reason (a misconfigured target list, a
+        command issued by mistake), not only one the node has explicitly
+        refused. Same shape as :meth:`acknowledge` -- `at` is accepted for
+        symmetry with the other operator-command methods and because
+        `app.py`'s own durable event row already carries the timestamp;
+        the registry itself has nothing dated to store for a cancellation.
+        """
+        self._traps[node_id].pending_command = None
 
     def unacknowledged_captures(self, now: datetime) -> list[Trap]:
         return [t for t in self.traps() if t.capture is not None and not t.capture.acknowledged]

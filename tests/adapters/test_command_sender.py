@@ -295,6 +295,40 @@ def test_a_failed_write_does_not_advance_the_resend_backoff() -> None:
     assert _pending(registry, 7).attempts == 0
 
 
+# --- docs/pending.md, "A command the node refuses is retried forever" -----
+#
+# The bench measurement this fix answers: one `POST /arm` sent hours
+# earlier produced nine `FAULT` rows and was still being resent -- each
+# retry a frame the shared station-wide budget (CRITICAL 3) spent on a
+# command the node had already, explicitly, refused, starving `TIME_SYNC`
+# of the turns the round-robin scheduler (`adapters/workers.py`) would
+# otherwise have given it. Cancelling the command in `Registry.fault()`
+# is what stops it: `send_due_commands` only ever resends a trap's
+# *pending* command, so once it is `None` there is nothing left for this
+# function to find, spend a token on, or write to the gateway.
+
+
+def test_a_fault_cancelled_command_is_never_resent_and_spends_no_budget() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.command_arm(7, at=NOW)
+    registry.fault(7, at=NOW + timedelta(seconds=5), code=5)  # ARM_REQUIRES_PRESENCE
+    gateway = _SpyGateway()
+    budget = _TokenLedgerBudget(capacity=10)
+
+    sent_to = send_due_commands(
+        registry,
+        store=_FakeStore(),
+        gateway=gateway,
+        now=NOW + timedelta(minutes=10),
+        arm_duration_s=86_400,
+        budget=budget,
+    )
+
+    assert sent_to == []
+    assert gateway.written == []
+    assert budget.charged == []  # not one token spent -- the airtime the bench measured lost
+
+
 # --- 13.7/13.8: SET_TARGETS is sent for real, from stored content ----------
 
 

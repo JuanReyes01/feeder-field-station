@@ -164,6 +164,7 @@ function renderTrap(t) {
       <div class="actions">
         <button onclick="arm(${t.node_id})">Armar</button>
         <button onclick="disarm(${t.node_id})">Desarmar</button>
+        ${t.pending_command ? `<button onclick="cancelCommand(${t.node_id})">Cancelar comando pendiente</button>` : ""}
       </div>
       <details>
         <summary>Editar lista de objetivos</summary>
@@ -188,6 +189,7 @@ function describePending(t) {
 async function arm(id) { await fetch(`/api/traps/${id}/arm`, { method: "POST" }); refresh(); }
 async function disarm(id) { await fetch(`/api/traps/${id}/disarm`, { method: "POST" }); refresh(); }
 async function ack(id) { await fetch(`/api/traps/${id}/acknowledge`, { method: "POST" }); refresh(); }
+async function cancelCommand(id) { await fetch(`/api/traps/${id}/cancel`, { method: "POST" }); refresh(); }
 
 async function saveTargets(id) {
   const box = $(`targets-${id}`);
