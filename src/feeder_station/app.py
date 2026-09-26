@@ -12,7 +12,7 @@ import asyncio
 import json
 import re
 import threading
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,7 +25,7 @@ from pydantic import BaseModel, field_validator
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
 from feeder_station.adapters.serial_gateway import SerialGateway
-from feeder_station.adapters.store import Store
+from feeder_station.adapters.store import SpecimenRow, Store
 from feeder_station.adapters.workers import WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain import pacing
@@ -117,6 +117,25 @@ class TargetsRequest(BaseModel):
             if not _TAG_HEX_PATTERN.fullmatch(tag):
                 raise ValueError(f"tag must be {TAG_BYTES * 2} hex characters, got {tag!r}")
         return tags
+
+
+class SpecimenUpdateRequest(BaseModel):
+    """station/specimen-roster (docs/pending.md, "The station has one kind
+    of storage and needs two"): an edit to one roster row. Every field is
+    optional -- ``PATCH /api/specimens/{tag}`` reads only the keys the
+    request actually set (``.model_dump(exclude_unset=True)``, at the
+    route), so omitting a field leaves it untouched, and an operator can
+    submit ``{"species": "..."}`` alone without accidentally clearing
+    ``band_number`` or ``of_interest``.
+
+    ``species``/``band_number`` are the only reference fields pending.md
+    names beyond the flag -- "keep the set small and obvious; do not invent
+    a taxonomy."
+    """
+
+    species: str | None = None
+    band_number: str | None = None
+    of_interest: bool | None = None
 
 
 class Broadcaster:
@@ -220,6 +239,58 @@ def _record_operator_event(
         payload=None,
     )
     store.append(event, received_epoch=clock.now().timestamp(), clock_trust=clock.trust().value)
+
+
+def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
+    return {
+        "tag": row.tag.hex().upper(),
+        "species": row.species,
+        "band_number": row.band_number,
+        "of_interest": row.of_interest,
+        "times_seen": row.times_seen,
+        # station/live-reads-view precedent: an ISO timestamp, never a raw
+        # epoch, is what every other operator-facing time on this page uses.
+        "last_seen": (
+            datetime.fromtimestamp(row.last_seen_epoch, tz=UTC).isoformat()
+            if row.last_seen_epoch is not None
+            else None
+        ),
+    }
+
+
+def _push_targets_to_every_known_trap(
+    store: Store, registry: Registry, clock: Clock, *, tags: Sequence[bytes]
+) -> None:
+    """messages.md's open question 2, answered 2026-09-26: target lists are
+    shared by the whole network, not typed per trap -- but R3's per-trap
+    version reconciliation is untouched ("the list is one, the confirmation
+    stays per trap"). Every trap the registry currently knows about gets its
+    own version bump and its own pending command: the exact same
+    ``_record_operator_event`` + ``Registry.command_set_targets`` pair
+    ``PUT /api/traps/{node_id}/targets`` already uses for one trap at a
+    time, called once per known trap here instead of a second, parallel
+    delivery path -- the existing editor, version reconciliation and resend
+    (``adapters/command_sender.py``) apply to this exactly as they did
+    before the roster existed.
+
+    Must be called with ``registry_lock`` already held by the caller, the
+    same discipline every other route in this module applies before
+    touching ``app.state.registry`` (design.md section 7's concurrency
+    table).
+    """
+    tag_hexes = [tag.hex() for tag in tags]
+    for trap in registry.traps():
+        next_version = (trap.targets_version or 0) + 1
+        _record_operator_event(
+            store,
+            clock,
+            node_id=trap.node_id,
+            msg_type=OPERATOR_SET_TARGETS,
+            fields={"targets_version": next_version, "tags": tag_hexes},
+        )
+        registry.command_set_targets(
+            trap.node_id, targets_version=next_version, at=now(), tags=tags
+        )
 
 
 def _worker_health(thread: threading.Thread | None, status: WorkerStatus | None) -> dict[str, Any]:
@@ -560,6 +631,84 @@ def create_app(
             "pending_command": "set_targets",
             "desired_targets_version": next_version,
         }
+
+    @app.get("/api/specimens")
+    def specimens() -> dict[str, Any]:
+        """station/specimen-roster: what the operator's roster page lists.
+
+        An empty roster, never a 503, when this station has no store
+        configured -- the same "never enabled, never counts" honesty
+        ``/api/reads``'s own no-store shape already applies.
+        """
+        store = app.state.store
+        rows: list[SpecimenRow] = [] if store is None else store.specimens()
+        return {
+            "specimens": [_specimen_to_json(row) for row in rows],
+            "of_interest_count": sum(1 for row in rows if row.of_interest),
+            "of_interest_limit": _MAX_TARGET_TAGS,
+        }
+
+    @app.patch("/api/specimens/{tag_hex}")
+    def update_specimen(tag_hex: str, body: SpecimenUpdateRequest) -> dict[str, Any]:
+        """station/specimen-roster: mark a specimen wanted (or not), or
+        record its species/band number. Only an edit that actually touches
+        ``of_interest`` recomputes and re-pushes the shared target list
+        (:func:`_push_targets_to_every_known_trap`) -- a species/band-number
+        edit alone must never bump any trap's ``targets_version``.
+
+        A specimen is never created here -- pending.md: "the roster grows
+        from the data", read the other way round: nothing may be
+        pre-registered through this door either (404 for an unknown tag).
+        """
+        if app.state.store is None:
+            raise HTTPException(status_code=503, detail="no store configured for this station")
+        if not _TAG_HEX_PATTERN.fullmatch(tag_hex):
+            raise HTTPException(
+                status_code=422, detail=f"tag must be {TAG_BYTES * 2} hex characters, got {tag_hex!r}"
+            )
+        tag = bytes.fromhex(tag_hex)
+        updates = body.model_dump(exclude_unset=True)
+
+        with app.state.registry_lock:
+            rows = app.state.store.specimens()
+            existing = next((row for row in rows if row.tag == tag), None)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="unknown specimen")
+
+            # pending.md: "dissolves the 81-tag-per-trap ceiling into a
+            # selection over a roster" -- dissolves, not removes. One
+            # shared SET_TARGETS still cannot outgrow what the station can
+            # ever budget tokens for in one chunked send (`_MAX_TARGET_TAGS`,
+            # the same bound `TargetsRequest` already enforces per edit).
+            # Checked only when this edit would *add* a new tag to the
+            # wanted set -- turning one off, or editing species/band number,
+            # can never make the list longer.
+            if updates.get("of_interest") is True and not existing.of_interest:
+                already_wanted = sum(1 for row in rows if row.of_interest)
+                if already_wanted >= _MAX_TARGET_TAGS:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"{already_wanted} specimens are already of interest, the most "
+                            f"{_MAX_TARGET_TAGS} this station can ever budget tokens for in one "
+                            "chunked SET_TARGETS send -- unmark one before adding another"
+                        ),
+                    )
+
+            app.state.store.update_specimen(tag, updates)
+
+            if "of_interest" in updates:
+                _push_targets_to_every_known_trap(
+                    app.state.store,
+                    app.state.registry,
+                    app.state.clock,
+                    tags=app.state.store.wanted_tags(),
+                )
+
+            updated_row = next(row for row in app.state.store.specimens() if row.tag == tag)
+
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return _specimen_to_json(updated_row)
 
     @app.post("/api/export")
     def export(body: ExportRequest) -> dict[str, Any]:
