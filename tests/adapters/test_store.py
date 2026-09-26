@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from dataclasses import replace as dataclasses_replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -157,6 +158,180 @@ def test_repeat_within_the_window_is_deduplicated(tmp_path: Path) -> None:
     assert first.duplicate_of is None
     assert second.duplicate_of == first.seq
     assert len(store.events_since(node_id=1, after_seq=0)) == 1
+
+
+# --- Store.append_batch(): a READS batch is many rows sharing one msg_id ----
+#
+# messages.md's READS batches count reads (up to 17) inside one frame, so
+# they all share one wire msg_id (D5's own "the pair (node_id, msg_id)
+# identifies a message"). `Store.append()`'s dedup keys on exactly that
+# pair -- correct for one event per message, but a batch's second read
+# would then read as a duplicate of its own first read. `append_batch()`
+# exists so the dedup check runs once per frame while every read still
+# lands as its own row (domain/events.py::interpret_reads's own docstring
+# has the full argument).
+
+
+def _read_event(
+    *, node_id: int, msg_id: int, tag: bytes, node_epoch: int | None, payload: bytes = b""
+) -> StationEvent:
+    return StationEvent(
+        source="node",
+        node_id=node_id,
+        msg_type=payloads.READS,
+        msg_id=msg_id,
+        node_epoch=node_epoch,
+        tag=tag,
+        fields={},
+        payload=payload,
+    )
+
+
+TAG_B = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00])
+TAG_C = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77])
+
+
+def test_a_naive_per_event_loop_would_lose_sixteen_of_seventeen_reads(tmp_path: Path) -> None:
+    """The exact silent-loss failure `append_batch` exists to avoid,
+    demonstrated directly against the store's own existing dedup: routing
+    a batch of reads through `Store.append()` once per read, the way a
+    caller might naively try to reuse the single-event path, silently
+    drops every read after the first as a duplicate of it (same node_id,
+    same msg_id) -- no error, no log line, just 16 of 17 rows never
+    written. This is why `append_batch` (below) must exist as its own
+    method rather than a loop over `append`.
+    """
+    store = Store(tmp_path / "station.db")
+    reads = [
+        _read_event(node_id=1, msg_id=99, tag=bytes([i] * 7), node_epoch=1_735_000_000 + i)
+        for i in range(17)
+    ]
+
+    for event in reads:
+        store.append(event, received_epoch=1.0, clock_trust="rtc")
+
+    assert len(store.events_since(node_id=1, after_seq=0)) == 1
+
+
+def test_append_batch_stores_every_read_as_its_own_row(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    batch = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1_735_000_000),
+        _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=1_735_000_600),
+        _read_event(node_id=1, msg_id=5, tag=TAG_C, node_epoch=1_735_000_900),
+    ]
+
+    result = store.append_batch(batch, received_epoch=1.0, clock_trust="rtc")
+
+    assert result.duplicate_of is None
+    assert len(result.seqs) == 3
+    assert len(set(result.seqs)) == 3  # each row got its own store seq
+
+    stored = store.events_since(node_id=1, after_seq=0)
+    assert [e.tag for e in stored] == [TAG, TAG_B, TAG_C]
+    assert [e.node_epoch for e in stored] == [1_735_000_000, 1_735_000_600, 1_735_000_900]
+    assert all(e.msg_id == 5 for e in stored)
+
+
+def test_append_batch_shares_one_node_seq_across_the_batch_not_one_per_row(
+    tmp_path: Path,
+) -> None:
+    """The dedup window (`DEDUP_WINDOW`'s own comment) is sized in
+    messages, not rows: a 17-read batch must cost the per-node dedup
+    counter exactly 1 step, the same as any other single message, or the
+    "2x margin against msg_id wraparound aliasing" that comment describes
+    shrinks by up to 17x for no reason connected to how many distinct
+    messages actually arrived.
+    """
+    store = Store(tmp_path / "station.db")
+    batch = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
+        _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=2),
+        _read_event(node_id=1, msg_id=5, tag=TAG_C, node_epoch=3),
+    ]
+
+    result = store.append_batch(batch, received_epoch=1.0, clock_trust="rtc")
+    assert result.node_seq == 1
+
+    next_result = store.append(
+        _node_event(node_id=1, msg_id=6, msg_type=payloads.HEARTBEAT), received_epoch=2.0, clock_trust="rtc"
+    )
+    assert next_result.node_seq == 2  # advanced by exactly one message, not by three rows
+
+
+def test_append_batch_updates_node_cursor_to_the_batchs_last_row(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    batch = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
+        _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=2),
+    ]
+
+    result = store.append_batch(batch, received_epoch=1.0, clock_trust="rtc")
+
+    cursor = store.cursor(1)
+    assert cursor is not None
+    assert cursor.last_msg_id == 5
+    assert cursor.last_seq == result.seqs[-1]
+    assert cursor.last_node_seq == result.node_seq
+
+
+def test_a_redelivered_batch_is_recognized_as_one_duplicate_and_inserts_nothing(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "station.db")
+    batch = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
+        _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=2),
+        _read_event(node_id=1, msg_id=5, tag=TAG_C, node_epoch=3),
+    ]
+
+    first = store.append_batch(batch, received_epoch=1.0, clock_trust="rtc")
+    second = store.append_batch(batch, received_epoch=2.0, clock_trust="rtc")
+
+    assert first.duplicate_of is None
+    assert second.duplicate_of == first.seqs[0]
+    assert second.seqs == ()
+    assert len(store.events_since(node_id=1, after_seq=0)) == 3  # still just the first delivery
+
+
+def test_append_batch_is_all_or_nothing_when_one_row_fails_to_insert(tmp_path: Path) -> None:
+    """Kill: committing each row as it is inserted, instead of once at the
+    end of the transaction, would leave the two good rows durably stored
+    even though the batch as a whole failed -- "seventeen rows or none"
+    means a caller must never observe a half-stored batch.
+    """
+    store = Store(tmp_path / "station.db")
+    corrupt = _read_event(node_id=1, msg_id=5, tag=TAG_C, node_epoch=3)
+    corrupt = dataclasses_replace(corrupt, msg_type=None)  # violates event.msg_type NOT NULL
+    batch = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
+        _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=2),
+        corrupt,
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.append_batch(batch, received_epoch=1.0, clock_trust="rtc")
+
+    assert store.events_since(node_id=1, after_seq=0) == []
+    assert store.cursor(1) is None
+
+
+def test_append_batch_rejects_an_empty_sequence(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+
+    with pytest.raises(ValueError, match="at least one event"):
+        store.append_batch([], received_epoch=1.0, clock_trust="rtc")
+
+
+def test_append_batch_rejects_events_that_do_not_share_one_frame(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    mismatched = [
+        _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
+        _read_event(node_id=1, msg_id=6, tag=TAG_B, node_epoch=2),  # different msg_id
+    ]
+
+    with pytest.raises(ValueError, match="one \\(node_id, msg_id\\) frame"):
+        store.append_batch(mismatched, received_epoch=1.0, clock_trust="rtc")
 
 
 # --- 4.13/4.14: unacknowledged capture survives a restart --------------------

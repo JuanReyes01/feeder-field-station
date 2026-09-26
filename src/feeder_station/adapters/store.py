@@ -21,6 +21,7 @@ import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,14 @@ from feeder_station.domain.traps import Registry, TrapState
 # depend on the one thing S12 says the station may not trust: the clock.
 # W=32768 needs 65536 events to alias two msg_ids into the window at once
 # (the wire msg_id wraps at 2**16), a 2x margin.
+#
+# This margin is counted in messages, not rows: a READS batch's up to 17
+# reads share one msg_id and therefore one node_seq step
+# (Store.append_batch), never one node_seq per read. Advancing node_seq
+# once per row instead would let a single batch consume up to 17 steps of
+# window headroom for one message, shrinking the 2x margin above by up to
+# that same factor for no reason connected to how many distinct messages
+# actually arrived.
 DEDUP_WINDOW = 32768
 
 SCHEMA_VERSION = 1
@@ -143,6 +152,21 @@ class Appended:
     seq: int
     node_seq: int | None
     duplicate_of: int | None  # DD8: a duplicate is acknowledged, not ignored
+
+
+@dataclass(frozen=True)
+class AppendedBatch:
+    """:meth:`Store.append_batch`'s own return shape — see its docstring.
+
+    ``seqs`` is empty exactly when ``duplicate_of`` is set (the whole frame
+    was a repeat; nothing new was inserted); otherwise it holds one store
+    ``seq`` per row inserted, in the order given, all sharing the one
+    ``node_seq`` this frame's dedup check assigned.
+    """
+
+    seqs: tuple[int, ...]
+    node_seq: int | None
+    duplicate_of: int | None
 
 
 @dataclass(frozen=True)
@@ -430,6 +454,128 @@ class Store:
             raise
 
         return Appended(seq=seq, node_seq=node_seq, duplicate_of=None)
+
+    def append_batch(
+        self, events: Sequence[StationEvent], *, received_epoch: float, clock_trust: str
+    ) -> AppendedBatch:
+        """Persist every event in ``events`` as the many rows of one frame.
+
+        Generalises :meth:`append` for exactly the one case that method
+        cannot safely be reused for unmodified: a ``READS`` batch, where
+        ``count`` reads all arrive inside one frame and therefore all share
+        one wire ``msg_id`` (``domain/events.py::interpret_reads`` is the
+        one caller that produces such a sequence, one call per frame).
+
+        **Why this cannot be ``for event in events: self.append(event, ...)``.**
+        :meth:`append`'s own dedup (:meth:`_next_node_seq_and_dedup`) keys on
+        ``(node_id, msg_id)`` alone — correct when one event owns one
+        msg_id, but a batch's second read shares the *first* read's msg_id.
+        A naive per-event loop would insert read 1, advance
+        ``node_cursor``, and then see every remaining read as a repeat of
+        the message it just stored — 16 of 17 reads gone, silently, with no
+        error and no log line, because :meth:`append` (DD8) treats a
+        duplicate as a thing to acknowledge quietly, not to raise about.
+        This method exists specifically so that never happens: the dedup
+        check below runs exactly once per call, keyed on ``events[0]``'s
+        ``(node_id, msg_id)``, before any row is inserted.
+
+        **One ``node_seq`` for the whole batch, not one per row.**
+        ``node_seq`` is this store's own bounded-window dedup counter
+        (``DEDUP_WINDOW``'s own comment); every row this call inserts
+        carries the *same* ``node_seq`` — see that comment for why
+        advancing it once per row instead would shrink the window's margin
+        against ``msg_id`` wraparound aliasing.
+
+        **Atomicity: every row or none.** One ``BEGIN IMMEDIATE``
+        transaction covers the dedup check and every insert; a failure
+        partway through (a corrupt event, a constraint violation) rolls
+        back everything this call has written so far, the same
+        all-or-nothing guarantee :meth:`append` already gives a single row.
+        A caller must never observe a batch half-stored.
+
+        ``node_cursor`` is upserted once, exactly as :meth:`append` does for
+        a single event: ``last_msg_id``/``last_node_seq`` are this frame's
+        shared ``msg_id``/``node_seq``; ``last_seq`` is the store ``seq`` of
+        the *last* row this call inserted, so a later cursor read still
+        names a real, existing row.
+
+        Raises ``ValueError`` for anything that is not one well-formed
+        frame's worth of node-sourced events sharing one ``(node_id,
+        msg_id)`` — the same defensive discipline :meth:`append` already
+        applies to a missing ``msg_id``.
+        """
+        if not events:
+            raise ValueError("append_batch requires at least one event")
+
+        first = events[0]
+        if first.source != "node" or first.msg_id is None:
+            raise ValueError("append_batch is for node-sourced, msg_id-bearing events only")
+        for event in events:
+            if (event.source, event.node_id, event.msg_id) != (
+                first.source,
+                first.node_id,
+                first.msg_id,
+            ):
+                raise ValueError(
+                    "append_batch requires every event to share one (node_id, msg_id) "
+                    "frame -- see this method's own docstring for why the dedup check "
+                    "runs once per frame, not once per event"
+                )
+
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            node_seq, duplicate_of = self._next_node_seq_and_dedup(conn, first)
+            if duplicate_of is not None:
+                conn.execute("COMMIT")
+                return AppendedBatch(seqs=(), node_seq=None, duplicate_of=duplicate_of)
+
+            seqs: list[int] = []
+            for event in events:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO event (
+                        node_seq, source, node_id, msg_type, msg_id,
+                        received_epoch, clock_trust, node_epoch, tag, fields, payload
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node_seq,
+                        event.source,
+                        event.node_id,
+                        event.msg_type,
+                        event.msg_id,
+                        received_epoch,
+                        clock_trust,
+                        event.node_epoch,
+                        event.tag,
+                        json.dumps(dict(event.fields)),
+                        event.payload,
+                    ),
+                )
+                seq = cursor.lastrowid
+                assert seq is not None
+                seqs.append(seq)
+
+            assert node_seq is not None
+            conn.execute(
+                """
+                INSERT INTO node_cursor (node_id, last_msg_id, last_seq, last_node_seq)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    last_msg_id   = excluded.last_msg_id,
+                    last_seq      = excluded.last_seq,
+                    last_node_seq = excluded.last_node_seq
+                """,
+                (first.node_id, first.msg_id, seqs[-1], node_seq),
+            )
+
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+        return AppendedBatch(seqs=tuple(seqs), node_seq=node_seq, duplicate_of=None)
 
     def _next_node_seq_and_dedup(
         self, conn: sqlite3.Connection, event: StationEvent
