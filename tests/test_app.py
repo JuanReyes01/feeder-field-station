@@ -38,7 +38,6 @@ from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import (
-    OPERATOR_ARM,
     OPERATOR_CANCEL_COMMAND,
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
@@ -120,25 +119,36 @@ def test_a_capture_is_visible_to_a_browser_that_arrives_later() -> None:
     assert c.get("/api/traps").json()[0]["capture"] is None
 
 
-def test_arm_and_disarm_routes_set_pending_command_not_reported_state() -> None:
-    """S1/S4: issuing ARM or DISARM over HTTP must only ever set a pending
-    command in the registry -- the trap's reported `state` in `/api/traps`
-    must not move until a HEARTBEAT says so (slice 8, DD15)."""
+def test_disarm_route_sets_pending_command_not_reported_state() -> None:
+    """S1/S4: issuing DISARM over HTTP must only ever set a pending command
+    in the registry -- the trap's reported `state` in `/api/traps` must
+    not move until a HEARTBEAT says so (slice 8, DD15).
+
+    ARM has no HTTP route any more (docs/pending.md, "Remove the remote
+    arm affordance"): arming means a person walking to the trap and
+    placing the cord over the mechanism, which no downlink can do -- see
+    `test_arm_route_no_longer_exists` below.
+    """
     c, registry = client()
     from feeder_station.app import now
-
-    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
-
-    arm_response = c.post("/api/traps/7/arm")
-    assert arm_response.status_code == 200
-    assert c.get("/api/traps").json()[0]["state"] == "idle"
-    assert c.get("/api/traps").json()[0]["pending_command"] == "arm"
 
     registry.heartbeat(node_id=7, state=TrapState.ARMED, at=now())
     disarm_response = c.post("/api/traps/7/disarm")
     assert disarm_response.status_code == 200
     assert c.get("/api/traps").json()[0]["state"] == "armed"
     assert c.get("/api/traps").json()[0]["pending_command"] == "disarm"
+
+
+def test_arm_route_no_longer_exists() -> None:
+    """docs/pending.md, "Remove the remote arm affordance": arming this
+    trap means a person walking to it and placing the cord over the
+    mechanism -- no downlink can do that (settled by the hardware, this
+    project's answer to `docs/protocol/messages.md`'s open question 3).
+    Leaving the route reachable after removing the button would let the
+    next reader of the API believe the capability still exists.
+    """
+    c, _ = client()
+    assert c.post("/api/traps/7/arm").status_code == 404
 
 
 def test_cancel_command_route_clears_a_pending_command() -> None:
@@ -288,17 +298,17 @@ def test_the_page_still_loads_with_no_traps() -> None:
 # --- 10.3/10.4: every operator route answers, targets included -------------
 
 
-def test_arm_disarm_edit_targets_acknowledge_cancel_routes_all_return_2xx() -> None:
+def test_disarm_edit_targets_acknowledge_cancel_routes_all_return_2xx() -> None:
     """Route-level only -- touch-DOM interaction is not pytest's domain (see
     this module's own docstring). Proves every action S13 names reaches the
-    registry through a 2xx response.
+    registry through a 2xx response. ARM is not among them any more (see
+    `test_arm_route_no_longer_exists`).
     """
     c, registry = client()
     from feeder_station.app import now
 
     registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
 
-    assert c.post("/api/traps/7/arm").status_code // 100 == 2
     assert c.post("/api/traps/7/disarm").status_code // 100 == 2
     assert c.put("/api/traps/7/targets", json={"tags": ["0384199C87EC06"]}).status_code // 100 == 2
     assert c.post("/api/traps/7/cancel").status_code // 100 == 2
@@ -484,6 +494,27 @@ def test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant() -
 
 
 # --- docs/pending.md, "Remove the remote arm affordance" -------------------
+
+
+def test_the_armar_button_is_removed_from_the_static_page() -> None:
+    """Arming this trap means a person walking to it and placing the cord
+    over the mechanism -- no downlink can do that (settled by the
+    hardware, not a preference). A button calling a route that no longer
+    exists (`test_arm_route_no_longer_exists`, tests/test_app.py) would
+    show the operator an affordance they can no longer reach.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert 'onclick="arm(' not in html
+    assert ">Armar<" not in html
+
+
+def test_the_desarmar_button_is_still_present() -> None:
+    """Standing a trap down remotely stays possible -- the release drops
+    the servo without recording a capture -- so only Armar goes.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert 'onclick="disarm(' in html
+    assert ">Desarmar<" in html
 
 
 def test_the_cancel_button_is_rendered_only_when_a_command_is_pending() -> None:
@@ -880,18 +911,14 @@ def test_acknowledging_a_capture_survives_a_restart_through_the_route(tmp_path: 
 # --- 13.3/13.4: DISARM is recorded, not only applied in memory -------------
 
 
-def test_arm_and_disarm_are_recorded_as_operator_events(tmp_path: Path) -> None:
+def test_disarm_is_recorded_as_an_operator_event(tmp_path: Path) -> None:
     store = Store(tmp_path / "station.db")
     c = TestClient(create_app(store=store))
 
-    assert c.post("/api/traps/7/arm").status_code == 200
     assert c.post("/api/traps/7/disarm").status_code == 200
 
-    armed = store.latest(7, OPERATOR_ARM)
     disarmed = store.latest(7, OPERATOR_DISARM)
-    assert armed is not None
     assert disarmed is not None
-    assert armed.source == "operator"
     assert disarmed.source == "operator"
 
 
@@ -918,7 +945,6 @@ def test_operator_routes_still_work_with_no_store_configured() -> None:
     already reports with a 503 rather than a crash.
     """
     c, _ = client()
-    assert c.post("/api/traps/7/arm").status_code == 200
     assert c.post("/api/traps/7/disarm").status_code == 200
     assert c.post("/api/traps/7/acknowledge").status_code == 200
     assert c.post("/api/traps/7/cancel").status_code == 200

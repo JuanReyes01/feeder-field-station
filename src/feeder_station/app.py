@@ -30,7 +30,6 @@ from feeder_station.adapters.workers import WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain import pacing
 from feeder_station.domain.events import (
-    OPERATOR_ARM,
     OPERATOR_CANCEL_COMMAND,
     OPERATOR_CAPTURE_ACKNOWLEDGED,
     OPERATOR_DISARM,
@@ -414,15 +413,26 @@ def create_app(
             rows: list[dict[str, Any]] = app.state.registry.view(now=now())
         return rows
 
-    @app.post("/api/traps/{node_id}/arm")
-    def arm(node_id: int) -> dict[str, Any]:
-        with app.state.registry_lock:
-            _record_operator_event(
-                app.state.store, app.state.clock, node_id=node_id, msg_type=OPERATOR_ARM
-            )
-            app.state.registry.command_arm(node_id, at=now())
-        app.state.broadcaster.publish({"type": "traps_changed"})
-        return {"node_id": node_id, "pending_command": "arm"}
+    # docs/pending.md, "Remove the remote arm affordance": there used to be
+    # a `POST /api/traps/{node_id}/arm` here. Arming this trap means a
+    # person walking to it and placing the cord over the mechanism -- the
+    # servo only ever winds what a human has already set, so no downlink
+    # can do it. This is settled by the hardware, not a preference (it is
+    # also this project's answer to `docs/protocol/messages.md`'s open
+    # question 3, "can a fired trap be re-armed remotely" -- no, for the
+    # reader-and-release pair as built). The node already refuses an `ARM`
+    # downlink with a `FAULT` (`ARM_REQUIRES_PRESENCE`); removing the route
+    # rather than leaving it reachable-but-futile means the next reader of
+    # this file does not have to discover that the hard way.
+    #
+    # `Registry.command_arm`/`CommandKind.ARM` stay, unlike this route:
+    # `adapters/store.py`'s rehydration (`_rehydrate_desired_command`)
+    # still has to make sense of an `OPERATOR_ARM` row already durable in
+    # an existing station's database from before this change -- removing
+    # the model as well as the route would make a station that boots
+    # against an old `station.db` crash or silently drop that history
+    # instead of correctly showing it pending (and, per the earlier fix,
+    # promptly fault-cancelled on the node's next refusal).
 
     @app.post("/api/traps/{node_id}/disarm")
     def disarm(node_id: int) -> dict[str, Any]:

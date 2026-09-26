@@ -559,7 +559,15 @@ def _apply_report_to_registry(
             node_id=_BEHAVIOUR_4_NODE, tag=tag, state=trap_state_from_wire(state_after), at=at
         )
     else:  # FAULT
-        registry.fault(_BEHAVIOUR_4_NODE, at=at)
+        # `_BEHAVIOUR_4_REPORT_SHAPES`'s own "fault" case fixes `code: 1`
+        # (SERVO_STALLED) -- a generic fault, not one that names either
+        # `command` parametrized above as refused
+        # (`commands.FAULT_CODE_REFUSES` only maps 5,
+        # ARM_REQUIRES_PRESENCE, to ARM), so this case is unaffected by
+        # `fault()`'s new named-refusal cancellation and keeps proving the
+        # *other* rule: a FAULT alone never satisfies a pending command.
+        code = fields.get("code")
+        registry.fault(_BEHAVIOUR_4_NODE, at=at, code=code if isinstance(code, int) else None)
 
 
 def _behaviour_4_expected_pending(
@@ -1163,11 +1171,6 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
 # invisible to every rehydration walk. ---------------------------------------
 
 
-def _issue_arm(c: TestClient, node_id: int) -> None:
-    response = c.post(f"/api/traps/{node_id}/arm")
-    assert response.status_code == 200
-
-
 def _issue_disarm(c: TestClient, node_id: int) -> None:
     response = c.post(f"/api/traps/{node_id}/disarm")
     assert response.status_code == 200
@@ -1197,10 +1200,17 @@ def _issue_set_targets_then_disarm(c: TestClient, node_id: int) -> None:
 # -- read from the code, not assumed -- so a roster narrowed to a single one of
 # them cannot pass this parametrize table, only the un-parametrized single-case
 # version the report measured.
+#
+# ARM is not parametrized here any more: `POST /api/traps/{node_id}/arm` no
+# longer exists (docs/pending.md, "Remove the remote arm affordance"), so
+# an operator cannot produce this case through the interface at all.
+# `Registry.command_arm`/`OPERATOR_ARM` rehydration is still real, for a
+# station booting against an existing database that predates this change --
+# proven directly, without the removed route, by
+# `test_a_legacy_arm_row_still_rehydrates_to_a_pending_command` below.
 @pytest.mark.parametrize(
     ("issue_command", "expected_pending"),
     [
-        pytest.param(_issue_arm, "arm", id="arm"),
         pytest.param(_issue_disarm, "disarm", id="disarm"),
         pytest.param(_issue_set_targets, "set_targets", id="set_targets"),
         # CRITICAL 1 (verify-report-batch2c.md): the previous three cases only
@@ -1273,6 +1283,46 @@ def test_a_command_to_a_never_heard_from_node_survives_a_restart(
     assert boot2_rows[never_heard_node]["pending_command"] == expected_pending
     # never reported -- not a fabricated "idle" (WARNING J's own discipline)
     assert boot2_rows[never_heard_node]["state"] is None
+
+
+def test_a_legacy_arm_row_still_rehydrates_to_a_pending_command(tmp_path: Path) -> None:
+    """docs/pending.md, "Remove the remote arm affordance": `POST
+    /api/traps/{node_id}/arm` is gone, but `Registry.command_arm` and
+    `OPERATOR_ARM` are deliberately kept -- `adapters/store.py`'s
+    rehydration (`_rehydrate_desired_command`) still has to make sense of
+    an `OPERATOR_ARM` row already durable in a station's database from
+    before this change. Seeded directly against the store, the way that
+    row would actually exist -- never through the removed HTTP route --
+    this proves the dependency is real, not merely asserted in a comment:
+    a station booting against an old `station.db` still shows the node as
+    pending `arm`, ready to be fault-cancelled by the node's next refusal
+    (`Registry.fault`), rather than crashing or silently losing the row.
+    """
+    db_path = tmp_path / "station.db"
+    never_heard_node = 99
+
+    seed = Store(db_path)
+    seed.append(
+        StationEvent(
+            source="operator",
+            node_id=never_heard_node,
+            msg_type=OPERATOR_ARM,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=datetime(2026, 1, 1, tzinfo=UTC).timestamp(),
+        clock_trust="unset",
+    )
+    seed.close()
+
+    app, _args = build_app(["--db-path", str(db_path), "--no-gateway"])
+    with TestClient(app) as c:
+        rows = {row["node_id"]: row for row in c.get("/api/traps").json()}
+
+    assert rows[never_heard_node]["pending_command"] == "arm"
 
 
 def test_an_acknowledge_only_node_is_counted_in_the_roster_and_rehydrates_to_nothing(
@@ -1434,12 +1484,17 @@ def test_station_total_frame_rate_holds_the_channel_budget_off_the_real_wire(
     Real measured occupancy at the time of that report: 11.68%, against a
     ~1% budget.
 
-    Ten traps, ARMed through the real HTTP route and never confirming
-    (nothing ever reports back a HEARTBEAT with `state=armed`) -- the
-    report's own worst case -- driven through a real pty, a real
-    `SerialGateway`, and the real worker threads `with TestClient(app)`
-    starts via the ASGI lifespan (the only way the real boot path runs at
-    all, per this change's own CRITICAL 1 finding).
+    Ten traps, DISARMed through the real HTTP route and never confirming
+    (nothing ever reports back a HEARTBEAT with `state` other than
+    `armed`) -- the report's own worst case -- driven through a real pty,
+    a real `SerialGateway`, and the real worker threads `with
+    TestClient(app)` starts via the ASGI lifespan (the only way the real
+    boot path runs at all, per this change's own CRITICAL 1 finding).
+    DISARM stands in for the report's own original example, ARM: `POST
+    /api/traps/{node_id}/arm` no longer exists (docs/pending.md, "Remove
+    the remote arm affordance" -- arming needs a person at the trap, no
+    downlink can do it), and DISARM is the same single-frame,
+    never-confirms-without-a-heartbeat shape this measurement needs.
 
     `--channel-budget-frames-per-s` is set here, not left at the real
     default (~0.027/s): the *mechanism* under test -- the total across all
@@ -1478,7 +1533,7 @@ def test_station_total_frame_rate_holds_the_channel_budget_off_the_real_wire(
     try:
         with TestClient(app) as c:
             for node_id in range(1, 11):
-                assert c.post(f"/api/traps/{node_id}/arm").status_code == 200
+                assert c.post(f"/api/traps/{node_id}/disarm").status_code == 200
 
             # The backoff burst allowed to settle, then a steady-state
             # window measured off the wire -- verify-report-2.md's own
@@ -1520,7 +1575,7 @@ def test_station_total_frame_rate_holds_the_channel_budget_off_the_real_wire(
     # if only one had, this would prove nothing beyond what the test it
     # supersedes already claimed (falsely) to prove.
     observed_types = {f.msg_type for f in decoded}
-    assert payloads.ARM in observed_types
+    assert payloads.DISARM in observed_types
     assert payloads.GET_BACKLOG in observed_types
 
 
