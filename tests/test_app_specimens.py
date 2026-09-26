@@ -333,3 +333,28 @@ def test_saving_a_specimen_sends_of_interest_as_a_boolean_not_the_checkbox_eleme
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
     assert re.search(r"\$\(`interest-\$\{tagHex\}`\)\.checked", html)
+
+
+def test_saving_a_specimen_only_sends_of_interest_when_it_actually_changed() -> None:
+    """A species/band-only save must never smuggle `of_interest` into the
+    PATCH body just because the checkbox is still rendered with its current
+    value -- the API route only skips the broadcast when the key is absent
+    (`test_patch_specimen_updates_species_and_band_number_without_touching_targets`),
+    so the page must actually omit it for an edit that never touched the
+    checkbox, not merely resend the same value.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert re.search(r"originalOfInterest\[s\.tag\]\s*=\s*s\.of_interest", html), (
+        "renderSpecimen must record each specimen's own last-known of_interest "
+        "so saveSpecimen can tell an unchanged checkbox from an edited one"
+    )
+    save_fn = re.search(r"async function saveSpecimen\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
+    assert save_fn, "saveSpecimen must exist"
+    body = save_fn.group(1)
+    assert re.search(r"ofInterest\s*!==\s*originalOfInterest\[tagHex\]", body), (
+        "saveSpecimen must compare the checkbox against the recorded original "
+        "before deciding whether of_interest belongs in the request body"
+    )
+    assert not re.search(r"of_interest:\s*ofInterest\s*,?\s*\}\)", body), (
+        "of_interest must never be an unconditional key of the PATCH body"
+    )

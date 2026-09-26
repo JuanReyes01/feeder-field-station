@@ -387,7 +387,19 @@ function renderRoster(roster) {
   $("specimens").innerHTML = counter + body;
 }
 
+// The `of_interest` this specimen last reported from the server, keyed by
+// tag -- `saveSpecimen` compares the checkbox against this before deciding
+// whether `of_interest` belongs in the PATCH body at all. Without this, a
+// species/band-only save would resend the checkbox's current value every
+// time regardless of whether it actually changed, and the route treats any
+// *presence* of the key as "recompute and broadcast" (app.py:
+// `if "of_interest" in updates`) -- so an untouched checkbox would still
+// re-push SET_TARGETS to every trap for an edit that was never about
+// targets at all.
+const originalOfInterest = {};
+
 function renderSpecimen(s) {
+  originalOfInterest[s.tag] = s.of_interest;
   const lastSeen = s.last_seen
     ? formatRelative(epochOf(s.last_seen), Date.now() / 1000)
     : "nunca";
@@ -416,14 +428,17 @@ async function saveSpecimen(tagHex) {
   const species = $(`species-${tagHex}`).value.trim();
   const bandNumber = $(`band-${tagHex}`).value.trim();
   const ofInterest = $(`interest-${tagHex}`).checked;
+  const body = { species: species || null, band_number: bandNumber || null };
+  // Only a checkbox the operator actually touched belongs in this request --
+  // see `originalOfInterest`'s own comment for why including it unconditionally
+  // would re-broadcast SET_TARGETS on every species/band-only save.
+  if (ofInterest !== originalOfInterest[tagHex]) {
+    body.of_interest = ofInterest;
+  }
   const response = await fetch(`/api/specimens/${tagHex}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      species: species || null,
-      band_number: bandNumber || null,
-      of_interest: ofInterest,
-    }),
+    body: JSON.stringify(body),
   });
   if (response.ok) {
     msg.innerHTML = '<p class="field-ok">Guardado. Esperando confirmación de las trampas.</p>';
