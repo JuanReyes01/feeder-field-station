@@ -254,7 +254,9 @@ def test_append_batch_shares_one_node_seq_across_the_batch_not_one_per_row(
     assert result.node_seq == 1
 
     next_result = store.append(
-        _node_event(node_id=1, msg_id=6, msg_type=payloads.HEARTBEAT), received_epoch=2.0, clock_trust="rtc"
+        _node_event(node_id=1, msg_id=6, msg_type=payloads.HEARTBEAT),
+        received_epoch=2.0,
+        clock_trust="rtc",
     )
     assert next_result.node_seq == 2  # advanced by exactly one message, not by three rows
 
@@ -302,7 +304,7 @@ def test_append_batch_is_all_or_nothing_when_one_row_fails_to_insert(tmp_path: P
     """
     store = Store(tmp_path / "station.db")
     corrupt = _read_event(node_id=1, msg_id=5, tag=TAG_C, node_epoch=3)
-    corrupt = dataclasses_replace(corrupt, msg_type=None)  # violates event.msg_type NOT NULL
+    corrupt = dataclasses_replace(corrupt, msg_type=None)  # type: ignore[arg-type]  # deliberately corrupt: violates event.msg_type NOT NULL
     batch = [
         _read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1),
         _read_event(node_id=1, msg_id=5, tag=TAG_B, node_epoch=2),

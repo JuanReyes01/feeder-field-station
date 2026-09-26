@@ -23,20 +23,25 @@ page load (S3) — neither is retried from here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from feeder_station.adapters.store import trap_state_from_wire
 from feeder_station.domain import frames, payloads
-from feeder_station.domain.events import StationEvent, UninterpretableFrame, interpret
+from feeder_station.domain.events import (
+    StationEvent,
+    UninterpretableFrame,
+    interpret,
+    interpret_reads,
+)
 from feeder_station.domain.frames import FLAG_ACK_REQUIRED, Frame, FrameError
 from feeder_station.domain.payloads import PayloadError
 from feeder_station.domain.traps import Registry
 
 
 class EventStore(Protocol):
-    """The one call this module needs from ``adapters/store.py::Store``.
+    """The two calls this module needs from ``adapters/store.py::Store``.
 
     A narrow Protocol rather than the concrete class, so a test can prove
     the S9 ordering with a plain spy that never touches SQLite — DD16's own
@@ -44,6 +49,10 @@ class EventStore(Protocol):
     """
 
     def append(self, event: StationEvent, *, received_epoch: float, clock_trust: str) -> object: ...
+
+    def append_batch(
+        self, events: Sequence[StationEvent], *, received_epoch: float, clock_trust: str
+    ) -> object: ...
 
 
 class AckPort(Protocol):
@@ -87,7 +96,16 @@ def ingest_frame(
     """
     try:
         frame = frames.decode(raw_frame)
-        event = interpret(frame)
+        # READS (0x06) is the one uplink message that is not one event per
+        # frame: interpret_reads() returns one StationEvent per read, all
+        # sharing this frame's own node_id/msg_id (domain/events.py's own
+        # docstring has the full argument for why this is a separate
+        # function rather than a change to interpret()'s return type).
+        # Every other message type keeps interpret()'s existing single-event
+        # path completely untouched.
+        events: tuple[StationEvent, ...] = (
+            interpret_reads(frame) if frame.msg_type == payloads.READS else (interpret(frame),)
+        )
     except (FrameError, PayloadError, UninterpretableFrame) as exc:
         # Steps 1-3 failure: nothing was acknowledged, so S9 is intact by
         # construction. The node already assumes an unreliable link and
@@ -105,14 +123,23 @@ def ingest_frame(
     # this node answer" question (adapters/workers.py) needs a fact only
     # the gateway thread can honestly supply — it is the only place a
     # frame ever really arrives. Best-effort, like the registry update and
-    # SSE publish below: recording it is never S9-critical.
-    record_arrival(event.node_id, received_epoch)
+    # SSE publish below: recording it is never S9-critical. Every event in
+    # `events` names the same node (one frame), so the first is enough.
+    record_arrival(events[0].node_id, received_epoch)
 
     # Steps 4-5: write + fsync. See the module docstring for why nothing
-    # catches an exception from this call.
-    store.append(event, received_epoch=received_epoch, clock_trust=clock_trust)
+    # catches an exception from this call. A READS batch's N reads share
+    # one wire msg_id and must be deduped as the one message they are, not
+    # once per read -- store.append_batch() runs that check exactly once
+    # per call; see its own docstring for what a per-event append() loop
+    # here would silently do to 16 of 17 reads.
+    if frame.msg_type == payloads.READS:
+        store.append_batch(events, received_epoch=received_epoch, clock_trust=clock_trust)
+    else:
+        store.append(events[0], received_epoch=received_epoch, clock_trust=clock_trust)
 
-    # Steps 6-7: ACK on the radio, only for frames that asked for one.
+    # Steps 6-7: ACK on the radio, only for frames that asked for one. One
+    # frame, one ACK, regardless of how many events it decoded to.
     if frame.flags & FLAG_ACK_REQUIRED:
         ack_frame = Frame(
             msg_type=payloads.ACK,
@@ -122,11 +149,18 @@ def ingest_frame(
         ack_port.write_frame(frames.encode(ack_frame))
 
     # Step 8: registry update. Best-effort — see the module docstring.
+    # `_apply_to_registry` already no-ops for any msg_type it does not
+    # recognise (READS carries no trap state), so looping it costs nothing
+    # extra for the common single-event case and stays correct for a batch
+    # without a special case here.
     at = datetime.fromtimestamp(received_epoch, tz=UTC)
-    _apply_to_registry(registry, event, at)
+    for event in events:
+        _apply_to_registry(registry, event, at)
 
-    # Step 9: SSE publish. Best-effort — see the module docstring.
-    publish({"type": "traps_changed", "node_id": event.node_id})
+    # Step 9: SSE publish. Best-effort — see the module docstring. Once per
+    # frame, not once per event: a 17-read batch is one thing that changed,
+    # not seventeen identical notifications.
+    publish({"type": "traps_changed", "node_id": events[0].node_id})
 
 
 def _apply_to_registry(registry: Registry, event: StationEvent, at: datetime) -> None:

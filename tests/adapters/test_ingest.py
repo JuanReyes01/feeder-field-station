@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from feeder_station.adapters.ingest import ingest_frame
+from feeder_station.adapters.store import Store
 from feeder_station.domain import payloads
 from feeder_station.domain.frames import FLAG_ACK_REQUIRED, Frame, encode
 from feeder_station.domain.traps import Registry, TrapState
@@ -29,13 +31,25 @@ class _Appended:
     duplicate_of = None
 
 
+class _AppendedBatch:
+    seqs = (1,)
+    node_seq = 1
+    duplicate_of = None
+
+
 class _StubStore:
     def append(self, event, *, received_epoch, clock_trust):
         return _Appended()
 
+    def append_batch(self, events, *, received_epoch, clock_trust):
+        return _AppendedBatch()
+
 
 class _RaisingStore:
     def append(self, event, *, received_epoch, clock_trust):
+        raise RuntimeError("disk full")
+
+    def append_batch(self, events, *, received_epoch, clock_trust):
         raise RuntimeError("disk full")
 
 
@@ -55,6 +69,10 @@ class _OrderedStore:
     def append(self, event, *, received_epoch, clock_trust):
         self._calls.append("store.append")
         return _Appended()
+
+    def append_batch(self, events, *, received_epoch, clock_trust):
+        self._calls.append("store.append_batch")
+        return _AppendedBatch()
 
 
 class _OrderedAckPort:
@@ -117,6 +135,27 @@ def _fault_frame(node_id: int = 5, msg_id: int = 2) -> bytes:
             payload=payload,
         )
     )
+
+
+def _reads_frame(
+    *,
+    node_id: int = 7,
+    msg_id: int = 50,
+    clock_trusted: bool = True,
+    reads: list[tuple[bytes, int]],
+    ack_required: bool = False,
+) -> bytes:
+    body = bytes([len(reads), 1 if clock_trusted else 0])
+    for tag, epoch in reads:
+        body += tag + epoch.to_bytes(4, "little")
+    flags = FLAG_ACK_REQUIRED if ack_required else 0
+    return encode(
+        Frame(msg_type=payloads.READS, node_id=node_id, msg_id=msg_id, flags=flags, payload=body)
+    )
+
+
+def _seventeen_reads() -> list[tuple[bytes, int]]:
+    return [(bytes([i] * 7), 1_735_000_000 + i) for i in range(17)]
 
 
 # --- 6.3/6.4: no ACK may leave the station for an event that is not committed
@@ -357,3 +396,144 @@ def test_a_payload_error_drop_is_also_logged_at_warning_with_the_exception(
     # PayloadError's own message, not dropped -- "HEARTBEAT payload of 5 bytes, expected exactly 16"
     assert "HEARTBEAT" in record.getMessage()
     assert "5 bytes" in record.getMessage()
+
+
+# --- READS (0x06): a batch is N observations sharing one msg_id ------------
+
+
+class _RoutingSpyStore:
+    def __init__(self) -> None:
+        self.append_calls: list[object] = []
+        self.append_batch_calls: list[list[object]] = []
+
+    def append(self, event, *, received_epoch, clock_trust):
+        self.append_calls.append(event)
+        return _Appended()
+
+    def append_batch(self, events, *, received_epoch, clock_trust):
+        self.append_batch_calls.append(list(events))
+        return _AppendedBatch()
+
+
+def test_a_reads_frame_is_routed_through_append_batch_not_append() -> None:
+    """The routing decision itself: `ingest_frame` must recognise
+    `msg_type == payloads.READS` and hand the whole batch to
+    `store.append_batch()` in one call, never loop `store.append()` once
+    per read -- see `Store.append_batch`'s own docstring for what that loop
+    would silently do to 16 of these 17 reads.
+    """
+    store = _RoutingSpyStore()
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _reads_frame(reads=_seventeen_reads()),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert store.append_calls == []
+    assert len(store.append_batch_calls) == 1
+    assert len(store.append_batch_calls[0]) == 17
+
+
+def test_ingest_frame_stores_every_read_in_a_reads_batch_not_just_one(tmp_path: Path) -> None:
+    """The full wire-to-store regression guard, against a real `Store`: one
+    raw READS frame carrying 17 reads that all share one msg_id must land
+    as 17 rows, not 1 -- the exact silent-loss shape a per-event dedup
+    would produce (proven directly against `Store.append` in
+    `tests/adapters/test_store.py::
+    test_a_naive_per_event_loop_would_lose_sixteen_of_seventeen_reads`).
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _reads_frame(node_id=7, msg_id=50, reads=_seventeen_reads()),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert len(store.events_since(node_id=7, after_seq=0)) == 17
+
+
+def test_a_redelivered_reads_frame_inserts_nothing_new(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    raw = _reads_frame(node_id=7, msg_id=50, reads=_seventeen_reads())
+
+    for _ in range(2):
+        ingest_frame(
+            raw,
+            store=store,
+            ack_port=_SpyAckPort(),
+            registry=registry,
+            publish=lambda event: None,
+            received_epoch=RECEIVED_EPOCH,
+            clock_trust="rtc",
+        )
+
+    assert len(store.events_since(node_id=7, after_seq=0)) == 17
+
+
+def test_a_reads_frame_does_not_touch_the_registry() -> None:
+    """READS carries no trap state -- `_apply_to_registry` already no-ops
+    for a msg_type it does not recognise; this proves that holds for a
+    multi-event batch too, not only for the single-event types it was
+    written for.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _reads_frame(reads=_seventeen_reads()),
+        store=_StubStore(),
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    with pytest.raises(KeyError):
+        registry.trap(7)
+
+
+def test_a_reads_frame_acks_once_not_once_per_read() -> None:
+    ack_port = _SpyAckPort()
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _reads_frame(reads=_seventeen_reads(), ack_required=True),
+        store=_StubStore(),
+        ack_port=ack_port,
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert len(ack_port.written) == 1
+
+
+def test_a_reads_frame_publishes_once_not_once_per_read() -> None:
+    published: list[dict[str, object]] = []
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _reads_frame(reads=_seventeen_reads()),
+        store=_StubStore(),
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=published.append,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert len(published) == 1
