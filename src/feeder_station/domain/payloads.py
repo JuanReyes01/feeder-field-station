@@ -29,6 +29,7 @@ HEARTBEAT = 0x02
 VISIT = 0x03
 CAPTURED = 0x04
 FAULT = 0x05
+READS = 0x06
 ACK = 0x7F
 
 # Downlink message types (docs/protocol/messages.md, "Downlink, station to node").
@@ -203,6 +204,73 @@ def decode_fault(payload: bytes) -> Fault:
     # already bounds the whole payload.
     _require_min_len(payload, 1, "FAULT")
     return Fault(code=payload[0], detail=bytes(payload[1:]))
+
+
+_READS_HEADER_BYTES = 2  # count(1) + clock_trusted(1)
+_READS_ENTRY_BYTES = TAG_BYTES + 4  # tag[7] + epoch(4) = 11
+
+
+@dataclass(frozen=True)
+class Read:
+    tag: bytes
+    epoch: int
+
+
+@dataclass(frozen=True)
+class Reads:
+    count: int
+    clock_trusted: bool
+    reads: tuple[Read, ...]
+
+
+def decode_reads(payload: bytes) -> Reads:
+    """messages.md: count(1), clock_trusted(1), then count x [tag[7], epoch(4)].
+
+    Unlike every other decoder in this module, these widths were not chosen
+    here first. ``feeder-node-firmware/components/station_proto``'s own
+    encoder (``station_encode_reads()``) shipped and ran on hardware before
+    this decoder existed -- messages.md's own note on READS explains why the
+    usual "the station picks the width, the firmware follows" order is
+    reversed for this one message. This function's own test suite
+    (``tests/domain/test_payloads.py``) ports the firmware's encoder test
+    vectors (``test_station_proto.c``'s ``READS_SINGLE``/``READS_MULTI``/
+    ``READS_UNTRUSTED`` byte arrays) rather than re-deriving them from
+    messages.md's prose a second time -- the same cross-implementation
+    discipline ``domain/frames.py`` already uses for the shared frame
+    header, applied here in the direction messages.md itself calls for.
+
+    ``count == 0`` is refused: a READS frame declaring zero reads is not a
+    message ``reads_batch.h``'s own flush rules ever produce on the wire (a
+    flush only ever fires while at least one read is pending), the same
+    "not well-formed" reading ``station_encode_reads()`` gives it on the
+    encode side.
+
+    ``clock_trusted`` is read straight from its own byte and returned
+    exactly as decoded -- never inferred from any entry's epoch. What an
+    untrusted read's epoch becomes once it is turned into a stored row's own
+    timestamp is ``domain/events.py::interpret_reads``'s decision, not this
+    module's: every decoder here reports what the wire actually said, and
+    nothing more.
+    """
+    _require_min_len(payload, _READS_HEADER_BYTES, "READS")
+    count = payload[0]
+    if count == 0:
+        raise PayloadError("READS payload declares count=0, not a well-formed batch")
+    clock_trusted = payload[1] != 0
+
+    expected = _READS_HEADER_BYTES + count * _READS_ENTRY_BYTES
+    _require_len(payload, expected, "READS")
+
+    reads = []
+    offset = _READS_HEADER_BYTES
+    for _ in range(count):
+        tag = payload[offset : offset + TAG_BYTES]
+        e = offset + TAG_BYTES
+        epoch = payload[e] | (payload[e + 1] << 8) | (payload[e + 2] << 16) | (payload[e + 3] << 24)
+        reads.append(Read(tag=tag, epoch=epoch))
+        offset += _READS_ENTRY_BYTES
+
+    return Reads(count=count, clock_trusted=clock_trusted, reads=tuple(reads))
 
 
 @dataclass(frozen=True)

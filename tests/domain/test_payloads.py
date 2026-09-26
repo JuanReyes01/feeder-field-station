@@ -188,6 +188,136 @@ def test_a_fault_payload_with_zero_bytes_is_rejected() -> None:
         payloads.decode_fault(b"")
 
 
+# ---- READS (0x06): ported from feeder-node-firmware's own encoder test
+# vectors ---------------------------------------------------------------
+#
+# READS is the one uplink message where the usual order is reversed:
+# feeder-node-firmware/components/station_proto's own encoder
+# (station_encode_reads()) shipped and ran on hardware before this decoder
+# existed (messages.md's own note on READS explains why). Its test suite
+# (test/test_station_proto/test_station_proto.c) hand-derived these bytes
+# straight from messages.md's field order and said, in its own comment,
+# that this suite should adopt them as its vectors once decode_reads()
+# exists -- exactly what the three constants below do. Deriving these
+# bytes a second time, independently, from messages.md's prose instead of
+# the firmware's own already-hardware-verified encoder is the drift this
+# change exists to avoid: two independent readings of the same document is
+# exactly how the C and Python sides end up silently disagreeing while
+# both still look correct.
+
+READS_SINGLE = bytes(
+    [0x01, 0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0xC0, 0xFF, 0x69, 0x67]
+)
+
+READS_MULTI = bytes(
+    [
+        0x02,
+        0x01,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+        0xC0,
+        0xFF,
+        0x69,
+        0x67,
+        0xAA,
+        0xBB,
+        0xCC,
+        0xDD,
+        0xEE,
+        0xFF,
+        0x00,
+        0x18,
+        0x02,
+        0x6A,
+        0x67,
+    ]
+)
+
+# clock_trusted = false, epoch = 0 -- messages.md's own ambiguous case
+# ("epoch = 0 ... is also a real midnight in 1970"), proven here the same
+# way the firmware's own test proves it: the trust byte is read
+# independently of whatever the epoch bytes say.
+READS_UNTRUSTED = bytes(
+    [0x01, 0x00, 0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06, 0x00, 0x00, 0x00, 0x00]
+)
+
+
+def test_decode_reads_reads_a_single_trusted_read() -> None:
+    result = payloads.decode_reads(READS_SINGLE)
+
+    assert result.count == 1
+    assert result.clock_trusted is True
+    assert len(result.reads) == 1
+    assert result.reads[0].tag == bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07])
+    assert result.reads[0].epoch == 1_735_000_000
+
+
+def test_decode_reads_keeps_each_reads_own_tag_and_epoch() -> None:
+    """Kill: a loop that reuses the first read's tag/epoch for every entry
+    (a copy-paste index bug, the same class of bug the firmware's own
+    equivalent test names) leaves the second entry wrong here even though
+    the single-read test above would still pass.
+    """
+    result = payloads.decode_reads(READS_MULTI)
+
+    assert result.count == 2
+    assert result.clock_trusted is True
+    assert result.reads[0].tag == bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07])
+    assert result.reads[0].epoch == 1_735_000_000
+    assert result.reads[1].tag == bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00])
+    assert result.reads[1].epoch == 1_735_000_600
+
+
+def test_decode_reads_reports_an_untrusted_clock_without_touching_the_epoch() -> None:
+    """Kill: a decode_reads() that infers clock_trusted from epoch == 0 (or
+    from anything but byte 1 itself) happens to read this vector the same
+    way either way -- messages.md's own rule, "Trust is never inferred
+    from the epoch's value, on either side", applies to this side exactly
+    as much as it does to the encoder's.
+    """
+    result = payloads.decode_reads(READS_UNTRUSTED)
+
+    assert result.clock_trusted is False
+    assert result.reads[0].tag == bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
+    assert result.reads[0].epoch == 0
+
+
+def test_decode_reads_rejects_a_payload_declaring_zero_reads() -> None:
+    """Kill: dropping this guard turns a 2-byte header with count=0 into an
+    empty-but-accepted batch instead of refusing it -- the same "not
+    well-formed" refusal station_encode_reads() itself already makes on
+    the encode side (see its own comment).
+    """
+    with pytest.raises(PayloadError):
+        payloads.decode_reads(bytes([0x00, 0x01]))
+
+
+def test_decode_reads_rejects_a_length_that_does_not_match_the_declared_count() -> None:
+    with pytest.raises(PayloadError):
+        payloads.decode_reads(READS_SINGLE[:-1])
+
+
+def test_decode_reads_rejects_a_payload_longer_than_its_declared_count() -> None:
+    """Kill: weakening the length check from "exactly this many bytes" to
+    "at least this many bytes" (``_require_min_len`` instead of
+    ``_require_len``) still rejects a too-short payload (the test above)
+    but silently accepts trailing garbage past the declared batch -- this
+    is the direction only an exact-length check catches.
+    """
+    with pytest.raises(PayloadError):
+        payloads.decode_reads(READS_SINGLE + bytes([0x00]))
+
+
+def test_decode_reads_rejects_a_payload_shorter_than_its_own_header() -> None:
+    with pytest.raises(PayloadError):
+        payloads.decode_reads(bytes([0x01]))
+
+
 # --- CRITICAL 2 / WARNING B (sdd-verify, field-station-p4): an out-of-range
 # state byte must never reach the store. WARNING B (verify-report-batch1.md):
 # a hand-picked list like `[4, 7, 130, 255]` proves the examples, not the
