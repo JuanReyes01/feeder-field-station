@@ -14,7 +14,7 @@ import re
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,16 @@ _TAG_HEX_PATTERN = re.compile(rf"[0-9A-Fa-f]{{{TAG_BYTES * 2}}}")
 # stay small enough to type or paste by hand), and it caps how much of the
 # station's entire burst allowance one trap's single edit can ever claim.
 _MAX_TARGET_TAGS = int(pacing.DEFAULT_CAPACITY) * TAGS_PER_SET_TARGETS_FRAME
+
+# station/live-reads-view: how far back GET /api/reads looks. A page left
+# open for hours must not have its view grow unbounded -- old reads simply
+# roll off, the same "state that was true once" discipline every other
+# operator-facing fact on this page already applies (docs/pending.md,
+# "Operator-facing gaps"). This bounds the *query*, never a computed
+# "visit" -- the operator's own "still here" grouping threshold (a client-
+# side slider, design.md 3.2's amendment) is a separate, smaller number
+# applied at render time, never sent here and never stored.
+_READS_VIEW_WINDOW = timedelta(minutes=30)
 
 
 def now() -> datetime:
@@ -412,6 +422,38 @@ def create_app(
         with app.state.registry_lock:
             rows: list[dict[str, Any]] = app.state.registry.view(now=now())
         return rows
+
+    @app.get("/api/reads")
+    def reads() -> dict[str, list[dict[str, Any]]]:
+        """station/live-reads-view: the raw, ungrouped rows the operator's
+        live view groups by tag client-side, at render time (design.md
+        3.2's amendment -- the "still here" gap is a viewer control, never
+        computed or cached here). Partitioned by ``node_id`` here, once,
+        so a tag seen at two feeders is never merged into one feeder's
+        list downstream.
+
+        An empty object, never a 503, when this station has no store
+        configured -- the same "never enabled, never counts" honesty
+        `/health`'s own `link`/`rehydration_errors` already apply: no
+        durable log to read from is a degraded-but-normal shape, not an
+        error.
+        """
+        store = app.state.store
+        if store is None:
+            return {}
+        cutoff = now().timestamp() - _READS_VIEW_WINDOW.total_seconds()
+        by_node: dict[str, list[dict[str, Any]]] = {}
+        for event in store.recent_reads(since_epoch=cutoff):
+            if event.tag is None:
+                continue
+            by_node.setdefault(str(event.node_id), []).append(
+                {
+                    "tag": event.tag.hex().upper(),
+                    "node_epoch": event.node_epoch,
+                    "received_epoch": event.received_epoch,
+                }
+            )
+        return by_node
 
     # docs/pending.md, "Remove the remote arm affordance": there used to be
     # a `POST /api/traps/{node_id}/arm` here. Arming this trap means a

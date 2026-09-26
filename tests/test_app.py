@@ -28,6 +28,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station import app as app_module
@@ -409,6 +410,117 @@ def test_unacknowledged_capture_is_present_after_a_simulated_restart(tmp_path: P
     rows = c.get("/api/traps").json()
     assert rows[0]["node_id"] == 7
     assert rows[0]["capture"]["tag"] == "0384199C87EC06"
+
+
+# --- station/live-reads-view: GET /api/reads --------------------------------
+#
+# The raw, per-read rows the operator's live view groups by tag client-side
+# (design.md 3.2's amendment: grouping by a "still here" gap is a viewer
+# control, never computed or stored here). Partitioned by node_id -- the
+# view's own scope is one feeder at a time, never merged across feeders.
+
+READ_TAG_B = bytes([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00])
+
+
+def _reads_event(*, node_id: int, msg_id: int, tag: bytes, node_epoch: int | None) -> StationEvent:
+    return StationEvent(
+        source="node",
+        node_id=node_id,
+        msg_type=payloads.READS,
+        msg_id=msg_id,
+        node_epoch=node_epoch,
+        tag=tag,
+        fields={},
+        payload=b"",
+    )
+
+
+def test_reads_route_reports_no_reads_with_no_store_configured() -> None:
+    """The same "never enabled, never counts" honesty `/health`'s
+    `link`/`rehydration_errors` already apply: a store-less station (any
+    pre-slice-12 test, or `--no-gateway` with no `--db-path`) has nowhere
+    to read a log from, so this reports an empty view rather than crashing.
+    """
+    c, _ = client()
+    assert c.get("/api/reads").json() == {}
+
+
+def test_reads_route_keeps_the_same_tag_at_two_feeders_in_two_separate_groups(
+    tmp_path: Path,
+) -> None:
+    """Kill: partitioning by `tag` alone (or flattening every node's reads
+    into one list before the client ever sees a `node_id`) would let one
+    marked animal visiting two feeders read as a single feeder's business —
+    the exact "collapses two feeders into one group" defect this view must
+    not ship. Each node_id must own its own, separate list of that tag's
+    reads.
+    """
+    store = Store(tmp_path / "station.db")
+    recent = time.time()
+    store.append_batch(
+        [_reads_event(node_id=1, msg_id=1, tag=TAG, node_epoch=int(recent))],
+        received_epoch=recent,
+        clock_trust="rtc",
+    )
+    store.append_batch(
+        [_reads_event(node_id=2, msg_id=1, tag=TAG, node_epoch=int(recent))],
+        received_epoch=recent,
+        clock_trust="rtc",
+    )
+
+    c = TestClient(create_app(store=store))
+    body = c.get("/api/reads").json()
+
+    assert set(body.keys()) == {"1", "2"}
+    assert len(body["1"]) == 1
+    assert len(body["2"]) == 1
+    assert body["1"][0]["tag"] == body["2"][0]["tag"] == TAG.hex().upper()
+
+
+def test_reads_route_masks_an_untrusted_node_epoch_as_none_not_a_fabricated_time(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "station.db")
+    recent = time.time()
+    store.append_batch(
+        [_reads_event(node_id=3, msg_id=1, tag=TAG, node_epoch=None)],
+        received_epoch=recent,
+        clock_trust="unset",
+    )
+
+    c = TestClient(create_app(store=store))
+    row = c.get("/api/reads").json()["3"][0]
+
+    assert row["node_epoch"] is None
+    assert row["received_epoch"] == recent
+
+
+def test_reads_route_excludes_reads_older_than_the_view_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The view's own window (app.py's `_READS_VIEW_WINDOW`) bounds how far
+    back a page left open for hours still queries -- a read from long
+    before it must not resurface just because the page never reloaded.
+    """
+    store = Store(tmp_path / "station.db")
+    old_epoch = 1_000.0
+    store.append_batch(
+        [_reads_event(node_id=1, msg_id=1, tag=TAG, node_epoch=int(old_epoch))],
+        received_epoch=old_epoch,
+        clock_trust="rtc",
+    )
+    recent_epoch = old_epoch + app_module._READS_VIEW_WINDOW.total_seconds() + 60.0
+    store.append_batch(
+        [_reads_event(node_id=1, msg_id=2, tag=READ_TAG_B, node_epoch=int(recent_epoch))],
+        received_epoch=recent_epoch,
+        clock_trust="rtc",
+    )
+    monkeypatch.setattr(app_module, "now", lambda: datetime.fromtimestamp(recent_epoch, tz=UTC))
+
+    c = TestClient(create_app(store=store))
+    rows = c.get("/api/reads").json()["1"]
+
+    assert [r["tag"] for r in rows] == [READ_TAG_B.hex().upper()]
 
 
 # --- 10.7/10.8: reported state and reachability are two different facts ----
