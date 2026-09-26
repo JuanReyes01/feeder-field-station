@@ -96,6 +96,75 @@ def interpret(frame: Frame) -> StationEvent:
     )
 
 
+def interpret_reads(frame: Frame) -> tuple[StationEvent, ...]:
+    """A READS (0x06) frame is N observations, one per read -- not the one
+    ``StationEvent`` per frame every other uplink message produces here.
+
+    Deliberately a separate function rather than a change to ``interpret()``'s
+    own return type. Widening ``interpret()`` to always return a sequence
+    would force every other message type's decoder, and every existing
+    caller (``adapters/ingest.py``'s single-event path, every test in this
+    file), to unwrap a one-element sequence for no reason connected to what
+    those messages actually are: one report each, never a batch.
+    ``adapters/ingest.py::ingest_frame`` is the one caller that knows to
+    route ``msg_type == payloads.READS`` here instead of to ``interpret()``,
+    and to hand the result to ``Store.append_batch`` instead of
+    ``Store.append`` -- see that method's own docstring for why a batch's
+    dedup must run once per frame, not once per read: all N reads returned
+    here share one wire ``msg_id``, because they all came from one frame.
+
+    Every returned event shares ``node_id``/``msg_type``/``msg_id`` (the one
+    frame they came from) and the same raw ``payload`` bytes (the whole
+    batch, exactly as received -- there is no such thing as "this read's own
+    slice of the wire", only the batch's). ``tag``/``node_epoch``/``fields``
+    are each read's own.
+
+    Batching is transport, not interpretation (messages.md's own words):
+    nothing here collapses reads into a visit -- design.md 3.2 reversed
+    that ruling for exactly this reason, and computing one belongs to the
+    analysis application, never this station.
+
+    ``clock_trusted`` is one flag for the whole batch. Masking ``node_epoch``
+    to ``None`` whenever it is false happens here, once per read, straight
+    from that flag -- never from whether the read's own epoch happens to be
+    zero (messages.md: "Trust is never inferred from the epoch's value, on
+    either side"; ``epoch == 0`` is also a real midnight in 1970,
+    indistinguishable from "unset" if it were ever taken at face value). A
+    masked read's ``node_epoch`` is ``None``, not ``0`` -- the same
+    "impossible to mistake for a real time" answer ``components/sd_record``
+    already gives with an empty CSV field, chosen because this store's
+    ``node_epoch`` column is exactly what a future export would turn into an
+    ISO timestamp for a human to read (``adapters/export.py``'s
+    ``_epoch_to_iso``). ``fields["epoch"]`` is masked the same way, for the
+    same reason: nothing about this row may show a fabricated epoch under
+    any name, in the dedicated column or in the raw JSON beside it.
+    """
+    if frame.msg_type != payloads.READS:
+        raise ValueError(
+            f"interpret_reads called with msg_type {frame.msg_type:#04x}, expected READS"
+        )
+
+    decoded = payloads.decode_reads(frame.payload)
+    return tuple(
+        StationEvent(
+            source="node",
+            node_id=frame.node_id,
+            msg_type=frame.msg_type,
+            msg_id=frame.msg_id,
+            node_epoch=read.epoch if decoded.clock_trusted else None,
+            tag=read.tag,
+            fields={
+                "tag": read.tag.hex(),
+                "epoch": read.epoch if decoded.clock_trusted else None,
+                "clock_trusted": decoded.clock_trusted,
+                "batch_count": decoded.count,
+            },
+            payload=frame.payload,
+        )
+        for read in decoded.reads
+    )
+
+
 def _node_epoch_of(decoded: object) -> int | None:
     if isinstance(decoded, payloads.Heartbeat):
         return decoded.clock_epoch
