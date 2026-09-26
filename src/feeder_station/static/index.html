@@ -60,6 +60,22 @@
   }
   .field-error { color: #ff8a8a; font-size: .85rem; margin-top: .3rem; }
   .field-ok { color: #7ee787; font-size: .85rem; margin-top: .3rem; }
+
+  /* station/specimen-roster: an operator manages the roster and marks who
+     is wanted, instead of typing hex strings into each trap
+     (docs/pending.md). */
+  .specimen { border: 1px solid #333; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
+  .specimen input[type=text] {
+    width: 100%; font: inherit; font-size: 16px; background: #1a1a1a; color: #eee;
+    border: 1px solid #444; border-radius: 6px; padding: .5rem; margin: .3rem 0;
+  }
+  /* The label, not the bare checkbox, is the 44px touch target -- a
+     platform checkbox alone renders far smaller than that on most phones. */
+  .of-interest-toggle {
+    display: flex; align-items: center; gap: .5rem; min-height: 44px; cursor: pointer;
+  }
+  .of-interest-toggle input[type=checkbox] { width: 1.5rem; height: 1.5rem; }
+  .roster-counter { margin: .3rem 0 .6rem; }
 </style>
 <header>
   <h1>Estación CICG</h1>
@@ -75,6 +91,10 @@
   </div>
 </header>
 <div id="traps">Cargando…</div>
+<details>
+  <summary>Roster de especímenes</summary>
+  <div id="specimens">Cargando…</div>
+</details>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -209,11 +229,14 @@ function rerender() {
   renderTraps(latestTraps, latestReadsByNode, Date.now() / 1000);
 }
 
+const EMPTY_ROSTER = { specimens: [], of_interest_count: 0, of_interest_limit: 0 };
+
 async function refresh() {
-  const [traps, health, reads] = await Promise.all([
+  const [traps, health, reads, roster] = await Promise.all([
     fetch("/api/traps").then((r) => r.json()),
     fetch("/health").then((r) => r.json()).catch(() => null),
     fetch("/api/reads").then((r) => r.json()).catch(() => ({})),
+    fetch("/api/specimens").then((r) => r.json()).catch(() => EMPTY_ROSTER),
   ]);
   latestTraps = traps;
   latestReadsByNode = reads;
@@ -221,6 +244,7 @@ async function refresh() {
   renderLinkBanner(health);
   renderCaptureBanner(traps);
   renderTraps(traps, reads, Date.now() / 1000);
+  renderRoster(roster);
 }
 
 // S12: an unset clock is a banner, not a footnote -- every timestamp on this
@@ -323,15 +347,6 @@ function renderTrap(t, readsByNode, nowEpoch) {
         <button onclick="disarm(${t.node_id})">Desarmar</button>
         ${t.pending_command ? `<button onclick="cancelCommand(${t.node_id})">Cancelar comando pendiente</button>` : ""}
       </div>
-      <details>
-        <summary>Editar lista de objetivos</summary>
-        <textarea id="targets-${t.node_id}"
-          placeholder="Un código de 14 caracteres por línea, ej: 0384199C87EC06"></textarea>
-        <div class="actions">
-          <button onclick="saveTargets(${t.node_id})">Guardar lista</button>
-        </div>
-        <div id="targets-msg-${t.node_id}"></div>
-      </details>
     </div>`;
 }
 
@@ -357,21 +372,65 @@ async function disarm(id) { await fetch(`/api/traps/${id}/disarm`, { method: "PO
 async function ack(id) { await fetch(`/api/traps/${id}/acknowledge`, { method: "POST" }); refresh(); }
 async function cancelCommand(id) { await fetch(`/api/traps/${id}/cancel`, { method: "POST" }); refresh(); }
 
-async function saveTargets(id) {
-  const box = $(`targets-${id}`);
-  const msg = $(`targets-msg-${id}`);
-  const tags = box.value.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
-  const response = await fetch(`/api/traps/${id}/targets`, {
-    method: "PUT",
+// station/specimen-roster: the study decides which animals are of interest,
+// not the feeder (messages.md's open question 2, answered 2026-09-26) -- an
+// operator manages this one roster and marks who is wanted; marking one
+// pushes the whole shared list to every trap the station knows about
+// (app.py::_push_targets_to_every_known_trap), never a list typed per trap.
+function renderRoster(roster) {
+  const rows = roster.specimens || [];
+  const counter = `<p class="muted roster-counter">` +
+    `${roster.of_interest_count} / ${roster.of_interest_limit} marcadas de interés</p>`;
+  const body = rows.length
+    ? rows.map(renderSpecimen).join("")
+    : '<p class="empty">Ningún espécimen conocido todavía.</p>';
+  $("specimens").innerHTML = counter + body;
+}
+
+function renderSpecimen(s) {
+  const lastSeen = s.last_seen
+    ? formatRelative(epochOf(s.last_seen), Date.now() / 1000)
+    : "nunca";
+  const timesSeen = s.times_seen === 1 ? "1 lectura" : `${s.times_seen} lecturas`;
+  return `
+    <div class="specimen">
+      <div class="state">Marca ${escapeHtml(s.tag)}</div>
+      <p class="muted">${timesSeen} · últ. vez: ${lastSeen}</p>
+      <input type="text" id="species-${s.tag}" placeholder="Especie"
+        value="${escapeHtml(s.species || "")}">
+      <input type="text" id="band-${s.tag}" placeholder="Número de anillo"
+        value="${escapeHtml(s.band_number || "")}">
+      <label class="of-interest-toggle" for="interest-${s.tag}">
+        <input type="checkbox" id="interest-${s.tag}" ${s.of_interest ? "checked" : ""}>
+        De interés
+      </label>
+      <div class="actions">
+        <button onclick="saveSpecimen('${s.tag}')">Guardar</button>
+      </div>
+      <div id="specimen-msg-${s.tag}"></div>
+    </div>`;
+}
+
+async function saveSpecimen(tagHex) {
+  const msg = $(`specimen-msg-${tagHex}`);
+  const species = $(`species-${tagHex}`).value.trim();
+  const bandNumber = $(`band-${tagHex}`).value.trim();
+  const ofInterest = $(`interest-${tagHex}`).checked;
+  const response = await fetch(`/api/specimens/${tagHex}`, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tags }),
+    body: JSON.stringify({
+      species: species || null,
+      band_number: bandNumber || null,
+      of_interest: ofInterest,
+    }),
   });
   if (response.ok) {
-    msg.innerHTML = '<p class="field-ok">Guardada. Esperando confirmación de la trampa.</p>';
+    msg.innerHTML = '<p class="field-ok">Guardado. Esperando confirmación de las trampas.</p>';
     refresh();
   } else {
-    msg.innerHTML = '<p class="field-error">No se pudo guardar: revisá que cada código tenga ' +
-      "14 caracteres hexadecimales, uno por línea.</p>";
+    msg.innerHTML = '<p class="field-error">No se pudo guardar: puede que ya haya demasiadas ' +
+      "marcas de interés a la vez.</p>";
   }
 }
 

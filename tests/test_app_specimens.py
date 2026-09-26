@@ -18,14 +18,18 @@ makes that true here for free -- ``/api/traps`` already renders it.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from feeder_station import app as app_module
 from feeder_station.adapters.store import Store
 from feeder_station.app import create_app
 from feeder_station.domain.traps import TrapState
+
+STATIC_INDEX_PATH = Path(app_module.__file__).parent / "static" / "index.html"
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 TAG_A = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -280,3 +284,52 @@ def _seed_specimen_with_tag(store: Store, tag: bytes) -> None:
         received_epoch=100.0,
         clock_trust="synced",
     )
+
+
+# --- The static page: the roster replaces typing hex into each trap --------
+#
+# The same discipline test_app.py's own stale-badge tests already document
+# (and explain why it goes no further): this project has no Node/browser
+# test toolchain to build a DOM harness with, so these anchor source text --
+# they prove the markup and wiring exist, never what actually renders.
+
+
+def test_the_per_trap_raw_hex_target_editor_is_removed() -> None:
+    """docs/pending.md: "instead of typing hex strings into each trap, an
+    operator manages a roster" -- the free-text textarea this replaces must
+    actually be gone from the page, not merely unused.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert "Editar lista de objetivos" not in html
+    assert "saveTargets" not in html
+    assert 'id="targets-${t.node_id}"' not in html
+
+
+def test_the_roster_section_fetches_and_patches_the_specimens_api() -> None:
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert re.search(r'fetch\("/api/specimens"\)', html), (
+        "refresh() must fetch /api/specimens alongside /api/traps and /api/reads"
+    )
+    assert re.search(r"fetch\(`/api/specimens/\$\{tagHex\}`", html), (
+        "saveSpecimen must PATCH the one specimen it edited, not some other endpoint"
+    )
+    assert re.search(r'method:\s*"PATCH"', html)
+
+
+def test_the_of_interest_checkbox_is_a_44px_touch_target() -> None:
+    """S10: this page must work one-handed on a phone -- a bare platform
+    checkbox is far smaller than 44px, so the *label* wrapping it is styled
+    as the touch target, the same discipline every button on this page
+    already follows.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert re.search(r"\.of-interest-toggle\s*\{[^}]*min-height:\s*44px", html, re.DOTALL)
+
+
+def test_saving_a_specimen_sends_of_interest_as_a_boolean_not_the_checkbox_element() -> None:
+    """A stray `.value` instead of `.checked` on a checkbox input sends the
+    string `"on"`/`""` -- truthy either way -- which would make "unmarking"
+    of interest impossible from this page.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert re.search(r"\$\(`interest-\$\{tagHex\}`\)\.checked", html)
