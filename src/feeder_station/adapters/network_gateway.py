@@ -60,6 +60,39 @@ lock instead of blocking on it forever, and a bounded read timeout (keyed
 to ``StationConfig.silence_after`` by the constructor's own default, S11's
 already-named reachability window) so a half-open connection the OS has
 not noticed is retired instead of held forever.
+
+**Remediation (real hardware, site Wi-Fi, 2026-09-26): ``nodes`` is a live
+registry, exactly one entry per node ever identified, always the most
+recently associated connection -- never a growing history.** Two bugs
+surfaced together against a live ESP32 that a real reconnect loop and only
+a real reconnect loop could show:
+
+1. ``write_frame()`` used to call ``settimeout()`` on the *same* socket
+   object the reader thread's ``recv()`` was blocked on. ``settimeout()``
+   is per socket object, not per call and not per direction -- a node
+   ACK'd on every heartbeat kept getting retired within the *write*
+   timeout of its own ACK, nowhere near the configured read timeout, and
+   the retirement message (interpolating the read timeout, not whatever
+   actually happened) was flatly false for a connection that had lived
+   seconds. Fixed with ``_Connection.write_socket`` -- ``socket.dup()`` of
+   the same fd, so read and write each have their own, independent timeout
+   state, permanently.
+2. ``_associate`` only replaced a node_id's entry when the *old* one was
+   still marked connected. A connection that had already retired **on its
+   own** (exactly what bug 1 above caused, repeatedly) was never "stale"
+   by that check, so it was never replaced -- the fresh, genuinely live
+   connection for the same node was tracked nowhere ``/health`` could see
+   it, and the dead row stayed forever. Fixed by making the replacement
+   unconditional: whichever connection most recently identified itself as
+   a given node_id is that node's one and only entry, live or dead.
+
+Also fixed: a connection ``_associate`` force-closes to make room for a
+fresher one is now marked ``superseded`` *before* it is closed, so its own
+retirement is logged and reported with the real cause, not whatever
+``recv()`` happened to raise or return once the socket vanished
+underneath it (observed directly: sometimes a clean EOF, sometimes an
+unrelated ``OSError`` -- never something a fixed string could describe
+correctly by guessing).
 """
 
 from __future__ import annotations
@@ -80,7 +113,7 @@ from feeder_station.domain.serial_framing import DELIMITER, FrameStream, cobs_en
 logger = logging.getLogger(__name__)
 
 
-def _force_close(sock: socket.socket) -> None:
+def _shutdown_and_close(sock: socket.socket) -> None:
     """Close a socket in a way that reliably unblocks a *different* thread
     already sitting in a blocking ``recv()`` on the same fd.
 
@@ -102,6 +135,19 @@ def _force_close(sock: socket.socket) -> None:
         sock.shutdown(socket.SHUT_RDWR)
     with contextlib.suppress(OSError):
         sock.close()
+
+
+def _force_close_connection(conn: _Connection) -> None:
+    """Tear down one connection's *pair* of socket objects (see
+    ``_Connection.__init__`` for why there are two) -- ``shutdown()`` on
+    either affects the one underlying OS connection they both wrap, waking
+    a blocked ``recv()`` on ``conn.socket`` no matter which of the two
+    duplicated descriptors this call is invoked through; both still need
+    their own ``close()`` to release their own fd.
+    """
+    _shutdown_and_close(conn.socket)
+    with contextlib.suppress(OSError):
+        conn.write_socket.close()
 
 # Arbitrary, and named as such: docs/protocol/messages.md pins no port for
 # any transport (it is transport-agnostic by its own opening line). Chosen
@@ -193,10 +239,21 @@ class _Connection:
     """One accepted socket: its own frame stream, its own write lock, and
     the one fact that makes outbound routing possible at all -- which
     ``node_id``, if any, has identified itself on this connection so far.
+
+    **Two socket objects, one OS connection.** ``socket.settimeout()`` is
+    per Python socket *object*, not per call and not per direction --
+    measured live: ``write_frame()`` setting the (short) write timeout on
+    the same object the reader thread's ``recv()`` was blocked on silently
+    shortened that thread's *next* read wait too, retiring a perfectly
+    healthy connection seconds after its own ACK. ``socket.dup()`` gives
+    the write path its own file descriptor, wrapping the same underlying
+    connection, with its own independent timeout -- the reader's 900-second
+    wait can never again be governed by the writer's 2-second one.
     """
 
     def __init__(self, sock: socket.socket, address: tuple[str, int], *, since: float) -> None:
-        self.socket = sock
+        self.socket = sock  # read side -- the reader thread's own recv()
+        self.write_socket = sock.dup()  # write side -- write_frame()'s own sendall()
         self.address = address
         self.since = since
         self.node_id: int | None = None
@@ -206,6 +263,12 @@ class _Connection:
         self.frames_out = 0
         self.last_error: str | None = None
         self.connected = True
+        # Set by `_associate` right before it force-closes this connection
+        # to make room for a fresher one for the same node_id -- read by
+        # `_reader_loop`'s own `finally` block so the *reason* recorded
+        # reflects the real cause, not whatever `recv()` happened to raise
+        # or return once the socket was closed out from under it.
+        self.superseded = False
 
 
 class NetworkGateway:
@@ -240,12 +303,26 @@ class NetworkGateway:
         self._last_error: str | None = None
         self._stop = threading.Event()
 
-        # One lock guards `_connections` -- both the accept loop appending
-        # a new one and a reader thread retiring or re-associating one, the
-        # same "one small lock around the shared mutable list" shape
-        # `SerialGateway` already gives its own single write lock.
+        # One lock guards both of the structures below -- the accept loop
+        # appending a new connection, a reader thread retiring one, and
+        # `_associate` moving one from `_unidentified` into `_identified`
+        # (or replacing an entry already there) all touch them, the same
+        # "one small lock around shared mutable state" shape `SerialGateway`
+        # already gives its own single write lock.
         self._lock = threading.Lock()
-        self._connections: list[_Connection] = []
+        # `nodes` (module docstring, point 3) *is* this dict's values,
+        # verbatim: a live registry, exactly one entry per node_id this
+        # station has ever identified, always the most recently associated
+        # connection -- never a growing history of every past connection,
+        # and never emptied out from under a node that is still, or is
+        # once again, actually connected. `_associate` is the one place
+        # that writes to it; nothing else in this class ever removes a key.
+        self._identified: dict[int, _Connection] = {}
+        # Connections accepted but not yet claimed by any frame's node_id
+        # -- `unidentified_connections` (module docstring, point 3) is
+        # this list's own live count, never folded into `nodes` (there is
+        # no node_id to key a row by yet).
+        self._unidentified: list[_Connection] = []
 
         self._queue: queue.Queue[bytes] = queue.Queue()
         self._payload_errors = 0
@@ -262,7 +339,8 @@ class NetworkGateway:
     @property
     def link_state(self) -> NetworkLinkState:
         with self._lock:
-            snapshot = list(self._connections)
+            identified_snapshot = list(self._identified.values())
+            unidentified_count = sum(1 for c in self._unidentified if c.connected)
         nodes = tuple(
             sorted(
                 (
@@ -276,19 +354,18 @@ class NetworkGateway:
                         decode_errors=c.frame_stream.decode_errors,
                         last_error=c.last_error,
                     )
-                    for c in snapshot
+                    for c in identified_snapshot
                     if c.node_id is not None
                 ),
                 key=lambda n: n.node_id,
             )
         )
-        unidentified = sum(1 for c in snapshot if c.node_id is None and c.connected)
         return NetworkLinkState(
             listening=self._listener is not None,
             host=self._config.host,
             port=self._config.port,
             since=self._since,
-            unidentified_connections=unidentified,
+            unidentified_connections=unidentified_count,
             payload_errors=self._payload_errors,
             nodes=nodes,
             last_error=self._last_error,
@@ -331,8 +408,8 @@ class NetworkGateway:
 
         # A timeout on the listener itself, not reliance on `close()` alone
         # to unblock a concurrent `accept()`: the same Linux quirk
-        # `_force_close`'s own docstring names for `recv()` applies here
-        # too (closing an fd from a different thread than the one blocked
+        # `_shutdown_and_close`'s own docstring names for `recv()` applies
+        # here too (closing an fd from a different thread than the one blocked
         # in a syscall on it is not guaranteed to wake that syscall) -- the
         # accept loop instead wakes on its own, at most once a second, and
         # checks `self._stop` itself.
@@ -357,7 +434,7 @@ class NetworkGateway:
                 return  # the listener was closed underneath us (shutdown)
             conn = _Connection(sock, address, since=self._clock())
             with self._lock:
-                self._connections.append(conn)
+                self._unidentified.append(conn)
             threading.Thread(
                 target=self._reader_loop,
                 args=(conn,),
@@ -373,26 +450,53 @@ class NetworkGateway:
         # subclass of `OSError`, so the specific case is caught first, and
         # everything else this socket can raise is still handled, never
         # left to crash the thread and skip `_retire()`.
+        #
+        # `organic_error` is decided *here*, from what `recv()` itself
+        # said; the actual `conn.last_error` this connection is retired
+        # with is decided once, in `finally`, below -- never inline in
+        # these `except` clauses. Reported live: a connection this station
+        # force-closed itself (`_associate`'s own supersede path) could
+        # still land in either branch below depending on exactly how the
+        # closed socket's `recv()` call happened to unwind, and whichever
+        # one it landed in wrote a message that was flatly false for a
+        # connection seconds old. `conn.superseded` -- set by `_associate`
+        # *before* it ever closes anything -- is the one fact that cannot
+        # be ambiguous, so it is checked first and wins outright.
         sock = conn.socket
+        organic_error: str | None = None
         try:
             sock.settimeout(self._read_timeout_s)
             while not self._stop.is_set():
                 chunk = sock.recv(4096)
                 if not chunk:
-                    return  # the peer closed cleanly (FIN -> recv() returns b"")
+                    break  # the peer closed cleanly (FIN -> recv() returns b"")
                 blocks = conn.frame_stream.feed(chunk)
                 conn.frames_in += len(blocks)
                 for block in blocks:
                     self._route_inbound(conn, block)
         except TimeoutError:
-            conn.last_error = (
+            organic_error = (
                 f"no bytes for {self._read_timeout_s:.0f}s -- a silent "
                 "half-open connection the OS never reported as closed, "
                 "retired instead of held forever"
             )
         except OSError as exc:
-            conn.last_error = str(exc)
+            organic_error = str(exc)
         finally:
+            if conn.superseded:
+                conn.last_error = (
+                    "reconnected on a new connection -- the station closed "
+                    "this socket to replace it with a fresher one for the "
+                    "same node, not because it went silent"
+                )
+            elif organic_error is not None:
+                conn.last_error = organic_error
+            logger.info(
+                "network gateway: connection from %s (node %s) retired: %s",
+                conn.address,
+                conn.node_id,
+                conn.last_error or "the peer closed the connection cleanly",
+            )
             self._retire(conn)
 
     def _route_inbound(self, conn: _Connection, block: bytes) -> None:
@@ -425,31 +529,58 @@ class NetworkGateway:
             )
 
     def _associate(self, conn: _Connection, node_id: int) -> None:
+        """Claim ``node_id`` for ``conn`` -- the *only* place ``self.
+        _identified`` is ever written. Unconditionally replaces whatever
+        was there before, live or already dead: the bug this fixes is
+        exactly the old, narrower version of this method only replacing a
+        prior entry when it was still marked ``connected`` -- a connection
+        that had *already* retired on its own (this station's own read
+        timeout, a clean close, anything) before the replacement ever
+        connected left its dead row in place forever, because nothing
+        found it "stale" enough to remove. One node_id, one entry, always
+        the most recent connection -- no condition on the entry it
+        replaces required or checked.
+        """
         stale: _Connection | None = None
         with self._lock:
-            for other in self._connections:
-                if other is not conn and other.node_id == node_id and other.connected:
-                    stale = other
-                    break
-            if stale is not None:
-                self._connections.remove(stale)
+            if conn in self._unidentified:
+                self._unidentified.remove(conn)
+            existing = self._identified.get(node_id)
+            if existing is not None and existing is not conn:
+                stale = existing
+            self._identified[node_id] = conn
             conn.node_id = node_id
-        if stale is not None:
+        if stale is not None and stale.connected:
+            # Only a connection that is *still* live needs an active
+            # close -- one that already retired on its own has nothing
+            # left to close, and must keep whatever honest reason it
+            # already recorded for its own, earlier, unrelated end.
+            stale.superseded = True
             logger.info(
                 "network gateway: node %s reconnected on a new connection -- "
                 "closing the station's old socket rather than leaving it open "
                 "and silently unwritable",
                 node_id,
             )
-            stale.connected = False
-            _force_close(stale.socket)
+            _force_close_connection(stale)
 
     def _retire(self, conn: _Connection) -> None:
-        _force_close(conn.socket)
+        """Mark ``conn`` dead and drop it from whichever structure still
+        holds it. An **unidentified** connection is removed outright --
+        nothing else will ever look for it, there being no node_id to key
+        it by. An **identified** connection is deliberately left in
+        ``self._identified`` -- removing it would erase the one row
+        ``/health`` has for that node the instant it goes quiet, the exact
+        opposite of the "still show it, honestly marked disconnected"
+        contract ``NodeLinkState`` documents. `_associate` is the only
+        thing that ever replaces an identified entry, later, for the same
+        node_id -- never this method.
+        """
+        _force_close_connection(conn)
         conn.connected = False
         with self._lock:
-            if conn.node_id is None and conn in self._connections:
-                self._connections.remove(conn)
+            if conn.node_id is None and conn in self._unidentified:
+                self._unidentified.remove(conn)
 
     def read_frames(self, *, size: int = 4096) -> list[bytes]:
         """Drain every frame block any connection has produced since the
@@ -481,6 +612,11 @@ class NetworkGateway:
         2). ``False`` -- never a fabricated success -- when the header
         cannot even be read, or no live connection is routed for that
         node.
+
+        Writes through ``conn.write_socket`` -- the duplicated fd
+        (``_Connection``'s own docstring) -- never ``conn.socket``, so
+        this call's own ``settimeout()`` can never shorten the reader
+        thread's unrelated, much longer wait on the same connection.
         """
         try:
             frame = frames.decode(raw_frame)
@@ -488,18 +624,15 @@ class NetworkGateway:
             return False
 
         with self._lock:
-            conn = next(
-                (c for c in self._connections if c.node_id == frame.node_id and c.connected),
-                None,
-            )
-        if conn is None:
+            conn = self._identified.get(frame.node_id)
+        if conn is None or not conn.connected:
             return False
 
         block = cobs_encode(raw_frame) + bytes([DELIMITER])
         with conn.write_lock:
             try:
-                conn.socket.settimeout(self._write_timeout_s)
-                conn.socket.sendall(block)
+                conn.write_socket.settimeout(self._write_timeout_s)
+                conn.write_socket.sendall(block)
             except OSError as exc:
                 conn.last_error = str(exc)
                 self._retire(conn)
@@ -520,8 +653,9 @@ class NetworkGateway:
             with contextlib.suppress(OSError):
                 listener.close()
         with self._lock:
-            conns = list(self._connections)
-            self._connections.clear()
+            conns = list(self._identified.values()) + list(self._unidentified)
+            self._identified.clear()
+            self._unidentified.clear()
         for conn in conns:
-            _force_close(conn.socket)
+            _force_close_connection(conn)
         self._since = None

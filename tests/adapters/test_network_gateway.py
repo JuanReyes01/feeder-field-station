@@ -12,6 +12,7 @@ never collides with whatever else is listening on the machine running it).
 
 from __future__ import annotations
 
+import logging
 import socket
 import time
 from collections.abc import Iterator
@@ -278,6 +279,148 @@ def test_a_reconnecting_node_supersedes_its_old_connection() -> None:
 
         old_client.close()
         new_client.close()
+
+
+# --- Reported live on real hardware (site Wi-Fi, 2026-09-26): a node ACK'd
+# every ~5s went to `connected: false` within ~2s of its own ACK, every time,
+# and the recorded reason ("no bytes for 900s") could not possibly be true
+# for a connection that lived seconds. Both bugs traced to the same file. ---
+
+
+def test_write_frame_does_not_corrupt_the_read_timeout_of_the_same_connection() -> None:
+    """MUTATION TARGET: ``write_frame`` calling ``settimeout()`` on the same
+    socket object the reader thread blocks on, with its own much shorter
+    write timeout, silently shortens a *later* ``recv()`` call too --
+    ``socket.settimeout`` is per socket *object*, not per call, so it is
+    not scoped to the one ``sendall()`` that needed it. Measured live: a
+    node ACK'd on every heartbeat kept getting retired within
+    ``write_timeout_s`` of its own ACK, never anywhere near the configured
+    ``read_timeout_s``. Read and write must use independent socket objects
+    (``socket.dup()``) so one side's timeout can never leak into the
+    other's.
+
+    Five send-ack-wait cycles, not one: whether a given ``write_frame``
+    call's ``settimeout()`` lands while the reader thread's ``recv()`` is
+    already blocked (unaffected -- the deadline for an in-flight call is
+    fixed when it starts) or between two of its calls (affected -- the
+    *next* ``recv()`` picks up whatever timeout is current when it starts)
+    is a genuine scheduling race. Repeating the cycle removes the
+    dependence on winning that race exactly once; the live failure did not
+    need to either; it recurred every single time over hours on site.
+    """
+    with _gateway(read_timeout_s=1.0, write_timeout_s=0.05) as gateway:
+        client = _connect(gateway)
+        try:
+            for _ in range(5):
+                _send_frame(client, node_id=7, msg_type=frames.PING)
+                assert _wait_until(lambda: len(gateway.link_state.nodes) == 1)
+
+                # The exact action that corrupted the timeout live: one
+                # write, simulating the ACK `ingest_frame` sends for every
+                # inbound frame that asks for one.
+                outbound = frames.encode(
+                    frames.Frame(msg_type=frames.FIRED, node_id=7, payload=b"ack")
+                )
+                assert gateway.write_frame(outbound) is True
+                client.settimeout(_DEADLINE_S)
+                assert client.recv(4096) == cobs_encode(outbound) + bytes([DELIMITER])
+
+                # Comfortably past write_timeout_s (0.05s) and comfortably
+                # short of read_timeout_s (1.0s): a real node's own gap
+                # between heartbeats, which must never be long enough to
+                # retire the connection on its own.
+                time.sleep(0.2)
+
+            assert gateway.link_state.nodes[0].connected is True
+        finally:
+            client.close()
+
+
+def test_a_node_reads_connected_right_after_a_frame_arrives_despite_reconnect_churn() -> None:
+    """MUTATION TARGET: a self-retired connection's ``node_id`` slot never
+    being replaced/refreshed by a later, genuinely live connection for the
+    same node -- ``/health`` must never be able to say a node is
+    unreachable in the instant after a frame from it was just ingested.
+
+    Reproduces the live sequence exactly: a connection dies *on its own*
+    (never superseded -- the firmware's own redial races the station's own
+    retirement, so `_associate`'s stale-detection alone is not the only
+    path that must stay correct) before the node's replacement connection
+    ever arrives, then the replacement connects and sends a frame. The one
+    entry this station has ever kept for this node must read connected
+    immediately once that frame lands -- not a stale, orphaned row left
+    over from the connection that died first.
+    """
+    with _gateway(read_timeout_s=0.1) as gateway:
+        dying_client = _connect(gateway)
+        _send_frame(dying_client, node_id=9, msg_type=frames.PING)
+        _drain(gateway, count=1)
+        assert _wait_until(lambda: len(gateway.link_state.nodes) == 1)
+
+        # Let the first connection die *on its own* -- no supersede, no
+        # `_associate` involved yet. The station must notice on its own
+        # read-timeout schedule, exactly as a genuinely silent node would.
+        assert _wait_until(lambda: gateway.link_state.nodes[0].connected is False)
+
+        # Only now does the replacement arrive -- after the first is
+        # already gone, the shape the live redial-churn bug actually hit.
+        fresh_client = _connect(gateway)
+        try:
+            _send_frame(fresh_client, node_id=9, msg_type=frames.PING)
+            _drain(gateway, count=1)
+
+            assert _wait_until(
+                lambda: len(gateway.link_state.nodes) == 1
+                and gateway.link_state.nodes[0].connected is True
+            ), "a frame just arrived from node 9, yet /health does not read it as connected"
+        finally:
+            dying_client.close()
+            fresh_client.close()
+
+
+def test_a_superseded_connection_is_retired_with_the_supersede_reason_not_a_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MUTATION TARGET: reporting whatever ``recv()`` happened to raise or
+    return when a connection is force-closed by ``_associate``'s own
+    supersede path, instead of the actual cause -- a connection closed by
+    the station itself, seconds into its life, must never be logged with
+    the same sentence a connection that genuinely went silent for the
+    whole configured read timeout gets.
+    """
+    with (
+        _gateway(read_timeout_s=5.0) as gateway,
+        caplog.at_level(logging.INFO, logger="feeder_station.adapters.network_gateway"),
+    ):
+        old_client = _connect(gateway)
+        _send_frame(old_client, node_id=7, msg_type=frames.PING)
+        _drain(gateway, count=1)
+        assert _wait_until(lambda: len(gateway.link_state.nodes) == 1)
+
+        new_client = _connect(gateway)
+        try:
+            _send_frame(new_client, node_id=7, msg_type=frames.PING)
+            _drain(gateway, count=1)
+            assert _wait_until(
+                lambda: gateway.link_state.nodes[0].connected is True
+            )
+
+            def _old_connection_retired_logged() -> bool:
+                return any("retired" in r.getMessage() for r in caplog.records)
+
+            assert _wait_until(_old_connection_retired_logged)
+        finally:
+            old_client.close()
+            new_client.close()
+
+    retire_records = [r for r in caplog.records if "retired" in r.getMessage()]
+    assert retire_records, "the superseded connection's retirement was never logged at all"
+    messages = " | ".join(r.getMessage() for r in retire_records)
+    assert "no bytes for" not in messages, (
+        f"a connection the station itself closed to supersede it was logged with the "
+        f"silence-timeout's own reason: {messages!r}"
+    )
+    assert any("supersede" in r.getMessage() or "reconnect" in r.getMessage() for r in retire_records)
 
 
 # --- Bind resolution and backoff, the same shape as SerialGateway's own ----
