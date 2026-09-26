@@ -642,6 +642,33 @@ class Store:
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
+    def recent_reads(self, *, since_epoch: float) -> list[StoredEvent]:
+        """READS (0x06) rows received at or after ``since_epoch``, oldest
+        first, across every node in the roster (station/live-reads-view).
+
+        The raw material the operator's live-reads view groups by tag --
+        client-side, at render time, under a "still here" gap the operator
+        controls with a slider (design.md 3.2's amendment: that gap is a
+        biological parameter, never computed or cached here). Unlike
+        :meth:`events_since`, this is not scoped to one ``node_id`` — the
+        view covers the whole roster at once; the HTTP layer (``app.py``)
+        is what partitions this result by node.
+
+        Oldest first, the same order :meth:`events_since` already returns,
+        so a caller's own forward gap-walk (`is this read close enough in
+        time to the previous one to join its group`) never has to reverse
+        the list first.
+        """
+        rows = self._conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS} FROM event
+             WHERE msg_type = ? AND received_epoch >= ?
+             ORDER BY seq ASC
+            """,
+            (payloads.READS, since_epoch),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def rehydrate(self, registry: Registry) -> None:
         """Rebuild ``registry``'s per-node state from stored events.
 

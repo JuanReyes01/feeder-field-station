@@ -336,6 +336,117 @@ def test_append_batch_rejects_events_that_do_not_share_one_frame(tmp_path: Path)
         store.append_batch(mismatched, received_epoch=1.0, clock_trust="rtc")
 
 
+# --- Store.recent_reads(): the live-reads-view's own query (station/
+# live-reads-view) -----------------------------------------------------------
+#
+# The raw, ungrouped rows the operator's grouped-by-tag display groups
+# client-side (design.md 3.2's amendment: the gap that ends a visit is a
+# viewer control, never computed or cached here). One row per read, across
+# every node in the roster -- app.py partitions the result by node_id itself.
+
+
+def test_recent_reads_returns_only_rows_at_or_after_the_given_epoch(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=1_735_000_000)],
+        received_epoch=10.0,
+        clock_trust="rtc",
+    )
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=6, tag=TAG_C, node_epoch=1_735_001_000)],
+        received_epoch=20.0,
+        clock_trust="rtc",
+    )
+
+    rows = store.recent_reads(since_epoch=15.0)
+
+    assert [r.tag for r in rows] == [TAG_C]
+
+
+def test_recent_reads_orders_oldest_first(tmp_path: Path) -> None:
+    """Kill: returning `seq DESC` (the newest-first order every other
+    `event_by_type`-indexed query in this module uses) would hand the
+    client a batch already backwards -- `groupReadsByTag`'s own gap walk
+    needs oldest-first to compute forward-moving gaps correctly.
+    """
+    store = Store(tmp_path / "station.db")
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=5, tag=TAG, node_epoch=100)],
+        received_epoch=1.0,
+        clock_trust="rtc",
+    )
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=6, tag=TAG_B, node_epoch=200)],
+        received_epoch=2.0,
+        clock_trust="rtc",
+    )
+
+    rows = store.recent_reads(since_epoch=0.0)
+
+    assert [r.tag for r in rows] == [TAG, TAG_B]
+
+
+def test_recent_reads_never_returns_a_non_reads_row(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    store.append(
+        _node_event(node_id=1, msg_id=1, msg_type=payloads.HEARTBEAT),
+        received_epoch=1.0,
+        clock_trust="rtc",
+    )
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=2, tag=TAG, node_epoch=100)],
+        received_epoch=2.0,
+        clock_trust="rtc",
+    )
+
+    rows = store.recent_reads(since_epoch=0.0)
+
+    assert [r.msg_type for r in rows] == [payloads.READS]
+
+
+def test_recent_reads_spans_every_node_not_just_one(tmp_path: Path) -> None:
+    """The mutation this kills: scoping the query to a single `node_id`
+    (the same shape `events_since` takes) instead of the whole roster --
+    the live view covers every feeder at once; `app.py` is the one that
+    partitions this result by `node_id`, not this query.
+    """
+    store = Store(tmp_path / "station.db")
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=1, tag=TAG, node_epoch=100)],
+        received_epoch=1.0,
+        clock_trust="rtc",
+    )
+    store.append_batch(
+        [_read_event(node_id=2, msg_id=1, tag=TAG, node_epoch=200)],
+        received_epoch=2.0,
+        clock_trust="rtc",
+    )
+
+    rows = store.recent_reads(since_epoch=0.0)
+
+    assert {r.node_id for r in rows} == {1, 2}
+
+
+def test_recent_reads_preserves_a_masked_node_epoch_as_none(tmp_path: Path) -> None:
+    """interpret_reads (domain/events.py) masks `node_epoch` to `None`
+    whenever the batch's clock was untrusted -- never a fabricated `0`.
+    The live view must not invent a time either (station/live-reads-view);
+    proven at the query the view actually reads from, not only at the
+    decoder that first masked it.
+    """
+    store = Store(tmp_path / "station.db")
+    store.append_batch(
+        [_read_event(node_id=1, msg_id=1, tag=TAG, node_epoch=None)],
+        received_epoch=5.0,
+        clock_trust="rtc",
+    )
+
+    rows = store.recent_reads(since_epoch=0.0)
+
+    assert rows[0].node_epoch is None
+    assert rows[0].received_epoch == 5.0
+
+
 # --- 4.13/4.14: unacknowledged capture survives a restart --------------------
 
 
