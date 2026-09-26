@@ -344,14 +344,14 @@ def test_saving_a_specimen_only_sends_of_interest_when_it_actually_changed() -> 
     checkbox, not merely resend the same value.
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert re.search(r"originalOfInterest\[s\.tag\]\s*=\s*s\.of_interest", html), (
+    assert re.search(r"serverState\[s\.tag\]\s*=\s*\{", html), (
         "renderSpecimen must record each specimen's own last-known of_interest "
         "so saveSpecimen can tell an unchanged checkbox from an edited one"
     )
     save_fn = re.search(r"async function saveSpecimen\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
     assert save_fn, "saveSpecimen must exist"
     body = save_fn.group(1)
-    assert re.search(r"ofInterest\s*!==\s*originalOfInterest\[tagHex\]", body), (
+    assert re.search(r"ofInterest\s*!==\s*serverState\[tagHex\]\.of_interest", body), (
         "saveSpecimen must compare the checkbox against the recorded original "
         "before deciding whether of_interest belongs in the request body"
     )
@@ -392,3 +392,46 @@ def test_the_roster_heading_is_spanish_not_an_anglicism() -> None:
     # renders must not.
     rendered = re.findall(r">([^<>{}]*[A-Za-zÁÉÍÓÚáéíóúÑñ][^<>{}]*)<", html)
     assert not [text for text in rendered if "roster" in text.lower()]
+
+
+def test_the_roster_is_not_rebuilt_while_the_operator_is_editing_it() -> None:
+    """`refresh()` fires on every SSE notify -- once per READS batch -- so while
+    a tag is being passed the roster container would be rebuilt every few
+    seconds, destroying half-typed input.
+
+    Measured on the bench 2026-09-26: "estoy intentando registrar el tag pero
+    desaparecen las letras cuando intento registrarlo". A live-updating view
+    and an editable form shared one container that was replaced wholesale.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    render = re.search(r"function renderRoster\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
+    assert render, "renderRoster must exist"
+    body = render.group(1)
+    guard = body.index("rosterIsBeingEdited()")
+    write = body.index('$("specimens").innerHTML')
+    assert guard < write, (
+        "the edit-in-progress guard must run before the container is replaced"
+    )
+    assert re.search(r"if\s*\(!force\s*&&\s*rosterIsBeingEdited\(\)\)", body)
+    # Focus inside the section counts, and so does an unsaved edit after focus
+    # has left it -- either one alone would still lose work.
+    checker = re.search(r"function rosterIsBeingEdited\(\)\s*\{(.*?)\n\}", html, re.DOTALL)
+    assert checker, "rosterIsBeingEdited must exist"
+    assert "document.activeElement" in checker.group(1)
+    assert "serverState" in checker.group(1)
+
+
+def test_a_paused_roster_says_so_instead_of_freezing_silently() -> None:
+    """A list that has stopped updating while still looking live is this
+    project's own recurring defect (docs/pending.md's closing section). The
+    pause is deliberate, so it has to be visible -- and the notice must live
+    outside the container that gets replaced, or the rebuild would erase it.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert 'id="roster-paused"' in html
+    assert "Lista en pausa mientras editás" in html
+    paused_div = html.index('id="roster-paused"')
+    specimens_div = html.index('<div id="specimens">')
+    assert paused_div < specimens_div, (
+        "the pause notice must sit outside #specimens, which is replaced wholesale"
+    )

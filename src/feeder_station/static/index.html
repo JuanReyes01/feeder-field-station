@@ -97,6 +97,8 @@
      nobody finds it. Reported on the bench 2026-09-26: "no veo en la interfaz
      como setear el target" -- the feature was built and invisible. -->
 <h2>Especímenes registrados</h2>
+<div id="roster-paused"></div>
+<div id="roster-msg"></div>
 <div id="specimens">Cargando…</div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -380,10 +382,23 @@ async function cancelCommand(id) { await fetch(`/api/traps/${id}/cancel`, { meth
 // operator manages this one roster and marks who is wanted; marking one
 // pushes the whole shared list to every trap the station knows about
 // (app.py::_push_targets_to_every_known_trap), never a list typed per trap.
-function renderRoster(roster) {
-  const rows = roster.specimens || [];
+// The last roster the server sent, held so a rebuild deferred while the
+// operator was editing can still happen afterwards without another fetch.
+let latestRoster = EMPTY_ROSTER;
+
+function renderRoster(roster, force) {
+  if (roster) latestRoster = roster;
+  if (!force && rosterIsBeingEdited()) {
+    // Never freeze silently: a list that has stopped updating while claiming
+    // to be live is this project's own recurring defect. Say so instead.
+    $("roster-paused").innerHTML =
+      '<p class="muted">Lista en pausa mientras editás. Dale Guardar para actualizarla.</p>';
+    return;
+  }
+  $("roster-paused").innerHTML = "";
+  const rows = latestRoster.specimens || [];
   const counter = `<p class="muted roster-counter">` +
-    `${roster.of_interest_count} / ${roster.of_interest_limit} marcadas de interés</p>`;
+    `${latestRoster.of_interest_count} / ${latestRoster.of_interest_limit} marcadas de interés</p>`;
   const body = rows.length
     ? rows.map(renderSpecimen).join("")
     : '<p class="empty">Ningún espécimen conocido todavía.</p>';
@@ -399,10 +414,40 @@ function renderRoster(roster) {
 // `if "of_interest" in updates`) -- so an untouched checkbox would still
 // re-push SET_TARGETS to every trap for an edit that was never about
 // targets at all.
-const originalOfInterest = {};
+// Widened from `of_interest` alone to every editable field, because the same
+// map now answers a second question: whether the operator has unsaved work in
+// this section. See `rosterIsBeingEdited()`.
+const serverState = {};
+
+function rosterIsBeingEdited() {
+  const container = $("specimens");
+  if (!container) return false;
+  // Typing right now. `refresh()` fires on every SSE notify -- once per READS
+  // batch -- so while a tag is being passed this container would otherwise be
+  // rebuilt every few seconds, destroying whatever is half-typed in it.
+  // Reported on the bench 2026-09-26: "desaparecen las letras cuando intento
+  // registrarlo".
+  if (container.contains(document.activeElement)) return true;
+  // Focus left the field but the edit was never saved. Rebuilding here would
+  // silently discard it, which is worse than a stale list.
+  return Object.keys(serverState).some((tag) => {
+    const known = serverState[tag];
+    const species = $(`species-${tag}`);
+    const band = $(`band-${tag}`);
+    const interest = $(`interest-${tag}`);
+    if (!species || !band || !interest) return false;
+    return species.value.trim() !== (known.species || "")
+      || band.value.trim() !== (known.band_number || "")
+      || interest.checked !== known.of_interest;
+  });
+}
 
 function renderSpecimen(s) {
-  originalOfInterest[s.tag] = s.of_interest;
+  serverState[s.tag] = {
+    species: s.species,
+    band_number: s.band_number,
+    of_interest: s.of_interest,
+  };
   const lastSeen = s.last_seen
     ? formatRelative(epochOf(s.last_seen), Date.now() / 1000)
     : "nunca";
@@ -427,15 +472,15 @@ function renderSpecimen(s) {
 }
 
 async function saveSpecimen(tagHex) {
-  const msg = $(`specimen-msg-${tagHex}`);
+  const msg = $("roster-msg");
   const species = $(`species-${tagHex}`).value.trim();
   const bandNumber = $(`band-${tagHex}`).value.trim();
   const ofInterest = $(`interest-${tagHex}`).checked;
   const body = { species: species || null, band_number: bandNumber || null };
   // Only a checkbox the operator actually touched belongs in this request --
-  // see `originalOfInterest`'s own comment for why including it unconditionally
+  // see `serverState`'s own comment for why including it unconditionally
   // would re-broadcast SET_TARGETS on every species/band-only save.
-  if (ofInterest !== originalOfInterest[tagHex]) {
+  if (ofInterest !== serverState[tagHex].of_interest) {
     body.of_interest = ofInterest;
   }
   const response = await fetch(`/api/specimens/${tagHex}`, {
@@ -445,6 +490,16 @@ async function saveSpecimen(tagHex) {
   });
   if (response.ok) {
     msg.innerHTML = '<p class="field-ok">Guardado. Esperando confirmación de las trampas.</p>';
+    // The edit is no longer unsaved, so the deferred rebuild may proceed.
+    // Blur first: focus still inside the section would keep it paused.
+    serverState[tagHex] = {
+      species: species || null,
+      band_number: bandNumber || null,
+      of_interest: ofInterest,
+    };
+    if (document.activeElement && document.activeElement.blur) {
+      document.activeElement.blur();
+    }
     refresh();
   } else {
     msg.innerHTML = '<p class="field-error">No se pudo guardar: puede que ya haya demasiadas ' +
