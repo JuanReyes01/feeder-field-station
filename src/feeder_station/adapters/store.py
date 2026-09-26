@@ -21,7 +21,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +53,7 @@ from feeder_station.domain.traps import Registry, TrapState
 # actually arrived.
 DEDUP_WINDOW = 32768
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def _assert_vacuum_into_is_supported() -> None:
         )
 
 
-_SCHEMA = """
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -102,6 +102,38 @@ CREATE TABLE IF NOT EXISTS node_cursor (
     last_seq      INTEGER NOT NULL,
     last_node_seq INTEGER NOT NULL
 );
+
+-- SCHEMA_VERSION 2 (docs/pending.md, "The station has one kind of storage
+-- and needs two"): observations are immutable and already fit `event`;
+-- a specimen is mutable reference data and does not fit an append-only log
+-- at all -- it needs its own table. `tag` alone is the primary key, not
+-- `(node_id, tag)`: "of interest is a flag on the specimen, not a list per
+-- feeder" -- the same animal seen at two feeders is one row, not two.
+-- `species`/`band_number` are the only editable fields beyond the flag
+-- (pending.md names exactly these two; no wider taxonomy is invented here).
+CREATE TABLE IF NOT EXISTS specimen (
+    tag         BLOB PRIMARY KEY,
+    species     TEXT,
+    band_number TEXT,
+    of_interest INTEGER NOT NULL DEFAULT 0
+);
+
+-- "Analysis shapes should be views, not tables" (pending.md): `times_seen`/
+-- `last_seen` must never be columns on `specimen` itself -- a stored count
+-- or timestamp there is exactly the "state that was true once, presented as
+-- true now" defect this project has hit eight times. A real SQL VIEW, not a
+-- column, so it structurally cannot fall out of sync with `event`: there is
+-- no second copy to disagree with the first. Scoped to the two message
+-- types that ever carry a real animal tag (`READS`, `CAPTURED` --
+-- `domain/events.py::_tag_of`/`interpret_reads`); an operator's own
+-- commands and a node's HEARTBEAT/FAULT never do.
+CREATE VIEW IF NOT EXISTS specimen_activity AS
+SELECT tag,
+       COUNT(*)            AS times_seen,
+       MAX(received_epoch) AS last_seen_epoch
+  FROM event
+ WHERE tag IS NOT NULL AND msg_type IN ({payloads.READS}, {payloads.CAPTURED})
+ GROUP BY tag;
 """
 
 # Applied to every connection this station ever opens against station.db —
@@ -139,9 +171,38 @@ def open_connection(path: str | Path, *, check_same_thread: bool = True) -> sqli
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """``CREATE TABLE``/``CREATE VIEW ... IF NOT EXISTS`` handles adding a
+    brand-new object safely on a database that already has rows -- but a
+    new table starts empty, and the roster's own rule (pending.md: "the
+    first appearance of an unknown tag *is* a new specimen") applies just
+    as much to a tag this station read *before* ``specimen`` existed. The
+    one-time backfill below is what makes that retroactive, proven against
+    exactly that shape by
+    ``tests/adapters/test_specimens.py::test_migration_backfills_specimens_from_a_database_written_before_the_table_existed``.
+
+    Gated on the *stored* ``schema_version``, not on whether ``specimen``
+    happens to be empty right now: the previous version of this function's
+    own upsert (``INSERT OR IGNORE``) never actually advanced
+    ``schema_version`` past its initial value, which is corrected here too
+    (``ON CONFLICT ... DO UPDATE``) -- without a real version to gate on,
+    every boot would re-run a full scan of ``event`` looking for untracked
+    tags, a cost that grows with the log for as long as this station runs.
+    """
     conn.executescript(_SCHEMA)
+
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    previous_version = int(row[0]) if row is not None else 0
+    if previous_version < 2:
+        conn.execute(
+            "INSERT OR IGNORE INTO specimen (tag) "
+            "SELECT DISTINCT tag FROM event WHERE tag IS NOT NULL"
+        )
+
     conn.execute(
-        "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+        """
+        INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
         (str(SCHEMA_VERSION),),
     )
     conn.commit()
@@ -190,6 +251,33 @@ class StoredEvent:
     tag: bytes | None
     fields: dict[str, object]
     payload: bytes | None
+
+
+@dataclass(frozen=True)
+class SpecimenRow:
+    """One row of the roster, as :meth:`Store.specimens` reports it.
+
+    ``times_seen``/``last_seen_epoch`` are never stored -- they come from
+    the ``specimen_activity`` view (see ``_SCHEMA``'s own comment), computed
+    fresh on every call, so this dataclass can only ever show what the event
+    log currently says, never a cached answer that could fall behind it.
+    """
+
+    tag: bytes
+    species: str | None
+    band_number: str | None
+    of_interest: bool
+    times_seen: int
+    last_seen_epoch: float | None
+
+
+# The only fields an operator may edit on a specimen (pending.md: "keep the
+# set small and obvious; do not invent a taxonomy"). A fixed allowlist,
+# never the caller's own dict keys interpolated straight into SQL --
+# `Store.update_specimen` builds its `UPDATE ... SET` clause from this tuple
+# alone, so an unexpected key in `fields` is silently not applied rather
+# than becoming a column name.
+_SPECIMEN_EDITABLE_FIELDS = ("species", "band_number", "of_interest")
 
 
 @dataclass(frozen=True)
@@ -433,6 +521,17 @@ class Store:
             seq = cursor.lastrowid
             assert seq is not None
 
+            # pending.md, "the first appearance of an unknown tag IS a new
+            # specimen": inside this same BEGIN IMMEDIATE, not a second
+            # write after COMMIT. A separate autocommit statement would cost
+            # this station a second fsync per event (`synchronous=FULL`)
+            # for no reason connected to what changed; folded in here, the
+            # roster becomes durable in the exact same fsync S9 already
+            # pays for, and can never be left half-caught-up by a crash
+            # between "the read landed" and "the roster noticed."
+            if event.tag is not None:
+                conn.execute("INSERT OR IGNORE INTO specimen (tag) VALUES (?)", (event.tag,))
+
             if event.source == "node":
                 assert node_seq is not None
                 assert event.msg_id is not None
@@ -531,6 +630,7 @@ class Store:
                 return AppendedBatch(seqs=(), node_seq=None, duplicate_of=duplicate_of)
 
             seqs: list[int] = []
+            observed_tags: set[bytes] = set()
             for event in events:
                 cursor = conn.execute(
                     """
@@ -556,6 +656,18 @@ class Store:
                 seq = cursor.lastrowid
                 assert seq is not None
                 seqs.append(seq)
+                if event.tag is not None:
+                    observed_tags.add(event.tag)
+
+            # One statement per *distinct* tag, not per read: a feeding
+            # frenzy's batch can repeat the same animal many times in one
+            # frame (`append`'s own docstring on why this method exists at
+            # all -- the same "once per frame, not once per row" discipline
+            # applied here to the roster instead of to dedup). See
+            # `append`'s own comment for why this sits inside the batch's
+            # one BEGIN IMMEDIATE rather than as a separate write.
+            for tag in observed_tags:
+                conn.execute("INSERT OR IGNORE INTO specimen (tag) VALUES (?)", (tag,))
 
             assert node_seq is not None
             conn.execute(
@@ -576,6 +688,82 @@ class Store:
             raise
 
         return AppendedBatch(seqs=tuple(seqs), node_seq=node_seq, duplicate_of=None)
+
+    def specimens(self) -> list[SpecimenRow]:
+        """The whole roster, ordered by tag -- station/specimen-roster: what
+        the operator's roster page lists and what ``GET /api/specimens``
+        returns.
+
+        ``times_seen``/``last_seen_epoch`` are read from the
+        ``specimen_activity`` view (``_SCHEMA``), never from a column on
+        ``specimen`` itself -- see that view's own comment for why a stored
+        counter here would be this project's characteristic defect.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT s.tag, s.species, s.band_number, s.of_interest,
+                   COALESCE(a.times_seen, 0), a.last_seen_epoch
+              FROM specimen s
+              LEFT JOIN specimen_activity a ON a.tag = s.tag
+             ORDER BY s.tag
+            """
+        ).fetchall()
+        return [
+            SpecimenRow(
+                tag=tag,
+                species=species,
+                band_number=band_number,
+                of_interest=bool(of_interest),
+                times_seen=times_seen,
+                last_seen_epoch=last_seen_epoch,
+            )
+            for tag, species, band_number, of_interest, times_seen, last_seen_epoch in rows
+        ]
+
+    def wanted_tags(self) -> list[bytes]:
+        """The current shared target list (messages.md's open question 2,
+        answered 2026-09-26: "shared by the whole network"): every specimen
+        the study currently wants, tag order (deterministic, so two
+        consecutive calls -- one per node about to be commanded -- can never
+        disagree about what "the current list" means).
+        """
+        rows = self._conn.execute(
+            "SELECT tag FROM specimen WHERE of_interest = 1 ORDER BY tag"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def update_specimen(self, tag: bytes, fields: Mapping[str, object]) -> bool:
+        """Apply only the keys actually present in ``fields`` -- never a
+        full overwrite -- to the specimen row for ``tag``.
+
+        Returns ``False`` without writing anything when no such specimen
+        exists: the roster grows only from an observed read or capture
+        (pending.md, "nothing has to be pre-registered") -- never from this
+        method, which never inserts a row, only updates one that is already
+        there.
+        """
+        assignments: list[str] = []
+        values: list[object] = []
+        for key in _SPECIMEN_EDITABLE_FIELDS:
+            if key not in fields:
+                continue
+            value = fields[key]
+            if key == "of_interest":
+                value = 1 if value else 0
+            assignments.append(f"{key} = ?")
+            values.append(value)
+
+        if not assignments:
+            row = self._conn.execute(
+                "SELECT 1 FROM specimen WHERE tag = ?", (tag,)
+            ).fetchone()
+            return row is not None
+
+        values.append(tag)
+        cursor = self._conn.execute(
+            f"UPDATE specimen SET {', '.join(assignments)} WHERE tag = ?", values
+        )
+        return cursor.rowcount > 0
 
     def _next_node_seq_and_dedup(
         self, conn: sqlite3.Connection, event: StationEvent
