@@ -12,6 +12,7 @@
   }
   header { position: sticky; top: 0; z-index: 10; background: #111; padding-top: .5rem; }
   h1 { font-size: 1.1rem; font-weight: 600; margin: .5rem 0; }
+  h2 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 .5rem; }
 
   .banner { border-radius: 8px; padding: .75rem; margin: .5rem 0; font-size: .95rem; }
   .banner-clock { background: #402a00; border: 1px solid #a86a00; color: #ffcf7a; }
@@ -91,10 +92,12 @@
   </div>
 </header>
 <div id="traps">Cargando…</div>
-<details>
-  <summary>Roster de especímenes</summary>
-  <div id="specimens">Cargando…</div>
-</details>
+<!-- Not a <details>: marking an animal is how an operator decides what every
+     trap hunts, so it cannot sit collapsed behind a disclosure triangle where
+     nobody finds it. Reported on the bench 2026-09-26: "no veo en la interfaz
+     como setear el target" -- the feature was built and invisible. -->
+<h2>Especímenes registrados</h2>
+<div id="specimens">Cargando…</div>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -414,7 +417,7 @@ function renderSpecimen(s) {
         value="${escapeHtml(s.band_number || "")}">
       <label class="of-interest-toggle" for="interest-${s.tag}">
         <input type="checkbox" id="interest-${s.tag}" ${s.of_interest ? "checked" : ""}>
-        De interés
+        De interés — las trampas lo capturan
       </label>
       <div class="actions">
         <button onclick="saveSpecimen('${s.tag}')">Guardar</button>

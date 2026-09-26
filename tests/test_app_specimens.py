@@ -358,3 +358,37 @@ def test_saving_a_specimen_only_sends_of_interest_when_it_actually_changed() -> 
     assert not re.search(r"of_interest:\s*ofInterest\s*,?\s*\}\)", body), (
         "of_interest must never be an unconditional key of the PATCH body"
     )
+
+
+def test_the_roster_is_not_collapsed_behind_a_disclosure_triangle() -> None:
+    """Marking an animal of interest is how an operator decides what every trap
+    hunts, so it cannot ship inside a closed `<details>`.
+
+    Measured on the bench 2026-09-26: the roster was built, served and
+    working, and the operator's report was "no veo en la interfaz como setear
+    el target" -- it sat collapsed under a summary nobody thought to click.
+    A feature that cannot be found has not been delivered.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    # Strip HTML comments first: the markup carries a comment explaining why
+    # this is not a <details>, and naive substring matching finds the word
+    # there. The first version of this test failed on its own explanation.
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    container = re.search(r'<div id="specimens">', markup)
+    assert container is not None, "the roster container is gone"
+    # Nothing between the traps list and the roster container may open a
+    # <details>: the roster must be in the page's own flow.
+    before = markup[: container.start()].rsplit('<div id="traps">', 1)[-1]
+    assert not re.search(r"<details[\s>]", before)
+
+
+def test_the_roster_heading_is_spanish_not_an_anglicism() -> None:
+    """Every string the operator reads is Spanish -- the biologists running
+    this are Colombian. "Roster" shipped once and was reported on sight.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    assert "<h2>Especímenes registrados</h2>" in html
+    # Identifiers and comments stay English by project convention; only what
+    # renders must not.
+    rendered = re.findall(r">([^<>{}]*[A-Za-zÁÉÍÓÚáéíóúÑñ][^<>{}]*)<", html)
+    assert not [text for text in rendered if "roster" in text.lower()]
