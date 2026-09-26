@@ -41,6 +41,17 @@
     border: 1px solid #555; background: #222; color: #eee;
   }
 
+  .threshold-control { margin: .4rem 0; font-size: .85rem; }
+  .threshold-control input[type=range] { width: 100%; height: 2rem; margin-top: .3rem; }
+
+  .reads { margin-top: .5rem; }
+  .read-group {
+    padding: .3rem .5rem; margin: .25rem 0; border-radius: 6px; background: #1a1a1a;
+    font-size: .85rem; border-left: 3px solid transparent;
+  }
+  .read-group-live { border-left-color: #7ee787; }
+  .read-tag { font-family: monospace; }
+
   details { margin-top: .6rem; }
   summary { cursor: pointer; padding: .5rem 0; min-height: 44px; display: flex; align-items: center; }
   textarea {
@@ -55,6 +66,13 @@
   <div id="clock-banner"></div>
   <div id="link-banner"></div>
   <div id="capture-banner"></div>
+  <div id="threshold-control" class="threshold-control">
+    <label for="threshold-input">
+      Umbral "todavía aquí": <span id="threshold-value">60</span> s
+    </label>
+    <input type="range" id="threshold-input" min="10" max="600" step="10" value="60"
+      oninput="onThresholdChange(this.value)">
+  </div>
 </header>
 <div id="traps">Cargando…</div>
 <script>
@@ -66,15 +84,143 @@ function escapeHtml(value) {
   }[c]));
 }
 
+// docs/pending.md, "Operator-facing gaps": "armed/fired/idle in English on
+// a Spanish page" -- every wire-vocabulary word the operator reads must be
+// Spanish, like every other label. Falls back to the raw value for a state
+// this page does not know yet, rather than crashing on one docs/design.md
+// may add later.
+const STATE_ES = { idle: "en reposo", armed: "armada", fired: "disparada", fault: "en falla" };
+function translateState(state) { return STATE_ES[state] || state; }
+
+// docs/pending.md, "Operator-facing gaps": an ISO timestamp answers nothing
+// a live view's whole job ("is this happening now") needs -- "hace 3
+// minutos" does. `nowEpoch` is always a caller-supplied parameter, never
+// Date.now() read from inside here, so this stays a pure function whose
+// caller controls what "now" means (see groupReadsByTag's own docstring
+// for why that matters).
+function formatRelative(epochSeconds, nowEpoch) {
+  const diff = Math.max(0, Math.round(nowEpoch - epochSeconds));
+  if (diff < 10) return "hace instantes";
+  if (diff < 60) return `hace ${diff} segundos`;
+  const minutes = Math.round(diff / 60);
+  if (minutes < 60) return `hace ${minutes} ${minutes === 1 ? "minuto" : "minutos"}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `hace ${hours} ${hours === 1 ? "hora" : "horas"}`;
+  const days = Math.round(hours / 24);
+  return `hace ${days} ${days === 1 ? "día" : "días"}`;
+}
+
+function epochOf(isoString) {
+  return Date.parse(isoString) / 1000;
+}
+
+// station/live-reads-view: groups one feeder's own reads by tag under a
+// "still here" gap -- a viewer control the operator adjusts with the
+// slider above, applied here, at render time, and nowhere else (design.md
+// 3.2's amendment: the gap that ends a visit is a biological parameter,
+// never something this station computes or caches; docs/pending.md: a
+// `visits` view "cannot disagree with its source, because there is no
+// second copy"). `reads` must already be scoped to one node_id before
+// this is ever called -- see renderTrap below -- a tag seen at two
+// feeders must never share a group, and this function has no node_id of
+// its own to enforce that with, only what its caller already filtered.
+function groupReadsByTag(reads, thresholdSeconds, nowEpoch) {
+  const byTag = new Map();
+  for (const r of reads) {
+    // A masked node_epoch (untrusted clock, phase 2) is never fabricated
+    // into a confident time -- received_epoch (the station's own clock,
+    // always present) is the honest fallback, flagged as estimated so the
+    // render can say so rather than imply certainty it does not have.
+    const estimated = r.node_epoch == null;
+    const epoch = estimated ? r.received_epoch : r.node_epoch;
+    const list = byTag.get(r.tag) || [];
+    list.push({ epoch, estimated });
+    byTag.set(r.tag, list);
+  }
+  const groups = [];
+  for (const [tag, entries] of byTag) {
+    entries.sort((a, b) => a.epoch - b.epoch);
+    let current = null;
+    for (const entry of entries) {
+      if (current && entry.epoch - current.lastEpoch <= thresholdSeconds) {
+        current.count += 1;
+        current.lastEpoch = entry.epoch;
+        current.lastEpochEstimated = entry.estimated;
+      } else {
+        current = {
+          tag, count: 1, firstEpoch: entry.epoch,
+          lastEpoch: entry.epoch, lastEpochEstimated: entry.estimated,
+        };
+        groups.push(current);
+      }
+    }
+  }
+  // Recomputed from nowEpoch on every call -- never cached -- so a group
+  // that stops updating stops reading "sigue aquí" the moment enough real
+  // time passes, even with no new data arriving (docs/pending.md's own
+  // characteristic defect: "state that was true once, presented as true
+  // now"). The periodic tick below (`rerender`) is what keeps calling this
+  // with a fresh nowEpoch between fetches.
+  for (const g of groups) {
+    g.stillGrowing = nowEpoch - g.lastEpoch <= thresholdSeconds;
+  }
+  groups.sort((a, b) => b.lastEpoch - a.lastEpoch);
+  return groups;
+}
+
+function renderReadGroup(g, nowEpoch) {
+  const count = g.count === 1 ? "1 lectura" : `${g.count} lecturas`;
+  const since = g.count > 1 ? ` · desde ${formatRelative(g.firstEpoch, nowEpoch)}` : "";
+  const status = g.stillGrowing
+    ? "sigue aquí"
+    : `última lectura ${formatRelative(g.lastEpoch, nowEpoch)}`;
+  const clockNote = g.lastEpochEstimated
+    ? ' <span class="muted">(reloj del nodo sin confirmar)</span>' : "";
+  return `<div class="read-group ${g.stillGrowing ? "read-group-live" : ""}">` +
+    `<span class="read-tag">${escapeHtml(g.tag)}</span> · ${count}${since} · ${status}${clockNote}` +
+    `</div>`;
+}
+
+function renderReadsSection(reads, nowEpoch) {
+  const groups = groupReadsByTag(reads, thresholdSeconds, nowEpoch);
+  return groups.length
+    ? groups.map((g) => renderReadGroup(g, nowEpoch)).join("")
+    : '<p class="muted">Sin lecturas recientes.</p>';
+}
+
+// The operator's own "still here" slider -- never sent to the station, never
+// stored (design.md 3.2's amendment). Kept as an in-memory variable, not
+// localStorage: it is a per-session viewing choice, not a station setting.
+let thresholdSeconds = 60;
+
+function onThresholdChange(value) {
+  thresholdSeconds = Number(value);
+  $("threshold-value").textContent = String(thresholdSeconds);
+  rerender();
+}
+
+// The last data `refresh()` actually fetched -- `rerender()` reuses it so
+// the reads view (and Últ. contacto) can be recomputed against a fresh
+// `Date.now()` between fetches, without a new network round trip.
+let latestTraps = [];
+let latestReadsByNode = {};
+
+function rerender() {
+  renderTraps(latestTraps, latestReadsByNode, Date.now() / 1000);
+}
+
 async function refresh() {
-  const [traps, health] = await Promise.all([
+  const [traps, health, reads] = await Promise.all([
     fetch("/api/traps").then((r) => r.json()),
     fetch("/health").then((r) => r.json()).catch(() => null),
+    fetch("/api/reads").then((r) => r.json()).catch(() => ({})),
   ]);
+  latestTraps = traps;
+  latestReadsByNode = reads;
   renderClockBanner(health);
   renderLinkBanner(health);
   renderCaptureBanner(traps);
-  renderTraps(traps);
+  renderTraps(traps, reads, Date.now() / 1000);
 }
 
 // S12: an unset clock is a banner, not a footnote -- every timestamp on this
@@ -115,25 +261,29 @@ function renderCaptureBanner(traps) {
     </div>`).join("");
 }
 
-function renderTraps(traps) {
+function renderTraps(traps, readsByNode, nowEpoch) {
   $("traps").innerHTML = traps.length
-    ? traps.map(renderTrap).join("")
+    ? traps.map((t) => renderTrap(t, readsByNode, nowEpoch)).join("")
     : '<p class="empty">Ninguna trampa se ha reportado todavía.</p>';
 }
 
 // S4/S11: `reachable` is a fact separate from `state` -- a trap we cannot
 // reach is never shown as simply "armed"; the two facts stay visually
 // distinct here rather than merged into one reassuring line.
-function renderTrap(t) {
+function renderTrap(t, readsByNode, nowEpoch) {
   const noContact = !t.reachable;
   const battery = t.battery_mv != null ? `${t.battery_mv} mV` : "sin dato";
   const version = t.targets_version != null ? t.targets_version : "—";
-  const lastSeen = t.last_seen ? escapeHtml(t.last_seen) : "nunca";
+  // docs/pending.md, "Operator-facing gaps": an ISO timestamp answers
+  // nothing a live view needs -- "hace 3 minutos" does.
+  const lastSeen = t.last_seen ? formatRelative(epochOf(t.last_seen), nowEpoch) : "nunca";
   // WARNING J (sdd-verify field-station-p4): `state` is `null` exactly
   // when this station has no readable report to show -- never render
   // that as the English enum values around it would suggest by omission;
   // say so, in Spanish, same as every other "no data" label on this page.
-  const state = t.state != null ? t.state : "desconocido";
+  // docs/pending.md, "Operator-facing gaps": the reported value itself
+  // must also be Spanish, not the raw English wire word.
+  const state = t.state != null ? translateState(t.state) : "desconocido";
   // WARNING 2 (sdd-verify field-station-p4 batch 2 close-out): a stale-
   // flagged trap must not render byte-identical to a confident one --
   // independent of `reachable` (`no-contact-badge` above), which after a
@@ -153,6 +303,10 @@ function renderTrap(t) {
   const targets = (t.targets && t.targets.length)
     ? t.targets.map(escapeHtml).join(", ")
     : "ninguno";
+  // station/live-reads-view: this feeder's own slice of the reads window,
+  // scoped by node_id *before* any grouping by tag happens -- a tag seen
+  // at two feeders must never be merged into one feeder's section.
+  const reads = readsByNode[t.node_id] || [];
   return `
     <div class="trap ${noContact ? "no-contact" : ""}">
       <div class="state">Trampa ${t.node_id} · ${state}</div>
@@ -160,6 +314,10 @@ function renderTrap(t) {
       ${t.state_may_be_stale ? '<p class="stale-badge">⚠ puede no ser el último reporte de esta trampa</p>' : ""}
       <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
       <p class="muted">Objetivos actuales: ${targets}</p>
+      <div class="reads">
+        <p class="muted">Lecturas recientes:</p>
+        ${renderReadsSection(reads, nowEpoch)}
+      </div>
       ${t.pending_command ? `<p class="pending">${describePending(t)}</p>` : ""}
       <div class="actions">
         <button onclick="disarm(${t.node_id})">Desarmar</button>
@@ -220,5 +378,10 @@ async function saveTargets(id) {
 new EventSource("/api/events").onmessage = refresh;
 refresh();
 setInterval(refresh, 30000);
+// station/live-reads-view: no new fetch -- recomputes Últ. contacto and
+// every read group's relative time and "sigue aquí"/stale distinction
+// against a fresh Date.now(), so both keep advancing between the 30s
+// fetches and the operator's own SSE-triggered refreshes.
+setInterval(rerender, 5000);
 </script>
 </html>

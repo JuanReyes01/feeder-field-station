@@ -661,6 +661,169 @@ def test_static_index_html_references_no_external_asset() -> None:
     assert "://" not in html  # also catches protocol-relative `//cdn...` references
 
 
+# --- station/live-reads-view: the page's own grouping/formatting logic ------
+#
+# Full DOM rendering is not pytest's domain (this module's own docstring):
+# no Node/browser toolchain exists in this project (no package.json, nothing
+# in pyproject.toml's dev group -- a deliberate, previously-recorded choice,
+# not an oversight). These tests pin index.html's source text the same way
+# `test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant`
+# already does: the exact ternary/expression, not merely a substring
+# mentioning the right field name somewhere.
+#
+# `GET /api/reads`'s own behaviour above (the real, executable proof that
+# two feeders sharing a tag stay in two separate groups) is not repeated
+# here -- these tests cover what only exists in the browser: the "still
+# here" grouping-by-gap itself, and Spanish-language rendering.
+
+
+def test_the_page_translates_trap_state_to_spanish() -> None:
+    """docs/pending.md, "Operator-facing gaps": `armed`/`fired`/`idle` in
+    English on a Spanish page must become Spanish, like every other label.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r'idle:\s*"en reposo"', html)
+    assert re.search(r'armed:\s*"armada"', html)
+    assert re.search(r'fired:\s*"disparada"', html)
+    assert re.search(r'fault:\s*"en falla"', html)
+    # The ternary that assigns `state` must call the translator, not render
+    # `t.state` (the raw English wire value) directly -- the same
+    # condition-and-both-branches anchoring the stale-badge test already
+    # uses, so an inverted condition or a bypassed translator both fail.
+    assert re.search(
+        r'const state = t\.state != null \? translateState\(t\.state\) : "desconocido";', html
+    )
+
+
+def test_ultimo_contacto_renders_a_relative_time_not_an_iso_timestamp() -> None:
+    """docs/pending.md, "Operator-facing gaps": `Últ. contacto:
+    2026-09-23T14:02:11-05:00` must become `hace 3 minutos` -- a live
+    view's whole job is "is this happening now", which an ISO string does
+    not answer at a glance.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    # `lastSeen` must be computed through formatRelative(), not a bare
+    # escapeHtml(t.last_seen) rendering the ISO string untouched.
+    assert re.search(
+        r"const lastSeen = t\.last_seen \? formatRelative\(epochOf\(t\.last_seen\), nowEpoch\) "
+        r': "nunca";',
+        html,
+    )
+    assert "escapeHtml(t.last_seen)" not in html
+    # formatRelative itself must actually produce "hace ..." text, not just
+    # be named correctly while returning something else.
+    assert re.search(r'formatRelative[^{]*\{[^}]*"hace', html, re.DOTALL)
+
+
+def test_reads_are_scoped_to_one_feeder_before_being_grouped_by_tag() -> None:
+    """Kill: passing the whole `/api/reads` response (every feeder's reads)
+    into the tag-grouping function would let a tag seen at two feeders
+    read as one feeder's business -- the exact "collapses two feeders into
+    one group" defect. `renderTrap` must look up its own `node_id`'s slice
+    of `readsByNode` before any grouping happens.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"readsByNode\[t\.node_id\]\s*\|\|\s*\[\]", html)
+    # groupReadsByTag must be called with that per-node slice (`reads`),
+    # not the raw `readsByNode` object itself.
+    assert re.search(r"groupReadsByTag\(reads,\s*thresholdSeconds,\s*nowEpoch\)", html)
+
+
+def test_a_groups_still_growing_flag_is_recomputed_from_now_not_a_constant() -> None:
+    """Kill: this is the mechanical proof behind "renders a stale group as
+    if it were current" -- `stillGrowing` must be an expression comparing
+    `nowEpoch` (a parameter, fresh on every call) against the group's own
+    `lastEpoch`, not `true`, not a value copied from the read itself.
+    Anchoring the full assignment (not only the field name) catches a
+    hardcoded `true` and an inverted comparison alike, the same
+    "condition and both branches" discipline the stale-badge test already
+    established for a ternary.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"g\.stillGrowing = nowEpoch - g\.lastEpoch <= thresholdSeconds;", html)
+    # groupReadsByTag itself must never call Date.now() -- "now" only ever
+    # arrives as this function's own parameter, so every caller (a fetch-
+    # triggered refresh, or the no-fetch tick below) controls it.
+    match = re.search(r"function groupReadsByTag\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
+    assert match, "groupReadsByTag must be defined as a top-level function"
+    assert "Date.now()" not in match.group(1)
+
+
+def test_a_periodic_tick_recomputes_the_view_without_a_new_fetch() -> None:
+    """A group that stops updating must stop reading "sigue aquí" as real
+    time passes, even with no new data arriving (docs/pending.md's own
+    defect: "state that was true once, presented as true now"). A second,
+    faster `setInterval` -- distinct from the 30-second data refresh --
+    that calls `rerender()` (which reads `Date.now()` itself, not a cached
+    value) is what keeps that true between fetches.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"setInterval\(refresh,\s*30000\)", html)
+    assert re.search(r"setInterval\(rerender,\s*\d+\)", html)
+    match = re.search(r"function rerender\(\)\s*\{(.*?)\n\}", html, re.DOTALL)
+    assert match, "rerender must be defined as a top-level function"
+    assert "Date.now()" in match.group(1)
+    assert "latestTraps" in match.group(1)
+    assert "latestReadsByNode" in match.group(1)
+
+
+def test_the_threshold_slider_value_is_never_sent_in_a_network_request() -> None:
+    """design.md 3.2's amendment / the user's own words on delivery: the
+    "still here" threshold is a viewer control -- it must never leave the
+    browser. Every `fetch(` call site in the page is checked; none may
+    reference the slider's value or its backing variable.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    fetch_calls = re.findall(r"fetch\([^)]*\)", html)
+    assert fetch_calls, "the page must still call fetch() for its existing routes"
+    assert not any("threshold" in call.lower() for call in fetch_calls), (
+        "no fetch() call may carry the viewer's threshold -- it is never sent to the station"
+    )
+
+
+def test_an_untrusted_clock_read_group_shows_a_caveat_not_a_confident_time() -> None:
+    """A read whose `node_epoch` is `null` (phase 2's own masking, an
+    untrusted node clock) must not render as if its time were as certain
+    as a trusted one -- the page must not invent a confirmed-looking time
+    for it either.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(
+        r'g\.lastEpochEstimated\s*\?\s*\'[^\']*reloj del nodo sin confirmar[^\']*\'\s*:\s*""',
+        html,
+    )
+
+
+def test_reads_section_renders_a_fallback_with_no_reads_at_all() -> None:
+    """First render, a freshly booted station: `/api/reads` answers `{}`
+    (or a node with no rows yet) and the page must say so in Spanish, the
+    same "Ninguna trampa..." empty-state precedent `renderTraps` already
+    sets, rather than an empty `<div>` a person could mistake for a
+    loading glitch.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert "Sin lecturas recientes." in html
+
+
+def test_refresh_also_fetches_the_reads_window() -> None:
+    """`refresh()` must pull `/api/reads` alongside the existing
+    `/api/traps` and `/health` calls -- fetch-on-notice (this project's own
+    SSE publishes a bare `{"type": "traps_changed"}`, never the read data
+    itself), not a second streaming channel.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r'fetch\("/api/reads"\)', html)
+
+
 # --- Slice 12: auto-start-deployment ----------------------------------------
 
 # --- 12.0a/12.0b: nothing before this slice ever started a thread ----------
