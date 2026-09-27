@@ -453,7 +453,6 @@ def run_scheduler_loop(
                             store=store,
                             gateway=gateway,
                             now=now,
-                            arm_duration_s=config.arm_duration.total_seconds(),
                             budget=budget,
                         )
                 else:  # "time_sync"

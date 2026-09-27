@@ -33,15 +33,6 @@ DEFAULT_SILENCE_AFTER = timedelta(minutes=15)
 # bare literal inside adapters/scheduler.py.
 DEFAULT_BACKLOG_RETRY_BUDGET = 3
 
-# Slice 12 (auto-start-deployment): messages.md does not pin how long an
-# ARM's `expires_epoch` should hold — the same "documented assumption,
-# never a bare literal" discipline domain/payloads.py already applies to
-# unpinned field widths. `adapters/command_sender.py` is the one call site
-# that reads this; a trap the station still wants armed past this window
-# gets a fresh ARM from the same resend-until-confirmed discipline S2
-# already requires for SET_TARGETS.
-DEFAULT_ARM_DURATION = timedelta(hours=24)
-
 # CRITICAL 3 (sdd-verify field-station-p4), revised by the scheduler-
 # throttle bench fix (docs/pending.md): this budget models one *link*, and
 # every number below says plainly which one -- the original version of
@@ -144,7 +135,6 @@ DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S = DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_SERIAL
 ENV_HEARTBEAT_INTERVAL_S = "FEEDER_STATION_HEARTBEAT_INTERVAL_S"
 ENV_SILENCE_AFTER_S = "FEEDER_STATION_SILENCE_AFTER_S"
 ENV_BACKLOG_RETRY_BUDGET = "FEEDER_STATION_BACKLOG_RETRY_BUDGET"
-ENV_ARM_DURATION_S = "FEEDER_STATION_ARM_DURATION_S"
 ENV_CHANNEL_BUDGET_FRAMES_PER_S = "FEEDER_STATION_CHANNEL_BUDGET_FRAMES_PER_S"
 
 
@@ -153,7 +143,6 @@ class StationConfig:
     heartbeat_interval: timedelta = DEFAULT_HEARTBEAT_INTERVAL
     silence_after: timedelta = DEFAULT_SILENCE_AFTER
     backlog_retry_budget: int = DEFAULT_BACKLOG_RETRY_BUDGET
-    arm_duration: timedelta = DEFAULT_ARM_DURATION
     channel_budget_frames_per_s: float = DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S
 
     @classmethod
@@ -176,7 +165,6 @@ class StationConfig:
         parser.add_argument("--heartbeat-interval-s", type=float, default=None)
         parser.add_argument("--silence-after-s", type=float, default=None)
         parser.add_argument("--backlog-retry-budget", type=int, default=None)
-        parser.add_argument("--arm-duration-s", type=float, default=None)
         parser.add_argument("--channel-budget-frames-per-s", type=float, default=None)
         args, _unknown = parser.parse_known_args(list(argv) if argv is not None else [])
 
@@ -195,11 +183,6 @@ class StationConfig:
                 args.backlog_retry_budget,
                 resolved_env.get(ENV_BACKLOG_RETRY_BUDGET),
                 DEFAULT_BACKLOG_RETRY_BUDGET,
-            ),
-            arm_duration=_resolve_seconds(
-                args.arm_duration_s,
-                resolved_env.get(ENV_ARM_DURATION_S),
-                DEFAULT_ARM_DURATION,
             ),
             channel_budget_frames_per_s=_resolve_float(
                 args.channel_budget_frames_per_s,

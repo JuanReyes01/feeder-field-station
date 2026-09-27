@@ -116,10 +116,17 @@ class CommandStore(Protocol):
     def latest(self, node_id: int, msg_type: int) -> _FieldsRow | None: ...
 
 
-def _encode_single_frame(command: Command, *, now: datetime, arm_duration_s: float) -> bytes | None:
+def _encode_single_frame(command: Command) -> bytes | None:
     if command.kind is CommandKind.ARM:
-        expires_epoch = int(now.timestamp() + arm_duration_s)
-        return payloads.encode_arm(expires_epoch=expires_epoch)
+        # Position model (docs/protocol/messages.md): ARM is a command to
+        # drive the servo to the armed position, always obeyed, never a
+        # state transition the node may accept or refuse -- so there is no
+        # verdict left on the node side for a deadline to be judged
+        # against. `expires_epoch` stays in the wire format (retired, not
+        # removed: renumbering or repurposing a pinned field is exactly
+        # what this protocol's own fault-code registry refuses to do) and
+        # is always `0`, messages.md's own "no deadline on the order".
+        return payloads.encode_arm(expires_epoch=0)
     if command.kind is CommandKind.DISARM:
         return payloads.encode_disarm()
     return None  # SET_TARGETS is handled by `_send_set_targets`, never here.
@@ -234,7 +241,6 @@ def send_due_commands(
     store: CommandStore,
     gateway: CommandGateway,
     now: datetime,
-    arm_duration_s: float,
     budget: TransmitBudget,
 ) -> list[int]:
     """One pass over every trap with a pending command, or an outstanding
@@ -284,7 +290,7 @@ def send_due_commands(
                     sent = True
             elif budget.try_send():
                 msg_type = _WIRE_MSG_TYPE.get(command.kind)
-                payload = _encode_single_frame(command, now=now, arm_duration_s=arm_duration_s)
+                payload = _encode_single_frame(command)
                 if msg_type is not None and payload is not None:
                     frame = Frame(msg_type=msg_type, node_id=trap.node_id, payload=payload)
                     if gateway.write_frame(frames.encode(frame)):
