@@ -25,11 +25,24 @@ It is **not** the analysis app, and it does **not** decide when a trap fires.
 | ID | Requirement | Accepted when |
 |----|-------------|---------------|
 | S1 | Arm and disarm a named trap (R2) | An operator arms a trap from the UI; the trap's next heartbeat reports `armed`, and the UI shows it as armed rather than as commanded |
-| S2 | Edit the target-tag list of a trap (R3) | An edited list reaches the trap and the UI distinguishes **delivered** from **pending** by comparing the version the trap reports with the version the station holds |
+| S2 | Edit the target-tag list **the whole network hunts** (R3) — one shared wanted set, marked on the specimen roster, not a list typed per trap (**re-scoped 2026-09-26 by messages.md's open question 2**: "the study decides which animals are of interest, not the feeder"; the list is one, the *confirmation* stays per trap) | An edited list reaches **every known trap** and the UI distinguishes **delivered** from **pending** per trap, by comparing the version the trap reports with the version the station holds |
 | S3 | Notify a person on capture, naming the trap (R4) | A capture appears **at once** in every browser that has the interface open, over plain HTTP on the local network, naming the trap and the tag — **and** is still there for anyone who opens the interface hours later |
 | S4 | Show which traps are armed (R5) | The UI shows, per trap: armed state, battery, clock, target-list version and time since last contact — all sourced from the trap's own heartbeat, never from what the station last commanded |
 | S5 | Serve at least 10 traps (R6) | Ten traps report and are commanded without the operator waiting on the UI |
 | S6 | Export the station's own witnessed events — visits, captures, trap-state changes — as CSV, alongside a consistent-snapshot copy of the database (R8's station half, **re-scoped 2026-09-23 by design decision D1**: the radio only ever carries collapsed events, never an individual reader pass, so the station structurally cannot produce the per-reading raw-ingest file `feeder-analysis` wants; that stays the node's own SD card, collected by hand) | A produced export's CSV contains exactly the visit, capture and trap-state-change events the station has stored, labelled as the station's own record, and nothing else |
+| S16 | The specimen roster: one row per tag ever read, and marking a specimen is how targets are chosen (R3) | The station holds exactly one row per tag it has ever read — created by the read itself, in the same transaction, never pre-registered by hand (`PATCH /api/specimens/{tag}` 404s an unknown tag); `species` and `band_number` are the only fields an operator may edit and are blank until someone fills them in, never invented; marking a specimen `of_interest` is what puts its tag on the one shared target list pushed to every known trap, and at most `of_interest_limit` (81 — what one chunked `SET_TARGETS` send can ever be budgeted tokens for) may be `of_interest` at once, a 422 past that; `times_seen` and `last_seen` are computed from the stored `READS`/`CAPTURED` events on every query of the roster and are never columns on the specimen row |
+
+**The per-trap door in the API is not authoritative.** A single-trap door remains in the API for
+one trap at a time, but the next roster edit recomputes the shared wanted set and re-pushes it to
+every trap, overwriting a list set for one trap alone. S2 said "of a trap" until today because it
+predates the 2026-09-26 re-scoping and was never amended; read that way, an operator plans trap A
+after one tag and trap B after another, and then believes a trap is hunting a tag it is not — this
+project's characteristic defect exactly, a list that was true once presented as true now.
+
+**S16 is out of sequence on purpose.** The S-numbers are one series running across both tables, and
+they are cited by name from the code, the tests and `deploy.md` — S1 through S13. Numbering the
+roster S7 would renumber nine live requirements and silently falsify every one of those references,
+so it took the next free number instead of the next logical one. It is not a gap to tidy.
 
 ## The station's own requirements
 
