@@ -1302,6 +1302,11 @@ def test_a_node_with_no_readable_state_source_shows_unknown_not_idle(tmp_path: P
 # invisible to every rehydration walk. ---------------------------------------
 
 
+def _issue_arm(c: TestClient, node_id: int) -> None:
+    response = c.post(f"/api/traps/{node_id}/arm")
+    assert response.status_code == 200
+
+
 def _issue_disarm(c: TestClient, node_id: int) -> None:
     response = c.post(f"/api/traps/{node_id}/disarm")
     assert response.status_code == 200
@@ -1332,16 +1337,23 @@ def _issue_set_targets_then_disarm(c: TestClient, node_id: int) -> None:
 # them cannot pass this parametrize table, only the un-parametrized single-case
 # version the report measured.
 #
-# ARM is not parametrized here any more: `POST /api/traps/{node_id}/arm` no
-# longer exists (docs/pending.md, "Remove the remote arm affordance"), so
-# an operator cannot produce this case through the interface at all.
-# `Registry.command_arm`/`OPERATOR_ARM` rehydration is still real, for a
-# station booting against an existing database that predates this change --
-# proven directly, without the removed route, by
-# `test_a_legacy_arm_row_still_rehydrates_to_a_pending_command` below.
+# station/remote-arm-restored: ARM is parametrized here again.
+# `POST /api/traps/{node_id}/arm` was gone for one commit (029b80c,
+# "remove the remote arm affordance") and this case was dropped down to
+# `test_a_legacy_arm_row_still_rehydrates_to_a_pending_command` below,
+# which seeds an `OPERATOR_ARM` row directly against the store rather
+# than through the (then-removed) HTTP route. The route exists again
+# (the bench now runs the arming sweep on the node itself), so this table
+# goes back to proving the real, full path -- operator presses Armar,
+# the row is durable, a restart still shows it pending -- for ARM the
+# same way it already does for DISARM and SET_TARGETS. The legacy test
+# below stays: it is the only proof that a row seeded before this
+# capability existed still rehydrates correctly, which no route call
+# here would ever construct.
 @pytest.mark.parametrize(
     ("issue_command", "expected_pending"),
     [
+        pytest.param(_issue_arm, "arm", id="arm"),
         pytest.param(_issue_disarm, "disarm", id="disarm"),
         pytest.param(_issue_set_targets, "set_targets", id="set_targets"),
         # CRITICAL 1 (verify-report-batch2c.md): the previous three cases only
