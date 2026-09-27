@@ -53,7 +53,34 @@ from feeder_station.domain.traps import Registry, TrapState
 # actually arrived.
 DEDUP_WINDOW = 32768
 
-SCHEMA_VERSION = 2
+# HELLO.boot_count (docs/protocol/messages.md) is a 2-byte LE field, the same
+# width as msg_id -- and, exactly like msg_id (DEDUP_WINDOW's own comment
+# above), it wraps. `_boot_count_is_newer` below is a modular "greater than",
+# not `candidate > stored`: a plain `>` reads a genuine reboot that rolls the
+# counter from 65535 back to 0 as *older*, and would refuse to reset dedup on
+# precisely the boot where the wrap makes the restart's own msg_ids collide
+# hardest with what the previous boot already stored.
+_BOOT_COUNT_MODULUS = 1 << 16
+
+
+def _boot_count_is_newer(candidate: int, stored: int) -> bool:
+    """Whether ``candidate`` is a later boot than ``stored``, mod 65536.
+
+    Classic serial-number arithmetic (RFC 1982), the same shape DEDUP_WINDOW's
+    own "2x margin" comment already reasons about for msg_id: the forward
+    distance from ``stored`` to ``candidate`` is ``newer`` when it falls in
+    the closer half of the ring (``0 <`` distance ``< 32768``) and not newer
+    otherwise -- ``0`` (equal; the expected HELLO retry) and the far half
+    (``candidate`` is actually the *older* value, wrapped) both read as "not
+    newer". A node reboots far too rarely for genuinely-newer and
+    genuinely-older to alias across that half-ring boundary -- the same order
+    of margin DEDUP_WINDOW already leans on for msg_id.
+    """
+    forward_distance = (candidate - stored) % _BOOT_COUNT_MODULUS
+    return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
+
+
+SCHEMA_VERSION = 3
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +123,15 @@ CREATE TABLE IF NOT EXISTS event (
 CREATE INDEX IF NOT EXISTS event_dedup   ON event(node_id, msg_id, node_seq DESC);
 CREATE INDEX IF NOT EXISTS event_by_type ON event(node_id, msg_type, seq DESC);
 
+-- `boot_count` (SCHEMA_VERSION 3 migration, below) is added by `ALTER TABLE`,
+-- never listed here: this `CREATE TABLE IF NOT EXISTS` also runs, unchanged,
+-- against a database a SCHEMA_VERSION-3+ station already wrote -- if the
+-- column were declared here too, that would leave the *migration* as the
+-- only path that ever adds it for a database that predates it, while a
+-- brand-new database would need it created a second, different way. Adding
+-- it exclusively through the gated migration keeps there being exactly one
+-- path, proven against exactly the pre-existing-data shape live bench
+-- databases are already in.
 CREATE TABLE IF NOT EXISTS node_cursor (
     node_id       INTEGER PRIMARY KEY,
     last_msg_id   INTEGER NOT NULL,
@@ -187,6 +223,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     (``ON CONFLICT ... DO UPDATE``) -- without a real version to gate on,
     every boot would re-run a full scan of ``event`` looking for untracked
     tags, a cost that grows with the log for as long as this station runs.
+
+    **SCHEMA_VERSION 3** (docs/pending.md, "A node goes invisible after
+    every power cut"): ``node_cursor`` gains a ``boot_count`` column, the
+    per-node high-water mark ``_next_node_seq_and_dedup`` compares a
+    ``HELLO``'s own ``boot_count`` against to decide whether to reset that
+    node's dedup window. ``ALTER TABLE ... ADD COLUMN`` is not idempotent
+    the way ``CREATE TABLE IF NOT EXISTS`` is -- run twice, the second call
+    raises ``sqlite3.OperationalError`` for a column that already exists --
+    so this, unlike the column-free tables above, genuinely needs the same
+    stored-version gate the specimen backfill already established, not a
+    second attempt at an ``IF NOT EXISTS`` idiom SQLite's ``ALTER TABLE``
+    does not offer for columns. Proven against a database a
+    SCHEMA_VERSION-2 station already wrote real ``node_cursor`` rows into
+    by
+    ``tests/adapters/test_hello_resets_dedup.py::test_migration_adds_boot_count_to_an_existing_node_cursor_row``,
+    and proven not to re-run on a second boot by that same module's
+    ``test_reopening_a_migrated_database_does_not_re_run_the_migration``.
     """
     conn.executescript(_SCHEMA)
 
@@ -197,6 +250,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO specimen (tag) "
             "SELECT DISTINCT tag FROM event WHERE tag IS NOT NULL"
         )
+    if previous_version < 3:
+        conn.execute("ALTER TABLE node_cursor ADD COLUMN boot_count INTEGER NOT NULL DEFAULT 0")
 
     conn.execute(
         """
@@ -492,7 +547,7 @@ class Store:
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")
         try:
-            node_seq, duplicate_of = self._next_node_seq_and_dedup(conn, event)
+            node_seq, duplicate_of, hello_boot_count = self._next_node_seq_and_dedup(conn, event)
             if duplicate_of is not None:
                 conn.execute("COMMIT")
                 return Appended(seq=duplicate_of, node_seq=None, duplicate_of=duplicate_of)
@@ -535,17 +590,41 @@ class Store:
             if event.source == "node":
                 assert node_seq is not None
                 assert event.msg_id is not None
-                conn.execute(
-                    """
-                    INSERT INTO node_cursor (node_id, last_msg_id, last_seq, last_node_seq)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(node_id) DO UPDATE SET
-                        last_msg_id   = excluded.last_msg_id,
-                        last_seq      = excluded.last_seq,
-                        last_node_seq = excluded.last_node_seq
-                    """,
-                    (event.node_id, event.msg_id, seq, node_seq),
-                )
+                if hello_boot_count is not None:
+                    # A HELLO -- also persist this node's boot_count
+                    # high-water mark (docs/pending.md, "A node goes
+                    # invisible after every power cut"; see
+                    # `_next_node_seq_and_dedup`'s own docstring). Every
+                    # other message type keeps the plain upsert below
+                    # completely untouched, never referencing this column at
+                    # all, so it is never overwritten with a value the wire
+                    # never carried.
+                    conn.execute(
+                        """
+                        INSERT INTO node_cursor (
+                            node_id, last_msg_id, last_seq, last_node_seq, boot_count
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(node_id) DO UPDATE SET
+                            last_msg_id   = excluded.last_msg_id,
+                            last_seq      = excluded.last_seq,
+                            last_node_seq = excluded.last_node_seq,
+                            boot_count    = excluded.boot_count
+                        """,
+                        (event.node_id, event.msg_id, seq, node_seq, hello_boot_count),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO node_cursor (node_id, last_msg_id, last_seq, last_node_seq)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(node_id) DO UPDATE SET
+                            last_msg_id   = excluded.last_msg_id,
+                            last_seq      = excluded.last_seq,
+                            last_node_seq = excluded.last_node_seq
+                        """,
+                        (event.node_id, event.msg_id, seq, node_seq),
+                    )
 
             conn.execute("COMMIT")
         except BaseException:
@@ -624,7 +703,12 @@ class Store:
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")
         try:
-            node_seq, duplicate_of = self._next_node_seq_and_dedup(conn, first)
+            # `_hello_boot_count` is always `None` here: `first.msg_type` is
+            # never HELLO in practice (`adapters/ingest.py` only ever routes
+            # READS frames through this method -- see this method's own
+            # docstring), and this call site never references it, so the
+            # upsert below stays exactly as it was, byte for byte.
+            node_seq, duplicate_of, _hello_boot_count = self._next_node_seq_and_dedup(conn, first)
             if duplicate_of is not None:
                 conn.execute("COMMIT")
                 return AppendedBatch(seqs=(), node_seq=None, duplicate_of=duplicate_of)
@@ -767,21 +851,85 @@ class Store:
 
     def _next_node_seq_and_dedup(
         self, conn: sqlite3.Connection, event: StationEvent
-    ) -> tuple[int | None, int | None]:
+    ) -> tuple[int | None, int | None, int | None]:
         """DD6/DD8: bounded-window dedup, keyed on the station's own node_seq.
 
-        Returns ``(node_seq, duplicate_of)``. ``node_seq`` is ``None`` for
-        anything not sourced from a node (design.md: "NULL when source <>
-        'node'") and also ``None`` when a duplicate is found, since a
-        duplicate consumes no new ordinal.
+        Returns ``(node_seq, duplicate_of, hello_boot_count)``. ``node_seq``
+        is ``None`` for anything not sourced from a node (design.md: "NULL
+        when source <> 'node'") and also ``None`` when a duplicate is found,
+        since a duplicate consumes no new ordinal. ``hello_boot_count`` is
+        the value :meth:`append`'s own ``node_cursor`` upsert must persist as
+        this node's ``boot_count`` high-water mark -- non-``None`` only for a
+        ``HELLO`` event, so every other message type's upsert leaves that
+        column exactly as it already was (that column does not exist on the
+        wire for any other message type).
+
+        **docs/pending.md, "A node goes invisible after every power cut":**
+        a node's ``msg_id`` restarts at 1 on every boot, so a restarted
+        node's first few messages routinely repeat ``msg_id``s this dedup
+        window already holds from before the restart -- read as replays by
+        the ordinary check below, forever, until the window ages them out on
+        its own (up to ``DEDUP_WINDOW`` messages away). ``HELLO``
+        (``docs/protocol/messages.md``) carries ``boot_count``, a counter a
+        node increments once per boot, and is what lets the station tell
+        "this is a restart" from "this is a replay" at all:
+
+        * A ``HELLO`` whose ``boot_count`` is genuinely newer than the one
+          on file (:func:`_boot_count_is_newer` -- wraparound-aware, never a
+          plain ``>``) means this node has rebooted since the station last
+          heard from it. ``previous_node_seq`` is widened by exactly
+          ``DEDUP_WINDOW`` before this event's own ``node_seq`` is drawn from
+          it: since ``node_seq`` only ever increases for a given node, every
+          row this node has ever stored has ``node_seq`` no greater than the
+          *old* ``previous_node_seq`` -- and the ordinary dedup check below
+          keys on ``node_seq > previous_node_seq - DEDUP_WINDOW``, so adding
+          a full ``DEDUP_WINDOW`` moves that floor strictly past every row
+          this node has ever stored, unconditionally, regardless of how full
+          the window happened to be. No stored ``node_cursor`` row at all (a
+          node the station has never heard from) counts as "newer" too --
+          there is no dedup state to reset, but nothing to lose by treating
+          it as such either.
+        * ``boot_count`` merely equal to what is on file (the expected
+          retry -- the firmware resends ``HELLO`` until acknowledged) or
+          *lower* (a stale retransmission arriving late, or a replaced
+          board's counter starting over) must never reset anything: a lower
+          value winning here would let old data wipe a live node's cursor
+          and reopen the exact collision this exists to close.
+        * ``HELLO`` itself never reaches the ordinary duplicate check below,
+          unconditionally: its own ``msg_id`` is whatever the wire gives it
+          (typically 1 -- the id most likely to collide with what the
+          previous boot already stored), so running it through the same
+          ``(node_id, msg_id)`` check every other message type uses would
+          read a retried ``HELLO`` as a duplicate of itself and silently
+          discard the very message that exists to reset the window in the
+          first place. It always draws a fresh ``node_seq`` instead.
         """
         if event.source != "node":
-            return None, None
+            return None, None, None
 
         row = conn.execute(
-            "SELECT last_node_seq FROM node_cursor WHERE node_id = ?", (event.node_id,)
+            "SELECT last_node_seq, boot_count FROM node_cursor WHERE node_id = ?",
+            (event.node_id,),
         ).fetchone()
         previous_node_seq = row[0] if row is not None else 0
+        stored_boot_count = row[1] if row is not None else None
+
+        if event.msg_type == payloads.HELLO:
+            boot_count = event.fields.get("boot_count")
+            # Defensive, like `_apply_heartbeat`'s own `isinstance` guards
+            # (adapters/ingest.py) -- `decode_hello` always emits an int, but
+            # this dataclass is JSON round-tripped through `fields` and
+            # nothing here re-proves that on the way back out.
+            if isinstance(boot_count, int) and (
+                stored_boot_count is None or _boot_count_is_newer(boot_count, stored_boot_count)
+            ):
+                previous_node_seq += DEDUP_WINDOW
+                hello_boot_count = boot_count
+            else:
+                # Not newer (or unreadable): the high-water mark on file is
+                # left exactly as it was, never downgraded.
+                hello_boot_count = stored_boot_count if stored_boot_count is not None else 0
+            return previous_node_seq + 1, None, hello_boot_count
 
         duplicate = conn.execute(
             """
@@ -792,9 +940,9 @@ class Store:
             (event.node_id, event.msg_id, previous_node_seq - DEDUP_WINDOW),
         ).fetchone()
         if duplicate is not None:
-            return None, duplicate[0]
+            return None, duplicate[0], None
 
-        return previous_node_seq + 1, None
+        return previous_node_seq + 1, None, None
 
     def cursor(self, node_id: int) -> Cursor | None:
         row = self._conn.execute(
