@@ -1642,3 +1642,303 @@ def test_kill_minus_9_crash_proxy(tmp_path: Path) -> None:
         conn.close()
 
         assert acknowledged <= stored_msg_ids
+
+
+# --- SCHEMA_VERSION 4: node_cursor gains reported_targets_version/tags -----
+#
+# docs/protocol/messages.md, GET_TARGETS/TARGETS: the trap's last completed
+# `TARGETS` reassembly, cached on `node_cursor` (`Store.
+# record_reported_targets`/`Store.reported_targets`) the same way `boot_count`
+# already is (SCHEMA_VERSION 3).
+
+
+def _write_pre_reported_targets_database(path: Path) -> None:
+    """A ``station.db`` exactly as ``SCHEMA_VERSION`` 3 would have left it --
+    ``node_cursor`` with ``boot_count`` but neither of the two new columns,
+    holding a real row, the same shape live bench data is in today.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE event (
+            seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_seq       INTEGER,
+            source         TEXT    NOT NULL,
+            node_id        INTEGER NOT NULL,
+            msg_type       INTEGER NOT NULL,
+            msg_id         INTEGER,
+            received_epoch REAL    NOT NULL,
+            clock_trust    TEXT    NOT NULL,
+            node_epoch     INTEGER,
+            tag            BLOB,
+            fields         TEXT    NOT NULL,
+            payload        BLOB
+        );
+        CREATE TABLE node_cursor (
+            node_id       INTEGER PRIMARY KEY,
+            last_msg_id   INTEGER NOT NULL,
+            last_seq      INTEGER NOT NULL,
+            last_node_seq INTEGER NOT NULL,
+            boot_count    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE specimen (
+            tag         BLOB PRIMARY KEY,
+            species     TEXT,
+            band_number TEXT,
+            of_interest INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '3')")
+    conn.execute(
+        "INSERT INTO event (node_seq, source, node_id, msg_type, msg_id, received_epoch, "
+        "clock_trust, node_epoch, tag, fields, payload) VALUES "
+        "(1, 'node', 7, ?, 1, 1000.0, 'rtc', NULL, NULL, "
+        "'{\"state\": 1, \"battery_mv\": 4000, \"targets_version\": 3}', NULL)",
+        (payloads.HEARTBEAT,),
+    )
+    conn.execute(
+        "INSERT INTO node_cursor (node_id, last_msg_id, last_seq, last_node_seq, boot_count) "
+        "VALUES (7, 1, 1, 1, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_migration_adds_reported_targets_columns_to_an_existing_node_cursor_row(
+    tmp_path: Path,
+) -> None:
+    """A migration proven only on an empty database is not proven -- this
+    one runs against a file a schema-version-3 station already wrote a real
+    ``node_cursor`` row into, the same shape live bench data is in today.
+    """
+    db_path = tmp_path / "station.db"
+    _write_pre_reported_targets_database(db_path)
+
+    store = Store(db_path)  # today's Store, opened against yesterday's file
+
+    assert store.reported_targets(7) is None  # NULL/NULL on a pre-existing row -- "never reported"
+    cursor = store.cursor(7)
+    assert cursor is not None
+    assert cursor.last_msg_id == 1  # untouched by the migration
+
+    version = store._conn.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0]
+    from feeder_station.adapters.store import SCHEMA_VERSION
+
+    assert int(version) == SCHEMA_VERSION
+
+
+def test_reopening_a_reported_targets_migrated_database_does_not_re_run_the_migration(
+    tmp_path: Path,
+) -> None:
+    """Once ``schema_version`` reaches 4, ``ALTER TABLE ... ADD COLUMN`` must
+    not run again -- a second attempt to add a column that already exists
+    raises ``sqlite3.OperationalError``, which would otherwise crash every
+    boot after the first migrated one.
+    """
+    db_path = tmp_path / "station.db"
+    _write_pre_reported_targets_database(db_path)
+
+    Store(db_path).close()
+    reopened = Store(db_path)  # must not raise
+
+    assert reopened.reported_targets(7) is None
+
+
+def test_a_pre_existing_row_can_record_reported_targets_after_the_migration(
+    tmp_path: Path,
+) -> None:
+    """The migrated columns are not just present but usable: a row this
+    migration only added ``NULL`` to can still be updated by
+    ``record_reported_targets`` afterwards, the same as a brand-new row.
+    """
+    db_path = tmp_path / "station.db"
+    _write_pre_reported_targets_database(db_path)
+    store = Store(db_path)
+
+    store.record_reported_targets(7, targets_version=3, tags=[TAG])
+
+    assert store.reported_targets(7) == (3, (TAG,))
+
+
+# --- Store.record_reported_targets / Store.reported_targets -----------------
+
+
+def test_reported_targets_round_trips_through_record_reported_targets(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    store.append(
+        _node_event(node_id=7, msg_id=1), received_epoch=1000.0, clock_trust="rtc"
+    )  # seeds the node_cursor row record_reported_targets updates
+
+    store.record_reported_targets(7, targets_version=5, tags=[TAG, bytes([0xAA] * 7)])
+
+    assert store.reported_targets(7) == (5, (TAG, bytes([0xAA] * 7)))
+
+
+def test_reported_targets_returns_none_for_a_node_never_reported(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+
+    assert store.reported_targets(99) is None
+
+
+def test_record_reported_targets_overwrites_the_previous_completed_reply(tmp_path: Path) -> None:
+    store = Store(tmp_path / "station.db")
+    store.append(_node_event(node_id=7, msg_id=1), received_epoch=1000.0, clock_trust="rtc")
+
+    store.record_reported_targets(7, targets_version=3, tags=[TAG])
+    store.record_reported_targets(7, targets_version=4, tags=[])
+
+    assert store.reported_targets(7) == (4, ())
+
+
+# --- Rehydration: the trap's last completed TARGETS reply survives a restart
+
+
+def test_rehydrate_restores_a_completed_targets_reply_and_settles_the_fetch(
+    tmp_path: Path,
+) -> None:
+    """The full boot path: a `HEARTBEAT` reporting `targets_version=3` and a
+    completed `TARGETS` reply for that same version must rehydrate to a
+    trap with no `GET_TARGETS` outstanding -- exactly as the live path
+    would settle, not re-armed from scratch after every restart.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 3},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="rtc",
+    )
+    store.record_reported_targets(7, targets_version=3, tags=[TAG])
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.targets_version == 3
+    assert trap.reported_targets_version == 3
+    assert trap.reported_tags == (TAG,)
+    assert trap.pending_targets_fetch is None  # settled -- no fetch needed
+
+
+def test_rehydrate_re_arms_a_targets_fetch_when_the_reported_version_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A node whose `HEARTBEAT` has since moved past the version its last
+    completed `TARGETS` reply answered must rehydrate with a `GET_TARGETS`
+    fetch armed again -- the exact "no reported list I trust" case this
+    whole feature exists for, surviving a restart.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 5},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="rtc",
+    )
+    store.record_reported_targets(7, targets_version=3, tags=[TAG])  # stale, pre-dates version 5
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.targets_version == 5
+    assert trap.reported_targets_version == 3  # the last real reply, reported honestly
+    assert trap.pending_targets_fetch is not None  # re-armed: 3 != 5
+
+
+def test_rehydrate_arms_a_targets_fetch_for_a_heartbeat_with_no_targets_reply_at_all(
+    tmp_path: Path,
+) -> None:
+    """No `TARGETS` reply has ever been recorded for this node -- the "no
+    reported list for that node" trigger, re-evaluated the same way after a
+    restart as it would be live.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="node",
+            node_id=7,
+            msg_type=payloads.HEARTBEAT,
+            msg_id=1,
+            node_epoch=None,
+            tag=None,
+            fields={"state": 1, "battery_mv": 4000, "targets_version": 2},
+            payload=b"",
+        ),
+        received_epoch=1000.0,
+        clock_trust="rtc",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version is None
+    assert trap.pending_targets_fetch is not None
+
+
+def test_rehydrate_does_not_seed_a_trap_purely_to_check_a_targets_mismatch(
+    tmp_path: Path,
+) -> None:
+    """`_rehydrate_reported_targets` must never conjure a `Trap` into
+    existence on its own -- the same "no fact, no fabricated entry"
+    discipline every other rehydrate step in this module already holds
+    (WARNING J and its siblings). A node with nothing but an unrelated
+    operator action on file (never heard from, no HEARTBEAT/CAPTURED/FAULT,
+    no ARM/DISARM/SET_TARGETS) must still rehydrate to no trap at all.
+    """
+    db_path = tmp_path / "station.db"
+    store = Store(db_path)
+    store.append(
+        StationEvent(
+            source="operator",
+            node_id=42,
+            msg_type=OPERATOR_CAPTURE_ACKNOWLEDGED,
+            msg_id=None,
+            node_epoch=None,
+            tag=None,
+            fields={},
+            payload=None,
+        ),
+        received_epoch=1000.0,
+        clock_trust="unset",
+    )
+    store.close()
+
+    reopened = Store(db_path)
+    registry = Registry(silence_after=timedelta(minutes=15))
+    reopened.rehydrate(registry)
+
+    assert 42 not in {trap.node_id for trap in registry.traps()}

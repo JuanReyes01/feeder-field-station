@@ -36,6 +36,7 @@ from feeder_station.domain.events import (
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
     StationEvent,
+    tags_from_fields,
 )
 from feeder_station.domain.traps import Registry, TrapState
 
@@ -80,7 +81,7 @@ def _boot_count_is_newer(candidate: int, stored: int) -> bool:
     return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +124,16 @@ CREATE TABLE IF NOT EXISTS event (
 CREATE INDEX IF NOT EXISTS event_dedup   ON event(node_id, msg_id, node_seq DESC);
 CREATE INDEX IF NOT EXISTS event_by_type ON event(node_id, msg_type, seq DESC);
 
--- `boot_count` (SCHEMA_VERSION 3 migration, below) is added by `ALTER TABLE`,
--- never listed here: this `CREATE TABLE IF NOT EXISTS` also runs, unchanged,
--- against a database a SCHEMA_VERSION-3+ station already wrote -- if the
--- column were declared here too, that would leave the *migration* as the
--- only path that ever adds it for a database that predates it, while a
--- brand-new database would need it created a second, different way. Adding
--- it exclusively through the gated migration keeps there being exactly one
--- path, proven against exactly the pre-existing-data shape live bench
--- databases are already in.
+-- `boot_count` (SCHEMA_VERSION 3 migration) and `reported_targets_version`/
+-- `reported_tags` (SCHEMA_VERSION 4 migration, below) are each added by
+-- `ALTER TABLE`, never listed here: this `CREATE TABLE IF NOT EXISTS` also
+-- runs, unchanged, against a database a SCHEMA_VERSION-3+ (or 4+) station
+-- already wrote -- if the columns were declared here too, that would leave
+-- the *migration* as the only path that ever adds them for a database that
+-- predates them, while a brand-new database would need them created a
+-- second, different way. Adding each exclusively through its own gated
+-- migration keeps there being exactly one path, proven against exactly the
+-- pre-existing-data shape live bench databases are already in.
 CREATE TABLE IF NOT EXISTS node_cursor (
     node_id       INTEGER PRIMARY KEY,
     last_msg_id   INTEGER NOT NULL,
@@ -240,6 +242,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     ``tests/adapters/test_hello_resets_dedup.py::test_migration_adds_boot_count_to_an_existing_node_cursor_row``,
     and proven not to re-run on a second boot by that same module's
     ``test_reopening_a_migrated_database_does_not_re_run_the_migration``.
+
+    **SCHEMA_VERSION 4** (docs/protocol/messages.md, `GET_TARGETS`/
+    `TARGETS`): `node_cursor` gains `reported_targets_version`/
+    `reported_tags`, the trap's last fully-reassembled `TARGETS` reply --
+    `Store.record_reported_targets`'s own cache, read back by `Store.
+    reported_targets` at rehydration. Both columns are nullable and
+    neither is backfilled: a database written before this migration has
+    no history to backfill from (this pair of messages did not exist
+    yet), so every pre-existing row simply starts at the same honest
+    "never reported" a brand-new row would, exactly as `boot_count`
+    started every pre-existing row at its own default rather than
+    guessing a history it does not have.
     """
     conn.executescript(_SCHEMA)
 
@@ -252,6 +266,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
     if previous_version < 3:
         conn.execute("ALTER TABLE node_cursor ADD COLUMN boot_count INTEGER NOT NULL DEFAULT 0")
+    if previous_version < 4:
+        conn.execute("ALTER TABLE node_cursor ADD COLUMN reported_targets_version INTEGER")
+        conn.execute("ALTER TABLE node_cursor ADD COLUMN reported_tags TEXT")
 
     conn.execute(
         """
@@ -953,6 +970,62 @@ class Store:
             return None
         return Cursor(last_msg_id=row[0], last_seq=row[1], last_node_seq=row[2])
 
+    def record_reported_targets(
+        self, node_id: int, *, targets_version: int, tags: Sequence[bytes]
+    ) -> None:
+        """Durable copy of a completed `TARGETS` reassembly (docs/protocol/
+        messages.md) -- `node_cursor`'s own "latest known per-node fact"
+        cache (SCHEMA_VERSION 4), the same shape `boot_count` already
+        established there: derived from data already durable elsewhere
+        (this reassembly's own chunk rows, each already appended through
+        the ordinary `TARGETS` uplink path -- `Store.append`, called
+        before this) but kept here too so a restart's rehydrate reads it
+        back in one row, not by re-walking however many chunk events this
+        node has ever sent over its whole deployment.
+
+        Called only once a reassembly actually completes
+        (`adapters/ingest.py::_apply_targets_chunk`, from `Registry.
+        reported_targets_chunk`'s own return) -- never per chunk, unlike
+        the `node_cursor` upsert :meth:`append` performs unconditionally
+        for every node-sourced row regardless of type.
+
+        A plain ``UPDATE``, never an upsert: by the time this runs, the
+        raw chunk event that just completed the reassembly has already
+        gone through :meth:`append` in this same call, which unconditionally
+        upserts a `node_cursor` row for every node-sourced event -- so a row
+        for ``node_id`` is always already there.
+
+        Best-effort, like every other registry-derived write step 8 of the
+        S9 ordering makes (`adapters/ingest.py`'s own module docstring): a
+        crash between the chunk's own durable append and this call loses
+        only this cache, never the chunk data it is derived from, and costs
+        at most one redundant `GET_TARGETS` after the next restart.
+        """
+        self._conn.execute(
+            "UPDATE node_cursor SET reported_targets_version = ?, reported_tags = ? "
+            "WHERE node_id = ?",
+            (targets_version, json.dumps([tag.hex() for tag in tags]), node_id),
+        )
+
+    def reported_targets(self, node_id: int) -> tuple[int, tuple[bytes, ...]] | None:
+        """The trap's last fully-reassembled `TARGETS` reply, read back for
+        :meth:`rehydrate`'s own restart path -- `node_cursor`'s own cache
+        (SCHEMA_VERSION 4, :meth:`record_reported_targets`), never
+        recomputed by replaying the raw chunk log at boot. ``None`` when
+        no row exists at all, or when this node has never had a completed
+        reassembly recorded (both columns ``NULL`` -- a pre-migration row,
+        or one this station has simply never fetched targets for yet).
+        """
+        row = self._conn.execute(
+            "SELECT reported_targets_version, reported_tags FROM node_cursor WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None or row[0] is None or row[1] is None:
+            return None
+        targets_version, tags_json = row
+        tags = tuple(bytes.fromhex(tag) for tag in json.loads(tags_json))
+        return targets_version, tags
+
     def latest(self, node_id: int, msg_type: int) -> StoredEvent | None:
         row = self._conn.execute(
             f"""
@@ -1150,6 +1223,12 @@ class Store:
                     registry.mark_state_possibly_stale(node_id)
 
             try:
+                self._rehydrate_reported_targets(node_id, registry)
+            except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
+                logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
+                self.rehydration_errors += 1
+
+            try:
                 self._rehydrate_desired_command(node_id, registry, winner_msg_type=winner_msg_type)
             except Exception:  # CRITICAL A, see docstring above -- deliberately broad.
                 logger.exception("rehydrate: skipping an unreadable row for node %s", node_id)
@@ -1342,6 +1421,53 @@ class Store:
             msg_type=payloads.FAULT,
         )
 
+    def _rehydrate_reported_targets(self, node_id: int, registry: Registry) -> None:
+        """The trap's last fully-reassembled `TARGETS` reply (docs/protocol/
+        messages.md), restored from `node_cursor`'s own cache
+        (`Store.reported_targets`, SCHEMA_VERSION 4) -- one row, not a
+        replay of however many raw `TARGETS` chunk events this node has
+        ever sent. Must run after the state-race loop above, whose
+        `_rehydrate_heartbeat` step already restored `targets_version`
+        inline (`registry.restore_heartbeat_fields`): `Registry.
+        restore_reported_targets` compares against that value
+        (`_note_targets_mismatch`) to decide whether a `GET_TARGETS` fetch
+        should be armed again after this restart.
+
+        Unreadable, corrupt JSON in `reported_tags` raises here -- caught
+        by :meth:`rehydrate`'s own per-node guard, exactly like every
+        other not-readable row this method's siblings already raise
+        through `_unreadable`.
+
+        A completed reply on file (``reported`` is not ``None``) always
+        calls through, even for a node with no other trace in the registry
+        yet -- a real, durable fact, the same "restoring desired_tags alone
+        is enough to seed a trap" precedent `_rehydrate_desired_command`
+        already sets. **Without one, this call is skipped outright unless
+        some other step already created a `Trap` this same pass** (a real
+        `HEARTBEAT`/`CAPTURED`/`FAULT`, restored earlier in this same
+        per-node iteration): `Registry.restore_reported_targets(...,
+        targets_version=None, tags=None)` would otherwise conjure a `Trap`
+        into existence from nothing for a node this station genuinely knows
+        nothing else about -- exactly the roster leak
+        `test_an_acknowledge_only_node_is_counted_in_the_roster_and_
+        rehydrates_to_nothing` (tests/test_cli.py) and this module's own
+        WARNING-J-shaped "no fact, no fabricated entry" tests already pin.
+        A trap that *does* already exist still needs its mismatch re-armed
+        here (`_note_targets_mismatch`), the same check the live path's own
+        `Registry.heartbeat` runs on every beat.
+        """
+        reported = self.reported_targets(node_id)
+        if reported is not None:
+            targets_version, tags = reported
+            registry.restore_reported_targets(node_id, targets_version=targets_version, tags=tags)
+            return
+
+        try:
+            registry.trap(node_id)
+        except KeyError:
+            return  # nothing else known about this node -- do not seed one
+        registry.restore_reported_targets(node_id, targets_version=None, tags=None)
+
     _OPERATOR_COMMAND_MSG_TYPES: tuple[tuple[int, CommandKind], ...] = (
         (OPERATOR_ARM, CommandKind.ARM),
         (OPERATOR_DISARM, CommandKind.DISARM),
@@ -1368,7 +1494,7 @@ class Store:
         """
         latest_targets = self.latest(node_id, OPERATOR_SET_TARGETS)
         if latest_targets is not None:
-            tags = _tags_from_fields(latest_targets.fields)
+            tags = tags_from_fields(latest_targets.fields)
             if tags is None:
                 # BEHAVIOUR 1 (verify-report-batch2d.md): the same
                 # `SET_TARGETS.tags` field is read at two sites -- this one
@@ -1446,7 +1572,7 @@ class Store:
             registry.command_disarm(node_id, at=at)
         else:
             assert targets_version is not None  # narrowed above: SET_TARGETS always sets this
-            tags = _tags_from_fields(latest.fields)
+            tags = tags_from_fields(latest.fields)
             if tags is None:
                 # WARNING 1 (verify-report-batch2c.md, case F): `... or ()`
                 # used to fabricate an *empty* desired list for unreadable
@@ -1517,15 +1643,3 @@ def _unreadable(what: str, value: object) -> NoReturn:
     traceback instead of read back as an ordinary absence of data.
     """
     raise ValueError(f"{what} is not readable: {value!r}")
-
-
-def _tags_from_fields(fields: dict[str, object]) -> tuple[bytes, ...] | None:
-    raw_tags = fields.get("tags")
-    if not isinstance(raw_tags, list):
-        return None
-    tags: list[bytes] = []
-    for item in raw_tags:
-        if not isinstance(item, str):
-            return None
-        tags.append(bytes.fromhex(item))
-    return tuple(tags)
