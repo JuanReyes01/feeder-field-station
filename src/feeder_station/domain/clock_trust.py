@@ -78,3 +78,23 @@ def trust_from_evidence(*, rtc_epoch: float | None, ntp_synchronized: bool) -> C
 def may_distribute_time(trust: ClockTrust) -> bool:
     """S12/D7: the one requirement this whole module exists to enforce."""
     return trust is not ClockTrust.UNSET
+
+
+# HEARTBEAT's own `clock_source` byte (docs/protocol/messages.md: "clock_source:
+# 0 unset, 1 RTC") is a *node's* report about its *own* clock -- a different
+# fact from `ClockTrust` above, which is the *station's*. Named here, next to
+# it, so a bare `1` never appears unexplained at its one reader
+# (`adapters/workers.py`'s TIME_SYNC retry gate, the clock-trust bug fix:
+# see that module's own docstring for what trusting a *sent* attempt instead
+# of this reported fact cost).
+NODE_CLOCK_SOURCE_RTC = 1
+
+
+def node_clock_is_trusted(clock_source: int | None) -> bool:
+    """Whether the node's own last-reported ``clock_source`` already means
+    a trustworthy clock -- ``None`` (no HEARTBEAT read yet) is untrusted,
+    the same "no fact yet is not the safest-looking guess" rule
+    ``domain/traps.py::Trap`` already applies to every other optional field
+    it has not heard about yet.
+    """
+    return clock_source == NODE_CLOCK_SOURCE_RTC

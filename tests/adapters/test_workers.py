@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from feeder_station.adapters.ingest import ingest_frame
 from feeder_station.adapters.store import Store
 from feeder_station.adapters.workers import (
     WorkerStatus,
@@ -50,7 +51,12 @@ class _FixedClock:
         return self._trust
 
 
-def _heartbeat_frame(node_id: int = 3, msg_id: int = 9) -> bytes:
+def _heartbeat_frame(node_id: int = 3, msg_id: int = 9, clock_source: int = 1) -> bytes:
+    """``clock_source`` defaults to `1` (RTC/trusted) -- messages.md: "0
+    unset, 1 RTC" -- payload[7], the byte the clock-trust bug fix
+    (``adapters/workers.py``'s TIME_SYNC retry) reads back off the node's
+    own latest stored `HEARTBEAT` row.
+    """
     payload = bytes(
         [
             0x01,
@@ -60,7 +66,7 @@ def _heartbeat_frame(node_id: int = 3, msg_id: int = 9) -> bytes:
             0x03,
             0x02,
             0x01,
-            0x01,
+            clock_source,
             0x09,
             0x00,
             0x05,
@@ -404,6 +410,121 @@ def test_time_sync_resumes_once_the_scheduler_loop_sees_a_trusted_clock(
 
     assert not thread.is_alive()
     assert resumed, "TIME_SYNC never resumed after the clock became trusted"
+
+
+# --- The clock-trust bug fix: TIME_SYNC retry driven by the node's own -----
+# --- reported clock, never by a station-side "we sent one once" flag ------
+
+
+def _seed_heartbeat(
+    store: Store, registry: Registry, *, node_id: int, clock_source: int, msg_id: int = 1
+) -> None:
+    """Ingests one real `HEARTBEAT` frame so `store.latest(node_id,
+    payloads.HEARTBEAT)` has a row to read back -- the clock-trust bug fix
+    (`adapters/workers.py`'s TIME_SYNC retry) drives its retry off exactly
+    that row, never off `Registry`/`Trap` (see that function's own
+    docstring for why), so seeding through the real ingest path is what
+    actually proves the fix reads what a real `HEARTBEAT` writes, not a
+    hand-built double of it.
+    """
+    ingest_frame(
+        _heartbeat_frame(node_id=node_id, msg_id=msg_id, clock_source=clock_source),
+        store=store,
+        ack_port=_SpyGateway(),
+        registry=registry,
+        publish=lambda _event: None,
+        received_epoch=datetime(2026, 1, 1, tzinfo=UTC).timestamp(),
+        clock_trust=ClockTrust.NTP.value,
+    )
+
+
+def test_time_sync_keeps_retrying_a_node_whose_own_clock_stays_unset(tmp_path: Path) -> None:
+    """The bug this fix answers (docs/pending.md): a *sent* TIME_SYNC used
+    to mark a node synced forever, whether or not the node ever applied
+    it -- a bench day with the station restarted about five times, the
+    node rebooting eighteen times and the gateway going deaf at least once
+    left `clock_epoch: 0`/`clock_source: 0` (unset) across 2,685
+    heartbeats, having each been offered TIME_SYNC exactly once. This is
+    the regression proof: a node whose own last HEARTBEAT still reports
+    `clock_source: 0` must be attempted again on the next cadence, not
+    once ever.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    _seed_heartbeat(store, registry, node_id=3, clock_source=0)
+    gateway = _SpyGateway()
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.05),  # fast cadence for a short-running test
+        channel_budget_frames_per_s=1000.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _FixedClock(trust=ClockTrust.NTP),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.3)  # several multiples of the 0.05 s cadence
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    time_sync_count = sum(1 for raw in gateway.written if decode(raw).msg_type == payloads.TIME_SYNC)
+    assert time_sync_count >= 3, (
+        f"only {time_sync_count} TIME_SYNC attempt(s) in 0.3s at a 0.05s cadence -- a node "
+        "whose own clock stays unset must keep being retried, not offered once and forgotten"
+    )
+
+
+def test_time_sync_stops_once_the_node_itself_reports_a_trusted_clock(tmp_path: Path) -> None:
+    """The other half of the fix: a node whose own last HEARTBEAT already
+    reports `clock_source: 1` (RTC) needs no TIME_SYNC at all -- this is
+    the fact the retry is driven off now, never a station-side flag that
+    merely records a frame having left the port.
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+    _seed_heartbeat(store, registry, node_id=3, clock_source=1)
+    gateway = _SpyGateway()
+    config = StationConfig(
+        heartbeat_interval=timedelta(seconds=0.02),
+        channel_budget_frames_per_s=1000.0,
+    )
+    stop = threading.Event()
+
+    thread = threading.Thread(
+        target=run_scheduler_loop,
+        kwargs={
+            "store": store,
+            "gateway": gateway,
+            "registry": registry,
+            "registry_lock": threading.Lock(),
+            "clock": _FixedClock(trust=ClockTrust.NTP),
+            "config": config,
+            "stop": stop,
+            "tick_s": 0.01,
+        },
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.3)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert not any(decode(raw).msg_type == payloads.TIME_SYNC for raw in gateway.written), (
+        "a node already reporting a trusted clock of its own must not be offered TIME_SYNC at all"
+    )
 
 
 # --- CRITICAL 4 (sdd-verify, field-station-p4): the rotation is paced ------

@@ -39,8 +39,8 @@ from feeder_station.adapters.ingest import Publish, ingest_frame
 from feeder_station.adapters.scheduler import poll_node
 from feeder_station.adapters.store import Store
 from feeder_station.config import StationConfig
-from feeder_station.domain import backlog, pacing
-from feeder_station.domain.clock_trust import may_distribute_time
+from feeder_station.domain import backlog, pacing, payloads
+from feeder_station.domain.clock_trust import may_distribute_time, node_clock_is_trusted
 from feeder_station.domain.traps import Registry
 
 
@@ -70,6 +70,7 @@ class FrameGateway(Protocol):
     def write_frame(self, raw_frame: bytes) -> bool: ...
 
     def record_payload_error(self) -> None: ...
+
 
 # CRITICAL 3 (sdd-verify field-station-p4): the three orderings
 # `run_scheduler_loop` cycles through, one per tick, so no single
@@ -272,18 +273,49 @@ def run_scheduler_loop(
     it), this can only ever answer for the *previous* poll of a node by
     the time its next turn comes up, never the poll about to be sent.
 
-    TIME_SYNC policy is otherwise unchanged from before this fix (named
-    because design.md pins only the *check*, S12/D7, never a resend
-    cadence): attempted once per node id, the first tick that id appears
-    in the roster, tracked in ``synced_node_ids`` for the life of this
-    thread — **except that CRITICAL 3 is fixed here too:** a *withheld*
-    attempt (``attempt_time_sync`` returning ``False``, clock still
-    ``unset``) no longer counts as synced. Before this fix the return
-    value was discarded and every node was marked synced unconditionally
-    on its first tick, so a node polled while the clock was still
-    ``unset`` was never offered ``TIME_SYNC`` again even once NTP later
-    made the clock trustworthy — severing exactly the boot-with-no-
-    internet recovery S12 exists for.
+    **The clock-trust bug fix, replacing this loop's own ``synced_node_ids``
+    wholesale:** TIME_SYNC retry used to be gated on a *station-side* set —
+    attempted once per node id, the first tick that id appeared in the
+    roster, and never again once ``attempt_time_sync`` returned ``True`` —
+    on the theory that a returned "sent" meant the node now had a clock.
+    It did not: a bench day with the station restarted about five times,
+    the node rebooting eighteen times and the gateway going deaf at least
+    once left ``clock_epoch: 0``/``clock_source: 0`` (unset) across 2,685
+    heartbeats, because ``attempt_time_sync``'s ``True`` only ever meant
+    "a frame left this station's own serial port", never "the node applied
+    it" — a dropped, delayed or pre-reboot send counted as done exactly as
+    permanently as a delivered one, and nothing here ever asked the node
+    whether it actually was.
+
+    This is S4 again, applied to the clock where it was never applied
+    before: ``Trap.pending_command`` clears only on the trap's own next
+    ``HEARTBEAT`` confirming it, never merely on a frame having been
+    written — see ``domain/traps.py``'s own module docstring. The station
+    already receives, and already durably stores, the evidence this fix
+    runs on: every ``HEARTBEAT`` carries ``clock_source`` (docs/protocol/
+    messages.md: 0 unset, 1 RTC), read back here straight off the node's
+    own latest stored row (``store.latest(node_id, payloads.HEARTBEAT)``)
+    rather than duplicated onto ``Trap`` — this fact needs no in-memory
+    home of its own; the store is already the durable copy, and rereading
+    it once per cadence (below) costs nothing next to the fsync'd write a
+    withheld attempt already makes at the same rate. A node is due for
+    ``TIME_SYNC`` for as long as its own last-reported ``clock_source``
+    says untrusted (``domain.clock_trust.node_clock_is_trusted``, ``None``
+    included — no heartbeat stored yet is not "trusted"), and stops being
+    due the moment the node itself reports one, not before. **CRITICAL 3
+    stands unchanged:** a *withheld* attempt (clock still ``unset``
+    station-side) still never counts as anything sent, below.
+
+    A retry this drives off reported fact, not a one-shot flag, still
+    needs its own pacing so a stubbornly-unsynced node cannot compete for
+    the shared budget every single tick: ``last_time_sync_attempt_at``
+    gates a real (would-send) attempt to once per
+    ``config.heartbeat_interval``, the same cadence — and the same
+    reasoning — ``last_withheld_attempt_at`` below already applies to a
+    withheld one. A node refused by the budget itself is not charged
+    against that cadence: the attempt did not happen, so it stays due
+    immediately, the same "refused stays due, unattempted" rule every
+    other transmitter in this loop already follows.
 
     **CRITICAL 3 fix (sdd-verify field-station-p4, batch 3a):** the three
     transmitters above -- ``poll_node``, ``send_due_commands`` and
@@ -376,7 +408,6 @@ def run_scheduler_loop(
     next_poll_due_at: datetime | None = None
     last_polled_at: dict[int, datetime] = {}
     arrivals: dict[int, float] = {} if last_frame_arrival is None else last_frame_arrival
-    synced_node_ids: set[int] = set()
     # CRITICAL 4 (sdd-verify field-station-p4, batch 3b): `time.monotonic()`
     # per node id, last time a *withheld* TIME_SYNC attempt was made --
     # never `clock.now()`. The withheld cadence has to keep advancing even
@@ -384,6 +415,13 @@ def run_scheduler_loop(
     # `unset` case this cadence exists to bound), the same reasoning
     # `SharedBudget` above already applies to its own refill clock.
     last_withheld_attempt_at: dict[int, float] = {}
+    # The clock-trust bug fix's own pacing, the withheld dict's sibling: a
+    # node whose own clock_source keeps reporting untrusted is due again at
+    # most once per `heartbeat_interval`, never every tick -- see this
+    # function's own docstring for why a one-shot `synced_node_ids` (this
+    # dict's predecessor, removed) undercounted what "synced" actually
+    # meant.
+    last_time_sync_attempt_at: dict[int, float] = {}
     budget = SharedBudget(
         pacing.start(
             capacity=pacing.DEFAULT_CAPACITY,
@@ -457,7 +495,30 @@ def run_scheduler_loop(
                         )
                 else:  # "time_sync"
                     for node_id in node_ids:
-                        if node_id in synced_node_ids:
+                        # The clock-trust bug fix: due for TIME_SYNC is now
+                        # the node's *own* last-reported `HEARTBEAT.
+                        # clock_source` (docs/protocol/messages.md: 0
+                        # unset, 1 RTC), read straight back off the store
+                        # -- never a station-side "we sent one once" set
+                        # (see this function's own docstring for what that
+                        # cost). No lock needed: like `poll_node`/
+                        # `attempt_time_sync` below, this touches the
+                        # store, never `Registry`/`Trap` (confirmed by
+                        # `Store.latest`'s own signature) -- the same
+                        # "no lock around a call that does not need one"
+                        # rule the scheduler-throttle fix already applies
+                        # to every transmitter in this loop.
+                        latest_heartbeat = store.latest(node_id, payloads.HEARTBEAT)
+                        reported_clock_source = (
+                            latest_heartbeat.fields.get("clock_source")
+                            if latest_heartbeat is not None
+                            else None
+                        )
+                        if node_clock_is_trusted(
+                            reported_clock_source
+                            if isinstance(reported_clock_source, int)
+                            else None
+                        ):
                             continue
                         # CRITICAL 3: only spend a token on an attempt
                         # that would actually transmit -- a withheld
@@ -493,16 +554,26 @@ def run_scheduler_loop(
                             last_withheld_attempt_at[node_id] = monotonic_now
                             attempt_time_sync(node_id, clock=clock, store=store, gateway=gateway)
                             continue
-                        if not budget.try_send():
+                        # The clock-trust bug fix's own pacing: a real
+                        # attempt is due at most once per
+                        # `heartbeat_interval` too, the withheld path's
+                        # own cadence just above -- the node's next
+                        # HEARTBEAT is the only new evidence that could
+                        # change this decision, so trying again sooner
+                        # only spends airtime with nothing new to learn
+                        # from it.
+                        monotonic_now = time.monotonic()
+                        last_attempt = last_time_sync_attempt_at.get(node_id)
+                        cadence_s = config.heartbeat_interval.total_seconds()
+                        if last_attempt is not None and (monotonic_now - last_attempt < cadence_s):
                             continue
+                        if not budget.try_send():
+                            continue  # refused this tick -- stays due, unattempted
                         # Scheduler-throttle fix: no lock held here either
                         # -- `attempt_time_sync` touches no `Registry`/
                         # `Trap` state at all (see its own signature).
-                        # CRITICAL 3: only a frame actually sent counts
-                        # as synced -- a withheld attempt must stay
-                        # eligible for retry once trusted.
-                        if attempt_time_sync(node_id, clock=clock, store=store, gateway=gateway):
-                            synced_node_ids.add(node_id)
+                        last_time_sync_attempt_at[node_id] = monotonic_now
+                        attempt_time_sync(node_id, clock=clock, store=store, gateway=gateway)
         stop.wait(tick_s)
 
 
