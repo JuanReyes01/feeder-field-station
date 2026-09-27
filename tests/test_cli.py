@@ -16,7 +16,6 @@ import logging
 import os
 import pty
 import select
-import socket
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -26,7 +25,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station.adapters.ingest import _apply_to_registry
-from feeder_station.adapters.network_gateway import DEFAULT_TCP_PORT, NetworkGateway
 from feeder_station.adapters.serial_gateway import SerialGateway
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.cli import build_app
@@ -40,7 +38,7 @@ from feeder_station.domain.events import (
     StationEvent,
     interpret,
 )
-from feeder_station.domain.serial_framing import DELIMITER, cobs_decode, cobs_encode
+from feeder_station.domain.serial_framing import cobs_decode
 from feeder_station.domain.traps import Registry, Trap
 
 TAG = bytes([0x03, 0x84, 0x19, 0x9C, 0x87, 0xEC, 0x06])
@@ -94,15 +92,11 @@ def test_without_no_gateway_a_gateway_is_still_constructed_even_with_no_device(
     assert app.state.gateway.resolve() is None
 
 
-# --- network-gateway: a second transport option, --serial-device's own
-# default behaviour is unchanged either way (this change's own report). ------
-
-
 def test_transport_defaults_to_serial_so_the_bench_cable_keeps_working(tmp_path: Path) -> None:
-    """The bench runs on the serial cable today (this change's own brief:
-    "a second option, not a replacement") -- omitting ``--transport``
-    entirely must construct exactly the same ``SerialGateway`` it always
-    has, never the new network transport by surprise.
+    """``serial`` is the only transport this station has: the trap side
+    already talks ESP-NOW to a gateway ESP32, which then talks USB serial
+    to this station -- omitting ``--transport`` entirely must construct
+    exactly the same ``SerialGateway`` it always has.
     """
     app, args = build_app(
         ["--db-path", str(tmp_path / "station.db"), "--serial-device", "/dev/ttyUSB0"]
@@ -112,114 +106,25 @@ def test_transport_defaults_to_serial_so_the_bench_cable_keeps_working(tmp_path:
     assert isinstance(app.state.gateway, SerialGateway)
 
 
-def test_transport_network_constructs_a_network_gateway_instead(tmp_path: Path) -> None:
-    app, args = build_app(
-        [
-            "--db-path",
-            str(tmp_path / "station.db"),
-            "--transport",
-            "network",
-            "--network-host",
-            "127.0.0.1",
-            "--network-port",
-            "0",
-        ]
-    )
+def test_transport_rejects_the_old_network_choice_with_a_clear_error(tmp_path: Path) -> None:
+    """The Wi-Fi/TCP node transport (``--transport network``) is gone: an
+    ESP32 that associates with a Wi-Fi AP has its radio channel dragged to
+    the AP's own channel (Espressif's "home channel" rule), the same radio
+    ESP-NOW needs, and the site's Starlink network gives this station no
+    control over that channel or its stability.
 
-    assert args.transport == "network"
-    assert isinstance(app.state.gateway, NetworkGateway)
-    assert app.state.gateway.link_state.host == "127.0.0.1"
-    assert app.state.gateway.link_state.port == 0
-
-
-def test_network_host_and_port_default_when_not_given(tmp_path: Path) -> None:
-    app, _args = build_app(
-        ["--db-path", str(tmp_path / "station.db"), "--transport", "network"]
-    )
-
-    assert isinstance(app.state.gateway, NetworkGateway)
-    assert app.state.gateway.link_state.host == "0.0.0.0"
-    assert app.state.gateway.link_state.port == DEFAULT_TCP_PORT
-
-
-def test_no_gateway_overrides_transport_network_too(tmp_path: Path) -> None:
-    """The rollback kill switch stays transport-agnostic: ``--no-gateway``
-    must win regardless of which ``--transport`` was also passed.
+    ``--transport`` keeps its one remaining choice, ``serial``, rather
+    than disappearing outright -- ``build_app`` parses with
+    ``parse_known_args``, which silently ignores a flag it does not
+    recognise at all; keeping ``--transport`` with a single valid choice
+    means an operator who still types ``--transport network`` out of
+    habit gets argparse's own "invalid choice" error instead of the flag
+    quietly doing nothing.
     """
-    app, args = build_app(
-        [
-            "--db-path", str(tmp_path / "station.db"),
-            "--transport", "network",
-            "--no-gateway",
-        ]
-    )
-
-    assert args.no_gateway is True
-    assert app.state.gateway is None
-
-
-def test_network_transport_ingests_a_real_frame_through_the_real_boot_path(
-    tmp_path: Path,
-) -> None:
-    """The end-to-end proof, through ``build_app`` (the real ``ExecStart``
-    path) rather than a hand-built ``NetworkGateway`` -- a real TCP client
-    connects, sends one real HEARTBEAT over the socket, and the gateway
-    thread `run_gateway_loop` starts (``adapters/workers.py``) must ingest
-    it exactly as it already does for a real pyserial byte stream
-    (``tests/adapters/test_serial_gateway_pty.py``'s own real-transport
-    precedent, applied to the second transport).
-    """
-    heartbeat_payload = bytes(
-        [0x01, 0xA8, 0x0A, 0x04, 0x03, 0x02, 0x01, 0x01, 0x09, 0x00, 0x05, 0x00, 0x08, 0x07, 0x06, 0x05]
-    )
-    heartbeat_frame = frames.encode(
-        frames.Frame(
-            msg_type=payloads.HEARTBEAT,
-            node_id=42,
-            msg_id=9,
-            payload=heartbeat_payload,
+    with pytest.raises(SystemExit):
+        build_app(
+            ["--db-path", str(tmp_path / "station.db"), "--transport", "network"]
         )
-    )
-
-    app, _args = build_app(
-        [
-            "--db-path",
-            str(tmp_path / "station.db"),
-            "--transport",
-            "network",
-            "--network-host",
-            "127.0.0.1",
-            "--network-port",
-            "0",
-        ]
-    )
-    gateway = app.state.gateway
-    assert isinstance(gateway, NetworkGateway)
-
-    with TestClient(app) as c:
-        deadline = time.monotonic() + 2.0
-        port = gateway.bound_port
-        while port is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-            port = gateway.bound_port
-        assert port is not None, "the gateway thread never bound the listening socket"
-
-        client = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-        try:
-            client.sendall(cobs_encode(heartbeat_frame) + bytes([DELIMITER]))
-
-            deadline = time.monotonic() + 2.0
-            traps: list[dict[str, object]] = []
-            while time.monotonic() < deadline and not traps:
-                time.sleep(0.02)
-                traps = c.get("/api/traps").json()
-        finally:
-            client.close()
-
-    assert any(row["node_id"] == 42 for row in traps), (
-        "a HEARTBEAT sent over a real TCP socket through --transport network "
-        "never reached the registry"
-    )
 
 
 def test_station_config_flags_share_the_same_argv(tmp_path: Path) -> None:

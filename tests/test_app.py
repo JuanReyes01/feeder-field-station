@@ -23,7 +23,6 @@ implied covered by a green suite.
 
 import asyncio
 import re
-import socket
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -33,7 +32,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station import app as app_module
-from feeder_station.adapters.network_gateway import NetworkGateway, NetworkGatewayConfig
 from feeder_station.adapters.serial_gateway import DeviceConfig, LinkState, SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.app import Broadcaster, create_app
@@ -1192,77 +1190,6 @@ def test_link_drop_surfaces_in_health(tmp_path: Path) -> None:
     # flip the top-level `ok`, not only a field nobody without prior
     # knowledge would think to check.
     assert body["ok"] is False
-
-
-# --- network-gateway: /health must not flatten many nodes into one flag ----
-
-
-def test_health_reports_the_network_transport_with_one_row_per_node(tmp_path: Path) -> None:
-    """The 1:N sibling of ``test_link_drop_surfaces_in_health`` above: a
-    ``NetworkGateway`` configured instead of a ``SerialGateway`` must not
-    make ``/health`` fall back to a single ``connected`` boolean that
-    cannot say *which* of several nodes is missing (docs/pending.md's
-    closing rule, this change's own report).
-    """
-    store = Store(tmp_path / "station.db")
-    gateway = NetworkGateway(NetworkGatewayConfig(host="127.0.0.1", port=0))
-    app = create_app(store=store, gateway=gateway)
-
-    with TestClient(app) as c:
-        deadline = time.monotonic() + 2.0
-        port = gateway.bound_port
-        while port is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-            port = gateway.bound_port
-        assert port is not None
-
-        body = c.get("/health").json()
-        assert body["link"]["transport"] == "network"
-        assert body["link"]["listening"] is True
-        assert body["link"]["nodes"] == []
-        # A listening socket with nobody connected yet is still a working
-        # transport -- the same "never enabled, never counts" honesty
-        # every other `/health` field already applies; the absence of
-        # traps is a roster fact, not a transport failure.
-        assert body["ok"] is True
-
-        client_a = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-        client_b = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-        try:
-            for sock, node_id in ((client_a, 501), (client_b, 502)):
-                frame = frames.encode(Frame(msg_type=frames.PING, node_id=node_id))
-                sock.sendall(cobs_encode(frame) + bytes([DELIMITER]))
-
-            def _both_identified() -> bool:
-                nonlocal body
-                body = c.get("/health").json()
-                return len(body["link"]["nodes"]) == 2
-
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and not _both_identified():
-                time.sleep(0.02)
-            assert len(body["link"]["nodes"]) == 2
-            assert {n["connected"] for n in body["link"]["nodes"]} == {True}
-
-            client_b.close()
-
-            def _one_dropped() -> bool:
-                nonlocal body
-                body = c.get("/health").json()
-                by_id = {n["node_id"]: n["connected"] for n in body["link"]["nodes"]}
-                return by_id.get(502) is False
-
-            deadline = time.monotonic() + 2.0
-            while time.monotonic() < deadline and not _one_dropped():
-                time.sleep(0.02)
-
-            by_id = {n["node_id"]: n["connected"] for n in body["link"]["nodes"]}
-            # The exact defect this change's report names: node 501 still
-            # connected must never be allowed to hide node 502 being gone.
-            assert by_id == {501: True, 502: False}
-        finally:
-            client_a.close()
-            client_b.close()
 
 
 # --- 11.10: export_station() gets its trigger, deferred out of slice 11 ----

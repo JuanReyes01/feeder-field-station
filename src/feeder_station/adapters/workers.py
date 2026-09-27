@@ -45,14 +45,22 @@ from feeder_station.domain.traps import Registry
 
 
 class FrameGateway(Protocol):
-    """The one surface both transports (``SerialGateway``, one port;
-    ``NetworkGateway``, one listening socket and N connections) give this
+    """The one surface a transport (``SerialGateway``, one port) gives this
     module -- narrow on purpose, the same "only what this module actually
     calls" discipline ``adapters/ingest.py``'s own ``AckPort`` and
     ``adapters/command_sender.py``'s own ``CommandGateway`` already apply
-    one layer down. Structural (``Protocol``), not a shared base class:
-    neither concrete gateway needs to import the other, or this module, to
-    satisfy it.
+    one layer down. Structural (``Protocol``), not a shared base class: a
+    concrete gateway needs to import neither this module nor any sibling
+    gateway to satisfy it.
+
+    A second transport, a listening TCP socket nodes dialed into over
+    Wi-Fi, briefly existed here (``adapters/network_gateway.py``) and was
+    removed: an ESP32 that associates with a Wi-Fi AP has its radio
+    channel dragged to the AP's own channel (Espressif's "home channel"
+    rule), the same radio ESP-NOW needs, and the site's Starlink network
+    gives this station no control over that channel. The permanent
+    architecture stays trap --ESP-NOW--> gateway ESP32 --USB serial-->
+    station, i.e. ``SerialGateway`` alone.
     """
 
     def ensure_connected(self, *, stop: Callable[[], bool] = ...) -> bool: ...

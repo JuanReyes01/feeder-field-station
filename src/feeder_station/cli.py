@@ -20,11 +20,6 @@ from collections.abc import Sequence
 import uvicorn
 from fastapi import FastAPI
 
-from feeder_station.adapters.network_gateway import (
-    DEFAULT_TCP_PORT,
-    NetworkGateway,
-    NetworkGatewayConfig,
-)
 from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.app import create_app
@@ -53,33 +48,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--transport",
-        choices=("serial", "network"),
+        choices=("serial",),
         default="serial",
         help=(
-            "Which link the station listens for nodes on. 'serial' (the "
-            "default, unchanged) is the bench's own USB cable; 'network' is "
-            "a listening TCP socket nodes dial into over Wi-Fi -- a second "
-            "option, not a replacement (this change's own report). "
-            "--serial-device is ignored when this is 'network', and "
-            "--network-host/--network-port are ignored when it is 'serial'."
+            "Which link the station listens for nodes on. Only 'serial' "
+            "(the bench's own USB cable, gateway ESP32 <-> station) exists "
+            "now -- the trap already talks ESP-NOW to that gateway, never "
+            "Wi-Fi. A TCP/Wi-Fi transport nodes could dial into directly "
+            "was removed: associating with a Wi-Fi AP drags an ESP32's "
+            "radio to the AP's channel (Espressif's 'home channel' rule), "
+            "the same radio ESP-NOW needs, and the site's Starlink network "
+            "gives this station no control over that channel or its "
+            "stability. The flag is kept, with one choice, rather than "
+            "dropped outright, so an operator who still types "
+            "'--transport network' out of habit gets an explicit 'invalid "
+            "choice' error instead of the flag silently vanishing into "
+            "build_app's own parse_known_args."
         ),
-    )
-    parser.add_argument(
-        "--network-host",
-        default=NetworkGatewayConfig.host,
-        help=(
-            "Bind address for --transport network (default: every "
-            "interface, the same LAN trust model this station's own HTTP "
-            "server already binds -- adapters/network_gateway.py's own "
-            "module docstring, and this change's report, name what that "
-            "does and does not secure)."
-        ),
-    )
-    parser.add_argument(
-        "--network-port",
-        type=int,
-        default=DEFAULT_TCP_PORT,
-        help="Listening port for --transport network.",
     )
     parser.add_argument(
         "--no-gateway",
@@ -108,18 +93,13 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
     config = StationConfig.load(argv)
     store = Store(args.db_path)
 
-    gateway: SerialGateway | NetworkGateway | None = None
+    gateway: SerialGateway | None = None
     if not args.no_gateway:
-        if args.transport == "network":
-            gateway = NetworkGateway(
-                NetworkGatewayConfig(host=args.network_host, port=args.network_port)
-            )
-        else:
-            # No device resolves (step 4, adapters/serial_gateway.py) is a
-            # real, supported shape here too -- the radio not being plugged
-            # in yet must never crash station startup; the gateway thread
-            # just reports the link down and keeps retrying.
-            gateway = SerialGateway(DeviceConfig(explicit_path=args.serial_device))
+        # No device resolves (step 4, adapters/serial_gateway.py) is a
+        # real, supported shape here too -- the radio not being plugged
+        # in yet must never crash station startup; the gateway thread
+        # just reports the link down and keeps retrying.
+        gateway = SerialGateway(DeviceConfig(explicit_path=args.serial_device))
 
     app = create_app(config=config, store=store, gateway=gateway)
     return app, args

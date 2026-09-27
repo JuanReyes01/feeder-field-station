@@ -24,7 +24,6 @@ from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
-from feeder_station.adapters.network_gateway import NetworkLinkState
 from feeder_station.adapters.serial_gateway import LinkState
 from feeder_station.adapters.store import SpecimenRow, Store
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
@@ -318,7 +317,7 @@ class _HealthReportingGateway(FrameGateway, Protocol):
     """
 
     @property
-    def link_state(self) -> LinkState | NetworkLinkState: ...
+    def link_state(self) -> LinkState: ...
 
 
 def create_app(
@@ -433,64 +432,25 @@ def create_app(
         link_ok = True
         if gateway is not None:
             state = gateway.link_state
-            if isinstance(state, NetworkLinkState):
-                # network-gateway (this change): 1:N, so "the link" cannot
-                # be one boolean the way a single serial port's own
-                # `connected` already can be -- docs/pending.md's closing
-                # rule, "state that was true once, presented as true now",
-                # reborn as "nine disconnected nodes presented as one
-                # connected flag" the moment more than one node exists.
-                # `ok` folds in `listening` (module docstring's own
-                # precedent: a station with no usable transport at all is
-                # the one case this layer still gets to call a failure) --
-                # never any individual node's own `connected`, the same
-                # "a trap's own reachability is a trap-level fact, not a
-                # station-level one" discipline `/api/traps` already keeps
-                # separate from `ok` today.
-                link = {
-                    "transport": "network",
-                    "listening": state.listening,
-                    "host": state.host,
-                    "port": state.port,
-                    "since": state.since,
-                    "unidentified_connections": state.unidentified_connections,
-                    "payload_errors": state.payload_errors,
-                    "last_error": state.last_error,
-                    "nodes": [
-                        {
-                            "node_id": n.node_id,
-                            "connected": n.connected,
-                            "peer_address": n.peer_address,
-                            "since": n.since,
-                            "frames_in": n.frames_in,
-                            "frames_out": n.frames_out,
-                            "decode_errors": n.decode_errors,
-                            "last_error": n.last_error,
-                        }
-                        for n in state.nodes
-                    ],
-                }
-                link_ok = state.listening
-            else:
-                link = {
-                    "transport": "serial",
-                    "connected": state.connected,
-                    "device": state.device,
-                    "since": state.since,
-                    "frames_in": state.frames_in,
-                    "frames_out": state.frames_out,
-                    "decode_errors": state.decode_errors,
-                    # WARNING C (sdd-verify field-station-p4 batch 1): a
-                    # payload-level decode failure, distinguishable from the
-                    # COBS-level `decode_errors` above.
-                    "payload_errors": state.payload_errors,
-                    "last_error": state.last_error,
-                }
-                # "fold connected into ok" (verify-report.md's own fix
-                # wording): a station with no gateway configured never
-                # counts against `ok` -- the same "never enabled, never
-                # counts" discipline `workers_ok` already applies above.
-                link_ok = bool(state.connected)
+            link = {
+                "transport": "serial",
+                "connected": state.connected,
+                "device": state.device,
+                "since": state.since,
+                "frames_in": state.frames_in,
+                "frames_out": state.frames_out,
+                "decode_errors": state.decode_errors,
+                # WARNING C (sdd-verify field-station-p4 batch 1): a
+                # payload-level decode failure, distinguishable from the
+                # COBS-level `decode_errors` above.
+                "payload_errors": state.payload_errors,
+                "last_error": state.last_error,
+            }
+            # "fold connected into ok" (verify-report.md's own fix
+            # wording): a station with no gateway configured never
+            # counts against `ok` -- the same "never enabled, never
+            # counts" discipline `workers_ok` already applies above.
+            link_ok = bool(state.connected)
 
         # CRITICAL 2 (sdd-verify, field-station-p4): "surface it, don't
         # hide it" — the same convention `link`'s `decode_errors` already
