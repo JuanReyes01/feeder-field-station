@@ -45,6 +45,23 @@ def _parse_unit_file(path: Path) -> dict[str, list[str]]:
 # --- 12.1: the unit file's own directives -----------------------------------
 
 
+def test_unit_file_can_open_the_serial_device_it_now_depends_on_entirely() -> None:
+    """The unit runs as the unprivileged `feeder-station` user, and a USB
+    serial device is `crw-rw---- root dialout`. Without `dialout` in the
+    service's supplementary groups the station cannot open the gateway at all.
+
+    This is not a hypothetical. Since the Wi-Fi/TCP node uplink was removed
+    the USB cable is the *only* way a node reaches the station, so this is the
+    first thing a field install exercises. And the failure presents exactly
+    like faults this project has already paid for twice: `link.connected`
+    false, an empty page, and nothing in the log that names a permission --
+    which sends someone looking at the radio instead of at the group.
+    """
+    directives = _parse_unit_file(UNIT_PATH)
+    assert directives["User"] == ["feeder-station"], "test's premise: an unprivileged user"
+    assert "dialout" in " ".join(directives.get("SupplementaryGroups", []))
+
+
 def test_unit_file_has_restart_always_and_no_internet_wait_dependency() -> None:
     """S7: `Restart=always` is what makes a crash, kill, or power cut
     self-healing. S8: nothing in `Requires=`, `Wants=`, or `After=` may

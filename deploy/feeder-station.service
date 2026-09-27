@@ -18,6 +18,13 @@ After=network.target
 Type=simple
 User=feeder-station
 Group=feeder-station
+# The station runs unprivileged, and the one thing it now cannot do without
+# is open a USB serial device -- `crw-rw---- root dialout`. Since the Wi-Fi/TCP
+# node uplink was removed the cable is the ONLY way a node reaches the station,
+# so without this group there is no data at all. It fails the way this project
+# has already paid for twice: `link.connected` false, an empty page, and no log
+# line naming a permission, which sends someone to look at the radio.
+SupplementaryGroups=dialout
 WorkingDirectory=/var/lib/feeder-station
 ExecStart=/usr/bin/env feeder-station --db-path /var/lib/feeder-station/station.db
 # S7: the whole reason `Restart=always` is safe here rather than a

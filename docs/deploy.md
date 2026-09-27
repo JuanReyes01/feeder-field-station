@@ -96,6 +96,29 @@ available (or a pre-built wheel installed with `pip`).
    thread at all, whatever hardware is or is not attached. Useful for isolating whether a problem is
    the radio link or the rest of the station.
 
+### The `dialout` group is not optional
+
+The shipped unit carries `SupplementaryGroups=dialout`, and the install is not
+finished until you have confirmed the service user actually has it:
+
+```
+systemctl show -p SupplementaryGroups feeder-station
+id -nG feeder-station
+```
+
+A USB serial device is `crw-rw---- root dialout`. The station runs as the
+unprivileged `feeder-station` user, and since the Wi-Fi/TCP node uplink was
+removed the cable is the **only** path a node has to the station — so missing
+this group means no data arrives at all, ever.
+
+It matters that you check rather than assume, because of how it fails: `GET
+/health` reports `link.connected: false`, the operator page is simply empty,
+and nothing in the journal names a permission. That is indistinguishable from a
+node that is switched off or out of radio range, and this project has already
+lost hours twice to a symptom that pointed at the radio when the fault was
+somewhere else entirely. Check the group first; it takes one command.
+
+
 ## Data export
 
 `POST /api/export` with a JSON body `{"dest_root": "<a path>"}` produces one
