@@ -358,3 +358,175 @@ def test_traps_are_listed_in_a_stable_order() -> None:
         registry.heartbeat(node_id=node, state=TrapState.IDLE, at=NOW)
 
     assert [t.node_id for t in registry.traps()] == [3, 7, 9]
+
+
+# --- GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27) -----
+#
+# The trigger: a fetch is armed whenever the trap's own reported
+# `targets_version` (from `HEARTBEAT`) disagrees with what it last reported
+# holding (`reported_targets_version`, from `TARGETS`) -- covering both "no
+# reported list yet" and "a stale one", and never a timer of its own.
+
+
+def test_a_heartbeat_arms_a_targets_fetch_when_nothing_has_ever_been_reported() -> None:
+    registry = Registry(silence_after=timedelta(minutes=5))
+
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version is None
+    assert trap.pending_targets_fetch is not None
+
+
+def test_no_targets_fetch_is_armed_for_a_node_never_heartbeated() -> None:
+    """Both `targets_version` and `reported_targets_version` are honestly
+    `None` for a trap this station has never heard from at all -- nothing
+    to check a fetch against yet, so none is armed.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+
+    registry.command_arm(7, at=NOW)  # creates the trap, but no heartbeat ever arrives
+
+    assert registry.trap(7).pending_targets_fetch is None
+
+
+def test_a_completed_targets_reply_clears_the_pending_fetch_once_versions_match() -> None:
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    assert registry.trap(7).pending_targets_fetch is not None
+
+    completed = registry.reported_targets_chunk(
+        7, targets_version=3, seq=0, seq_total=1, tags=[TAG]
+    )
+
+    assert completed == (TAG,)
+    trap = registry.trap(7)
+    assert trap.reported_targets_version == 3
+    assert trap.reported_tags == (TAG,)
+    assert trap.pending_targets_fetch is None
+
+
+def test_a_reply_for_an_older_version_leaves_the_fetch_armed() -> None:
+    """A `TARGETS` reply answering a version the trap has since moved past
+    (a stale reply, or one answering a question the station is no longer
+    asking) must not be read as satisfying the *current* mismatch.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=4, at=NOW)
+
+    registry.reported_targets_chunk(7, targets_version=3, seq=0, seq_total=1, tags=[TAG])
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version == 3  # the trap's own report, recorded honestly
+    assert trap.pending_targets_fetch is not None  # still disagrees with targets_version=4
+
+
+def test_a_split_targets_reply_does_not_clear_the_fetch_until_complete() -> None:
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=9, at=NOW)
+
+    completed = registry.reported_targets_chunk(7, targets_version=9, seq=0, seq_total=2, tags=[TAG])
+    assert completed is None
+    assert registry.trap(7).pending_targets_fetch is not None  # one of two parts
+
+    completed = registry.reported_targets_chunk(
+        7, targets_version=9, seq=1, seq_total=2, tags=[bytes([0xAA] * 7)]
+    )
+    assert completed == (TAG, bytes([0xAA] * 7))
+    assert registry.trap(7).pending_targets_fetch is None
+
+
+def test_repeated_heartbeats_reporting_the_same_mismatch_do_not_reset_the_backoff() -> None:
+    """`PendingTargetsFetch`'s own resend backoff must survive a trap that
+    keeps re-heartbeating the same disagreement every interval -- a fresh
+    `PendingTargetsFetch()` on every beat would reset `attempts`/
+    `last_sent_at` back to "send immediately" each time.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    first = registry.trap(7).pending_targets_fetch
+    assert first is not None
+
+    later = NOW + timedelta(minutes=5)
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=later)
+
+    assert registry.trap(7).pending_targets_fetch is first  # same object, not replaced
+
+
+def test_view_reports_desired_versus_reported_targets_and_whether_they_match() -> None:
+    """The API shape for the desired-versus-reported honesty property: what
+    was asked for (`targets`), what the trap says it has
+    (`reported_targets`), and whether they agree (`targets_match`) --
+    three separate facts, never merged into one.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    # The trap's own confirmed version is 3; an edit to version 4 is pending
+    # delivery -- `desired_tags` (TAG) is what will be asked for once
+    # `SET_TARGETS` for version 4 is confirmed, not what the trap has now.
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.command_set_targets(7, targets_version=4, at=NOW, tags=[TAG])
+
+    view_before = registry.view(now=NOW)[0]
+    assert view_before["targets"] == [TAG.hex().upper()]
+    assert view_before["reported_targets"] is None  # no TARGETS reply yet -- "we don't know"
+    assert view_before["reported_targets_version"] is None
+    assert view_before["targets_match"] is None
+    assert view_before["targets_fetch_pending"] is True
+
+    # The trap answers GET_TARGETS for its own *current* version (3, still
+    # holding the old list) -- distinct from what was asked for (version 4,
+    # tag TAG), which is exactly the disagreement this feature exists to
+    # surface.
+    other_tag = bytes([0xAA] * 7)
+    registry.reported_targets_chunk(7, targets_version=3, seq=0, seq_total=1, tags=[other_tag])
+
+    view_after = registry.view(now=NOW)[0]
+    assert view_after["reported_targets"] == [other_tag.hex().upper()]
+    assert view_after["reported_targets_version"] == 3
+    assert view_after["targets_match"] is False  # the trap reports a different tag than desired
+    assert view_after["targets_fetch_pending"] is False  # reported version 3 matches HEARTBEAT's 3
+
+
+def test_view_reports_a_match_when_desired_and_reported_agree_by_content() -> None:
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=1, at=NOW)
+    registry.command_set_targets(7, targets_version=1, at=NOW, tags=[TAG])
+
+    registry.reported_targets_chunk(7, targets_version=1, seq=0, seq_total=1, tags=[TAG])
+
+    assert registry.view(now=NOW)[0]["targets_match"] is True
+
+
+def test_restore_reported_targets_rehydrates_the_last_completed_reply() -> None:
+    """Rehydration-only path: `Store.reported_targets` already resolved the
+    reassembly to one row; this is a direct restore, not a replay.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+
+    registry.restore_reported_targets(7, targets_version=2, tags=[TAG])
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version == 2
+    assert trap.reported_tags == (TAG,)
+
+
+def test_restore_reported_targets_with_none_still_re_arms_a_fetch_for_an_existing_trap() -> None:
+    """`adapters/store.py::Store._rehydrate_reported_targets`'s own "no
+    completed reply on file" case: called with both arguments `None`, but
+    only for a trap some other rehydrate step already created -- the
+    mismatch must still be re-armed against whatever `targets_version` that
+    step already restored, exactly as the live path would.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.reported_targets_chunk(7, targets_version=3, seq=0, seq_total=1, tags=[TAG])
+    assert registry.trap(7).pending_targets_fetch is None  # settled
+
+    # Simulate a fresh registry rehydrating: heartbeat fields restored, but
+    # this time nothing was ever recorded in node_cursor for reported
+    # targets (`Store.reported_targets` returned None).
+    fresh = Registry(silence_after=timedelta(minutes=5))
+    fresh.restore_heartbeat_fields(7, battery_mv=None, targets_version=3)
+    fresh.restore_reported_targets(7, targets_version=None, tags=None)
+
+    assert fresh.trap(7).pending_targets_fetch is not None

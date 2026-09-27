@@ -1377,3 +1377,64 @@ def test_the_ui_shows_the_tags_a_trap_is_actually_hunting() -> None:
 
     row = c.get("/api/traps").json()[0]
     assert row["targets"] == ["0384199C87EC06", "AABBCCDDEE0011"]
+
+
+# --- GET_TARGETS/TARGETS (docs/protocol/messages.md): the desired-versus- --
+# --- reported honesty property, end to end through /api/traps -------------
+
+
+def test_the_ui_shows_what_was_asked_for_versus_what_the_trap_reports() -> None:
+    """`targets` (what the operator asked for) and `reported_targets`
+    (what the trap says it has) are two separate facts, never merged --
+    this is the API shape the desired-versus-reported honesty property
+    requires. Before a `TARGETS` reply, the station honestly does not know
+    what the trap holds; `targets_match` reflects that as `None`, never a
+    fabricated `True`/`False`.
+    """
+    from feeder_station.app import now
+
+    c, registry = client()
+    c.put("/api/traps/5/targets", json={"tags": ["0384199C87EC06"]})
+    registry.heartbeat(node_id=5, state=TrapState.ARMED, targets_version=1, at=now())
+
+    before = c.get("/api/traps").json()[0]
+    assert before["targets"] == ["0384199C87EC06"]
+    assert before["reported_targets"] is None
+    assert before["reported_targets_version"] is None
+    assert before["targets_match"] is None
+    assert before["targets_fetch_pending"] is True  # no reported list yet -- GET_TARGETS is due
+
+    registry.reported_targets_chunk(
+        5, targets_version=1, seq=0, seq_total=1, tags=[bytes.fromhex("0384199C87EC06")]
+    )
+
+    after = c.get("/api/traps").json()[0]
+    assert after["reported_targets"] == ["0384199C87EC06"]
+    assert after["reported_targets_version"] == 1
+    assert after["targets_match"] is True
+    assert after["targets_fetch_pending"] is False
+
+
+def test_the_ui_shows_a_divergence_between_desired_and_reported_targets() -> None:
+    """The entire reason this feature exists: a trap can legitimately hold
+    a different list than the one the station most recently asked for, and
+    the interface must say so rather than silently agreeing.
+    """
+    from feeder_station.app import now
+
+    c, registry = client()
+    c.put("/api/traps/5/targets", json={"tags": ["0384199C87EC06"]})
+    registry.heartbeat(node_id=5, state=TrapState.ARMED, targets_version=7, at=now())
+
+    # The trap answers for its own current version (7) with a tag the
+    # operator never asked for -- an old list from before this station's
+    # own database existed, or a manual reconfiguration outside it.
+    registry.reported_targets_chunk(
+        5, targets_version=7, seq=0, seq_total=1, tags=[bytes.fromhex("AABBCCDDEE0011")]
+    )
+
+    row = c.get("/api/traps").json()[0]
+    assert row["targets"] == ["0384199C87EC06"]
+    assert row["reported_targets"] == ["AABBCCDDEE0011"]
+    assert row["targets_match"] is False
+    assert row["targets_fetch_pending"] is False  # versions agree -- the *content* disagrees

@@ -276,6 +276,15 @@ _TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
     "capture": ("capture",),
     "desired_tags": ("targets",),
     "armed_via_remote_command_at": ("armed_via_remote_command_at",),
+    # GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27):
+    "reported_targets_version": ("reported_targets_version",),
+    "reported_tags": ("reported_targets", "targets_match"),
+    # `targets_reassembly` has no view() key of its own -- it is a transient,
+    # in-progress buffer (`domain/targets_reassembly.py`), never rendered
+    # directly -- but it shares "is a fetch currently under way" with
+    # `pending_targets_fetch`, which does have one.
+    "targets_reassembly": ("targets_fetch_pending",),
+    "pending_targets_fetch": ("targets_fetch_pending",),
 }
 
 
@@ -300,6 +309,10 @@ _VIEW_KEYS = frozenset(
         "last_seen",
         "capture",
         "armed_via_remote_command_at",
+        "reported_targets",
+        "reported_targets_version",
+        "targets_match",
+        "targets_fetch_pending",
     }
 )
 

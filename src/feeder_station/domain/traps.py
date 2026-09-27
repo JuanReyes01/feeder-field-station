@@ -14,12 +14,14 @@ afterwards sees it, whether they were watching at the time or not.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from .commands import FAULT_CODE_REFUSES, Command, CommandKind, ReportedState
+from . import targets_reassembly
+from .commands import FAULT_CODE_REFUSES, RESEND_BACKOFF_S, Command, CommandKind, ReportedState
+from .targets_reassembly import ReassemblyState
 
 
 class TrapState(str, Enum):
@@ -44,6 +46,45 @@ class Capture:
     tag: bytes
     at: datetime
     acknowledged: bool = False
+
+
+@dataclass(frozen=True)
+class PendingTargetsFetch:
+    """A station-initiated `GET_TARGETS` request, outstanding until a
+    `TARGETS` reply completes and resolves the mismatch that raised it
+    (`Registry._note_targets_mismatch`).
+
+    Deliberately its own type, never `Command`/`CommandKind`, and never
+    stored in `Trap.pending_command`. `Command` tracks an *operator's*
+    intent -- the trap is asked to *become* something, and is checked with
+    `satisfied_by` against a `ReportedState` -- and `Registry._set_pending`
+    lets a second command supersede the first on purpose (an operator
+    changed their mind). A `GET_TARGETS` fetch is not an operator's intent
+    at all: it is the station asking a question, answered only by a
+    `TARGETS` uplink, and it must never share that slot -- an automatic
+    fetch silently cancelling an operator's own pending `ARM`/`DISARM`/
+    `SET_TARGETS` (or the reverse) would be exactly the kind of quiet
+    state loss this project's own commands module already guards against
+    for operator commands.
+
+    ``attempts``/``last_sent_at`` reuse `commands.RESEND_BACKOFF_S`'s own
+    schedule -- the same reasoning applies unchanged: capped below the
+    trap's own heartbeat cadence buys nothing, only unconfirmable
+    retransmits competing with every other downlink for the same shared
+    airtime budget.
+    """
+
+    attempts: int = 0
+    last_sent_at: datetime | None = None
+
+    def due_for_resend(self, now: datetime) -> bool:
+        if self.last_sent_at is None:
+            return True
+        index = min(self.attempts - 1, len(RESEND_BACKOFF_S) - 1)
+        return now - self.last_sent_at >= timedelta(seconds=RESEND_BACKOFF_S[index])
+
+    def sent(self, at: datetime) -> PendingTargetsFetch:
+        return replace(self, attempts=self.attempts + 1, last_sent_at=at)
 
 
 @dataclass
@@ -98,6 +139,27 @@ class Trap:
     # exactly into the moment (`state == ARMED`) an operator needs it
     # most, rather than disappearing the instant the command confirms.
     armed_via_remote_command_at: datetime | None = None
+    # GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27): what
+    # the trap itself last reported holding, entirely separate from
+    # `desired_tags` above -- the station's intent and the trap's own report
+    # are different facts that can legitimately disagree, which is the whole
+    # reason this pair of messages exists. Never written by anything that
+    # touches `desired_tags`, and vice versa -- see `Registry.
+    # reported_targets_chunk`/`restore_reported_targets` (this field) versus
+    # `command_set_targets`/`restore_desired_tags` (`desired_tags`).
+    reported_targets_version: int | None = None
+    reported_tags: tuple[bytes, ...] | None = None
+    # In-flight `TARGETS` reassembly (`domain/targets_reassembly.py`) -- pure,
+    # transient, never persisted directly: losing an *incomplete* generation
+    # on a station restart is safe (a fresh `GET_TARGETS` simply asks again),
+    # unlike `reported_tags`/`reported_targets_version` above, which are the
+    # last *completed* answer and are rehydrated (`adapters/store.py::Store.
+    # reported_targets`).
+    targets_reassembly: ReassemblyState | None = None
+    # Outstanding automatic `GET_TARGETS` request, armed and cleared by
+    # `Registry._note_targets_mismatch` alone -- see `PendingTargetsFetch`'s
+    # own docstring for why this cannot share `pending_command`'s slot.
+    pending_targets_fetch: PendingTargetsFetch | None = None
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
         if self.last_seen is None:
@@ -148,6 +210,14 @@ class Registry:
             )
             if trap.pending_command.satisfied_by(report):
                 trap.pending_command = None
+
+        # GET_TARGETS trigger (docs/protocol/messages.md): re-evaluate on
+        # every heartbeat, using whatever `targets_version` this trap now
+        # holds -- unconditionally, so a heartbeat that could not supply a
+        # fresh reading (the defensive `targets_version=None` fallback,
+        # `adapters/ingest.py::_apply_heartbeat`) still re-checks against
+        # the value already on file, rather than skipping the check.
+        self._note_targets_mismatch(trap)
 
         return trap
 
@@ -303,6 +373,104 @@ class Registry:
         trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
         trap.desired_tags = tuple(tags)
 
+    def reported_targets_chunk(
+        self,
+        node_id: int,
+        *,
+        targets_version: int,
+        seq: int,
+        seq_total: int,
+        tags: Sequence[bytes],
+    ) -> tuple[bytes, ...] | None:
+        """One chunk of a live `TARGETS` uplink (docs/protocol/messages.md):
+        mirrors `command_set_targets`'s own downlink chunking, reversed.
+        Folded into `Trap.targets_reassembly`
+        (`domain/targets_reassembly.py::accept_chunk`, a pure fold) and
+        only becomes `reported_tags`/`reported_targets_version` -- the
+        fact `GET /api/traps` renders and `_note_targets_mismatch` checks
+        -- once every part has arrived, the same "applied only once every
+        part has arrived" rule `SET_TARGETS` already follows in the other
+        direction. A chunk for a *different* `targets_version` than the
+        one already in progress discards that in-progress reassembly
+        outright (see `accept_chunk`'s own docstring for why) rather than
+        merging across two generations.
+
+        Returns the completed tag list when this chunk finishes a
+        generation, so the caller (`adapters/ingest.py`) knows to persist
+        it (`adapters/store.py::Store.record_reported_targets`) -- never
+        ``None`` mistaken for "nothing changed" when a caller needs to
+        durably record a fresh answer.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.targets_reassembly, completed = targets_reassembly.accept_chunk(
+            trap.targets_reassembly,
+            targets_version=targets_version,
+            seq=seq,
+            seq_total=seq_total,
+            tags=tags,
+        )
+        if completed is not None:
+            trap.reported_targets_version = targets_version
+            trap.reported_tags = completed
+            self._note_targets_mismatch(trap)
+        return completed
+
+    def restore_reported_targets(
+        self, node_id: int, *, targets_version: int | None, tags: Sequence[bytes] | None
+    ) -> None:
+        """Rehydration-only: apply the trap's last fully-reassembled
+        `TARGETS` reply directly. `adapters/store.py::Store.
+        reported_targets` already read this back as one row from
+        `node_cursor`'s own cache (SCHEMA_VERSION 4) -- there is no
+        reassembly to replay here, unlike the live per-chunk path
+        (`reported_targets_chunk`).
+
+        ``targets_version``/``tags`` are ``None`` -- rather than this
+        method being skipped outright -- for a node with no completed
+        `TARGETS` reply on file at all. Skipping the call entirely was the
+        bug this signature closes: `_note_targets_mismatch` below never ran
+        for that node, so a `GET_TARGETS` fetch that would have been armed
+        on the live path (a rehydrated `HEARTBEAT` already gave it a real
+        `targets_version`, and the honest "never reported" default is
+        `None`, which disagrees with it) stayed un-armed after a restart
+        instead -- the live and rehydrated registries silently diverging on
+        `targets_fetch_pending`.
+        """
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.reported_targets_version = targets_version
+        trap.reported_tags = None if tags is None else tuple(tags)
+        self._note_targets_mismatch(trap)
+
+    def _note_targets_mismatch(self, trap: Trap) -> None:
+        """The GET_TARGETS trigger (docs/protocol/messages.md): a fetch is
+        armed whenever `reported_targets_version` disagrees with what this
+        trap's own `targets_version` (from its latest `HEARTBEAT`) says --
+        which covers both trigger conditions at once: no reported list at
+        all yet (`reported_targets_version is None` while `targets_version`
+        is a real value) and a stale one (the two disagree on a number).
+        Both `None` -- a trap this station has never even heard a
+        heartbeat from -- reads as "nothing to check yet", not a mismatch:
+        there is no known real version to try to satisfy.
+
+        Never a periodic poll: this is only ever (re-)armed from a
+        `HEARTBEAT` actually reporting a new mismatch
+        (:meth:`heartbeat`), or from a `TARGETS` reply changing
+        `reported_targets_version` itself (:meth:`reported_targets_chunk`,
+        :meth:`restore_reported_targets`) -- never from a timer of its
+        own.
+
+        A fetch already pending for this same mismatch is left exactly as
+        it is -- `attempts`/`last_sent_at`'s own backoff, not a fresh
+        reset -- so a trap that keeps re-heartbeating the same
+        disagreement every interval does not have its resend backoff
+        clobbered back to "send immediately" on every beat.
+        """
+        if trap.reported_targets_version == trap.targets_version:
+            trap.pending_targets_fetch = None
+            return
+        if trap.pending_targets_fetch is None:
+            trap.pending_targets_fetch = PendingTargetsFetch()
+
     def fault(self, node_id: int, at: datetime, code: int | None) -> None:
         """A `FAULT` uplink (radio-gateway spec.md): the trap itself reported
         it, exactly the same standing as a heartbeat (S4) — not this
@@ -410,6 +578,34 @@ class Registry:
                         if trap.desired_tags
                         else []
                     ),
+                    # GET_TARGETS/TARGETS (docs/protocol/messages.md): what
+                    # the trap itself last reported holding -- `None` (never
+                    # a fabricated `[]`) when this station has no accepted
+                    # `TARGETS` reply for it yet, the same "never enabled,
+                    # never counts as a value" discipline `battery_mv`/
+                    # `last_seen` already apply, so an operator can tell "we
+                    # don't know" from "the trap says it has nothing".
+                    "reported_targets": (
+                        None
+                        if trap.reported_tags is None
+                        else [tag.hex().upper() for tag in trap.reported_tags]
+                    ),
+                    "reported_targets_version": trap.reported_targets_version,
+                    # Whether the two facts above actually agree, compared by
+                    # content (a set, not wire order) -- `None` for "we don't
+                    # know yet" (no `TARGETS` reply), never conflated with
+                    # `False` ("we know, and they disagree"). This is the
+                    # divergence `targets`/`reported_targets` alone cannot
+                    # show without an operator comparing two arrays by eye.
+                    "targets_match": (
+                        None
+                        if trap.reported_tags is None
+                        else set(trap.desired_tags or ()) == set(trap.reported_tags)
+                    ),
+                    # Whether an automatic GET_TARGETS is currently
+                    # outstanding for this trap -- explains why
+                    # `reported_targets` might still be stale or absent.
+                    "targets_fetch_pending": trap.pending_targets_fetch is not None,
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
                     # station/remote-arm-restored: the honest caveat --
                     # `wall_reached()` is still a firmware placeholder
