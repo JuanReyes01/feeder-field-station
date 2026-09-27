@@ -541,3 +541,169 @@ def test_a_shared_budget_caps_how_many_due_commands_one_sweep_sends() -> None:
         if node_id not in sent_to:
             assert registry.trap(node_id).pending_command is not None
             assert registry.trap(node_id).pending_command.attempts == 0  # type: ignore[union-attr]
+
+
+# --- GET_TARGETS (0x87, docs/protocol/messages.md) -------------------------
+
+
+def test_a_pending_targets_fetch_is_sent_as_an_empty_get_targets_frame() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    assert registry.trap(7).pending_targets_fetch is not None  # armed: no reported list yet
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    assert sent_to == [7]
+    assert len(gateway.written) == 1
+    frame = decode(gateway.written[0])
+    assert frame.msg_type == payloads.GET_TARGETS
+    assert frame.node_id == 7
+    assert frame.payload == b""
+    assert registry.trap(7).pending_targets_fetch.attempts == 1  # type: ignore[union-attr]
+
+
+def test_a_targets_fetch_not_yet_due_is_skipped() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+    send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    half_a_second_later = NOW + timedelta(milliseconds=500)
+    sent_to = send_due_commands(
+        registry,
+        store=store,
+        gateway=gateway,
+        now=half_a_second_later,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
+    )
+
+    assert sent_to == []
+    assert len(gateway.written) == 1
+
+
+def test_a_trap_with_no_pending_targets_fetch_is_skipped() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.reported_targets_chunk(7, targets_version=3, seq=0, seq_total=1, tags=[])
+    assert registry.trap(7).pending_targets_fetch is None  # settled -- versions agree
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    assert sent_to == []
+    assert gateway.written == []
+
+
+def test_a_failed_write_leaves_the_targets_fetch_pending_and_unattempted() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    gateway = _SpyGateway(accept=False)
+    store = _FakeStore()
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    assert sent_to == []
+    fetch = registry.trap(7).pending_targets_fetch
+    assert fetch is not None
+    assert fetch.attempts == 0  # a dropped write must not look like a send that happened
+
+
+def test_a_refused_budget_leaves_the_targets_fetch_pending_and_unattempted() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+    budget = _CountingBudget(capacity=0)
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=budget
+    )
+
+    assert sent_to == []
+    assert gateway.written == []
+    fetch = registry.trap(7).pending_targets_fetch
+    assert fetch is not None
+    assert fetch.attempts == 0
+
+
+def test_a_pending_command_and_a_pending_targets_fetch_are_both_sent_in_one_sweep() -> None:
+    """`Trap.pending_command` (an operator's intent) and `Trap.
+    pending_targets_fetch` (the station's own automatic reconciliation) are
+    unrelated facts -- both due for the same trap at the same tick must
+    both go out, not one starving the other.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.command_disarm(7, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    assert sent_to == [7]  # one node, two frames
+    assert len(gateway.written) == 2
+    msg_types = {decode(frame).msg_type for frame in gateway.written}
+    assert msg_types == {payloads.DISARM, payloads.GET_TARGETS}
+
+
+def test_a_targets_fetch_is_dispatched_for_a_trap_with_no_pending_command_at_all() -> None:
+    """The independent-dispatch guarantee, the other direction: a trap with
+    nothing pending except an automatic fetch must still be visited, not
+    skipped because ``trap.pending_command`` alone is ``None``.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    assert registry.trap(7).pending_command is None
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    sent_to = send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+
+    assert sent_to == [7]
+    assert decode(gateway.written[0]).msg_type == payloads.GET_TARGETS
+
+
+def test_repeated_sweeps_resend_a_targets_fetch_on_its_own_backoff_schedule() -> None:
+    """`PendingTargetsFetch.due_for_resend` reuses `RESEND_BACKOFF_S`'s own
+    schedule -- proven end to end here the same way ARM/DISARM's resend
+    already is above.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    send_due_commands(
+        registry, store=store, gateway=gateway, now=NOW, arm_duration_s=86_400, budget=_AllowAllBudget()
+    )
+    assert len(gateway.written) == 1
+
+    one_second_later = NOW + timedelta(seconds=1)
+    sent_to = send_due_commands(
+        registry,
+        store=store,
+        gateway=gateway,
+        now=one_second_later,
+        arm_duration_s=86_400,
+        budget=_AllowAllBudget(),
+    )
+
+    assert sent_to == [7]
+    assert len(gateway.written) == 2

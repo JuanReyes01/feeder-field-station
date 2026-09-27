@@ -28,6 +28,16 @@ correct-and-delivered -- exactly the same honest distance separately named
 for the serial gateway (slice 5) and the deployment unit (slice 12): a
 passing test here proves the station's own half of the wire, not the other
 end of it.
+
+**`GET_TARGETS` (0x87), added alongside `TARGETS` (0x07, docs/protocol/
+messages.md).** A second, unrelated kind of pending fact this module now
+dispatches: `Trap.pending_targets_fetch`, armed and cleared entirely by
+`Registry._note_targets_mismatch`, never by an operator action -- see
+`PendingTargetsFetch`'s own docstring (`domain/traps.py`) for why it
+cannot share `pending_command`'s slot. `_send_get_targets` mirrors the
+single-frame ARM/DISARM path above, not `_send_set_targets`'s chunked
+one: the request itself is always one empty-payload frame, and it is the
+*answer* that may need reassembling, on the way back in.
 """
 
 from __future__ import annotations
@@ -38,7 +48,7 @@ from typing import Protocol
 from feeder_station.domain import events, frames, payloads
 from feeder_station.domain.commands import Command, CommandKind
 from feeder_station.domain.frames import Frame
-from feeder_station.domain.traps import Registry, Trap
+from feeder_station.domain.traps import PendingTargetsFetch, Registry, Trap
 
 # What each single-frame `CommandKind` this module sends becomes on the
 # wire. `SET_TARGETS` is handled separately by `_send_set_targets` below --
@@ -191,6 +201,33 @@ def _send_set_targets(
     return True
 
 
+def _send_get_targets(
+    trap: Trap,
+    fetch: PendingTargetsFetch,
+    *,
+    gateway: CommandGateway,
+    now: datetime,
+    budget: TransmitBudget,
+) -> bool:
+    """One `GET_TARGETS` frame (docs/protocol/messages.md) -- always a
+    single, empty-payload frame, never chunked (that is `TARGETS`'s own
+    answer's problem, reassembled on the way back in
+    `Registry.reported_targets_chunk`), so this mirrors the ARM/DISARM
+    single-frame path above, not ``_send_set_targets``'s multi-chunk one.
+    """
+    if not budget.try_send():
+        return False
+
+    frame = Frame(
+        msg_type=payloads.GET_TARGETS, node_id=trap.node_id, payload=payloads.encode_get_targets()
+    )
+    if not gateway.write_frame(frames.encode(frame)):
+        return False
+
+    trap.pending_targets_fetch = fetch.sent(now)
+    return True
+
+
 def send_due_commands(
     registry: Registry,
     *,
@@ -200,13 +237,16 @@ def send_due_commands(
     arm_duration_s: float,
     budget: TransmitBudget,
 ) -> list[int]:
-    """One pass over every trap with a pending command due for resend.
+    """One pass over every trap with a pending command, or an outstanding
+    `GET_TARGETS` fetch, due for resend.
 
     Returns the node ids a frame was genuinely written for, in roster
     order. A command's own ``sent()`` (slice 8) -- which advances the
     capped backoff ``due_for_resend()`` reads next time -- is only called
     when the write(s) to the gateway actually succeeded; a dropped write
     must not look, to the backoff schedule, like a send that happened.
+    ``PendingTargetsFetch.sent()`` follows the identical rule for its own
+    backoff.
 
     **CRITICAL 3 (sdd-verify field-station-p4):** ``budget`` is checked
     once per trap actually due, *inside* this loop -- not once for the
@@ -218,35 +258,48 @@ def send_due_commands(
 
     **BEHAVIOUR 1 (verify-report-final.md, sdd-verify field-station-p4):**
     that "once per trap" check is a *single* token only for the
-    single-frame kinds below (``ARM``/``DISARM``) -- ``SET_TARGETS`` can
-    produce more than one frame per trap, so its own charge is made inside
-    ``_send_set_targets`` itself, sized to the chunk count, not made here
-    as a flat one-token gate before dispatch.
+    single-frame kinds below (``ARM``/``DISARM``/``GET_TARGETS``) --
+    ``SET_TARGETS`` can produce more than one frame per trap, so its own
+    charge is made inside ``_send_set_targets`` itself, sized to the
+    chunk count, not made here as a flat one-token gate before dispatch.
+
+    **A trap's pending command and its pending `GET_TARGETS` fetch are
+    dispatched independently**, in the same pass: `Trap.pending_command`
+    (an operator's intent) and `Trap.pending_targets_fetch` (the
+    station's own automatic reconciliation, `Registry.
+    _note_targets_mismatch`) are unrelated facts that may both be due, one,
+    or neither, for the same trap at the same tick -- see
+    `PendingTargetsFetch`'s own docstring for why they never share a slot.
     """
     sent_to: list[int] = []
     for trap in registry.traps():
+        sent = False
+
         command = trap.pending_command
-        if command is None or not command.due_for_resend(now):
-            continue
+        if command is not None and command.due_for_resend(now):
+            if command.kind is CommandKind.SET_TARGETS:
+                if _send_set_targets(
+                    trap, command, store=store, gateway=gateway, now=now, budget=budget
+                ):
+                    sent = True
+            elif budget.try_send():
+                msg_type = _WIRE_MSG_TYPE.get(command.kind)
+                payload = _encode_single_frame(command, now=now, arm_duration_s=arm_duration_s)
+                if msg_type is not None and payload is not None:
+                    frame = Frame(msg_type=msg_type, node_id=trap.node_id, payload=payload)
+                    if gateway.write_frame(frames.encode(frame)):
+                        trap.pending_command = command.sent(now)
+                        sent = True
 
-        if command.kind is CommandKind.SET_TARGETS:
-            if _send_set_targets(
-                trap, command, store=store, gateway=gateway, now=now, budget=budget
-            ):
-                sent_to.append(trap.node_id)
-            continue
+        fetch = trap.pending_targets_fetch
+        if (
+            fetch is not None
+            and fetch.due_for_resend(now)
+            and _send_get_targets(trap, fetch, gateway=gateway, now=now, budget=budget)
+        ):
+            sent = True
 
-        if not budget.try_send():
-            continue
-
-        msg_type = _WIRE_MSG_TYPE.get(command.kind)
-        payload = _encode_single_frame(command, now=now, arm_duration_s=arm_duration_s)
-        if msg_type is None or payload is None:
-            continue
-
-        frame = Frame(msg_type=msg_type, node_id=trap.node_id, payload=payload)
-        if gateway.write_frame(frames.encode(frame)):
-            trap.pending_command = command.sent(now)
+        if sent:
             sent_to.append(trap.node_id)
 
     return sent_to
