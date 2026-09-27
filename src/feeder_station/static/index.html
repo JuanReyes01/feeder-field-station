@@ -349,22 +349,23 @@ function renderTrap(t, readsByNode, nowEpoch) {
       </div>
       ${t.pending_command ? `<p class="pending">${describePending(t)}</p>` : ""}
       <div class="actions">
+        <button onclick="arm(${t.node_id})">Armar</button>
         <button onclick="disarm(${t.node_id})">Desarmar</button>
         ${t.pending_command ? `<button onclick="cancelCommand(${t.node_id})">Cancelar comando pendiente</button>` : ""}
       </div>
     </div>`;
 }
 
-// docs/pending.md, "Remove the remote arm affordance": there is no
-// "Armar" button any more (arming needs a person at the trap, not a
-// downlink), but `pending_command === "arm"` is still a real state this
-// page can be handed -- a station that boots against a database from
-// before this change rehydrates a pre-existing ARM command
-// (`adapters/store.py`'s own rehydration, kept for exactly that reason).
-// Rendering it correctly here, rather than deleting the branch, is what
-// "leave nothing that renders a state the operator can no longer reach"
-// means in practice: the operator cannot have *caused* this pending
-// "arm", but they can still read it, and cancel it below.
+// station/remote-arm-restored: the "Armar" button was removed in `029b80c`
+// ("remove the remote arm affordance") because arming meant a person
+// walking to the trap and placing the cord by hand -- no downlink could
+// do that. The bench has since been rewired so one ESP32 is the whole
+// trap and the firmware runs the arming sweep itself on a remote `ARM`,
+// so the button (and the route it calls, app.py) is back. Nothing here
+// claims more than app.py's own route does: pressing it only sets a
+// pending command (S4) -- see describePending below for how "armed" stays
+// unconfirmed until the trap's own next HEARTBEAT says so, exactly like
+// every other command on this page.
 function describePending(t) {
   if (t.pending_command === "set_targets") {
     return `Lista de objetivos v${t.desired_targets_version} pendiente de confirmar`;
@@ -373,6 +374,7 @@ function describePending(t) {
   return `${verb} pendiente de confirmar`;
 }
 
+async function arm(id) { await fetch(`/api/traps/${id}/arm`, { method: "POST" }); refresh(); }
 async function disarm(id) { await fetch(`/api/traps/${id}/disarm`, { method: "POST" }); refresh(); }
 async function ack(id) { await fetch(`/api/traps/${id}/acknowledge`, { method: "POST" }); refresh(); }
 async function cancelCommand(id) { await fetch(`/api/traps/${id}/cancel`, { method: "POST" }); refresh(); }

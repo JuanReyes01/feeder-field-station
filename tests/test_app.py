@@ -41,6 +41,7 @@ from feeder_station.config import StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import (
+    OPERATOR_ARM,
     OPERATOR_CANCEL_COMMAND,
     OPERATOR_DISARM,
     OPERATOR_SET_TARGETS,
@@ -125,12 +126,9 @@ def test_a_capture_is_visible_to_a_browser_that_arrives_later() -> None:
 def test_disarm_route_sets_pending_command_not_reported_state() -> None:
     """S1/S4: issuing DISARM over HTTP must only ever set a pending command
     in the registry -- the trap's reported `state` in `/api/traps` must
-    not move until a HEARTBEAT says so (slice 8, DD15).
-
-    ARM has no HTTP route any more (docs/pending.md, "Remove the remote
-    arm affordance"): arming means a person walking to the trap and
-    placing the cord over the mechanism, which no downlink can do -- see
-    `test_arm_route_no_longer_exists` below.
+    not move until a HEARTBEAT says so (slice 8, DD15). See
+    `test_arm_route_sets_pending_command_not_reported_state` below for the
+    same discipline proven for ARM.
     """
     c, registry = client()
     from feeder_station.app import now
@@ -142,16 +140,32 @@ def test_disarm_route_sets_pending_command_not_reported_state() -> None:
     assert c.get("/api/traps").json()[0]["pending_command"] == "disarm"
 
 
-def test_arm_route_no_longer_exists() -> None:
-    """docs/pending.md, "Remove the remote arm affordance": arming this
-    trap means a person walking to it and placing the cord over the
-    mechanism -- no downlink can do that (settled by the hardware, this
-    project's answer to `docs/protocol/messages.md`'s open question 3).
-    Leaving the route reachable after removing the button would let the
-    next reader of the API believe the capability still exists.
+def test_arm_route_sets_pending_command_not_reported_state() -> None:
+    """S1/S4: issuing ARM over HTTP must only ever set a pending command in
+    the registry -- the trap's reported `state` in `/api/traps` must not
+    move until a HEARTBEAT says so (slice 8, DD15), the same discipline
+    `test_disarm_route_sets_pending_command_not_reported_state` above
+    already proves for DISARM.
+
+    Supersedes `test_arm_route_no_longer_exists` (removed in `029b80c`,
+    "remove the remote arm affordance"): that test was correct while the
+    node had no way to arm itself and answered every `ARM` with a `FAULT`
+    (`ARM_REQUIRES_PRESENCE`). The bench has since been rewired so one
+    ESP32 is the whole trap and the firmware runs the arming sweep itself
+    on a remote `ARM` -- the capability this test proves is real again,
+    not a soft revert of the removal: an operator can never read this
+    route's 200 as "the trap is armed", only as "armed" pending the
+    trap's own next report, exactly like every other command on this
+    page.
     """
-    c, _ = client()
-    assert c.post("/api/traps/7/arm").status_code == 404
+    c, registry = client()
+    from feeder_station.app import now
+
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
+    arm_response = c.post("/api/traps/7/arm")
+    assert arm_response.status_code == 200
+    assert c.get("/api/traps").json()[0]["state"] == "idle"
+    assert c.get("/api/traps").json()[0]["pending_command"] == "arm"
 
 
 def test_cancel_command_route_clears_a_pending_command() -> None:
@@ -168,6 +182,29 @@ def test_cancel_command_route_clears_a_pending_command() -> None:
 
     response = c.post("/api/traps/7/cancel")
     assert response.status_code == 200
+    assert c.get("/api/traps").json()[0]["pending_command"] is None
+
+
+def test_a_fault_refusing_arm_cancels_the_pending_command_the_arm_route_created() -> None:
+    """The arm route and `034720b`'s fault-driven cancellation
+    (`Registry.fault`, `domain/commands.py::FAULT_CODE_REFUSES`) are two
+    separate pieces of code -- `tests/domain/test_traps.py` already proves
+    `Registry.fault` alone, against a `Command` built directly. This
+    proves they are wired to the *same* pending command end to end: the
+    route's own `command_arm` call must produce a `Command` shaped the way
+    `FAULT_CODE_REFUSES` expects to find one. Guards the regression
+    `034720b`'s own commit message measured on the bench -- nine `FAULT`
+    rows retrying one `POST /arm` forever, starving `TIME_SYNC` for hours
+    -- now that the route exists again for the retry loop to run against.
+    """
+    c, registry = client()
+    from feeder_station.app import now
+
+    assert c.post("/api/traps/7/arm").status_code == 200
+    assert c.get("/api/traps").json()[0]["pending_command"] == "arm"
+
+    registry.fault(7, at=now(), code=5)  # STATION_FAULT_ARM_REQUIRES_PRESENCE
+
     assert c.get("/api/traps").json()[0]["pending_command"] is None
 
 
@@ -301,17 +338,19 @@ def test_the_page_still_loads_with_no_traps() -> None:
 # --- 10.3/10.4: every operator route answers, targets included -------------
 
 
-def test_disarm_edit_targets_acknowledge_cancel_routes_all_return_2xx() -> None:
+def test_arm_disarm_edit_targets_acknowledge_cancel_routes_all_return_2xx() -> None:
     """Route-level only -- touch-DOM interaction is not pytest's domain (see
     this module's own docstring). Proves every action S13 names reaches the
-    registry through a 2xx response. ARM is not among them any more (see
-    `test_arm_route_no_longer_exists`).
+    registry through a 2xx response. ARM is included again now that
+    `POST /api/traps/{node_id}/arm` exists (see
+    `test_arm_route_sets_pending_command_not_reported_state`).
     """
     c, registry = client()
     from feeder_station.app import now
 
     registry.heartbeat(node_id=7, state=TrapState.IDLE, at=now())
 
+    assert c.post("/api/traps/7/arm").status_code // 100 == 2
     assert c.post("/api/traps/7/disarm").status_code // 100 == 2
     assert c.put("/api/traps/7/targets", json={"tags": ["0384199C87EC06"]}).status_code // 100 == 2
     assert c.post("/api/traps/7/cancel").status_code // 100 == 2
@@ -607,24 +646,32 @@ def test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_constant() -
     )
 
 
-# --- docs/pending.md, "Remove the remote arm affordance" -------------------
+# --- station/remote-arm-restored: the bench now runs the arming sweep on the
+# node itself, so the Armar button is back (see static/index.html's own
+# comment for why, superseding "Remove the remote arm affordance" below). ---
 
 
-def test_the_armar_button_is_removed_from_the_static_page() -> None:
-    """Arming this trap means a person walking to it and placing the cord
-    over the mechanism -- no downlink can do that (settled by the
-    hardware, not a preference). A button calling a route that no longer
-    exists (`test_arm_route_no_longer_exists`, tests/test_app.py) would
-    show the operator an affordance they can no longer reach.
+def test_the_armar_button_is_present_again() -> None:
+    """Supersedes `test_the_armar_button_is_removed_from_the_static_page`
+    (`029b80c`, "remove the remote arm affordance"): that test was correct
+    while arming needed a person at the trap placing the cord by hand, so
+    no downlink could ever do it. The bench has since been rewired so one
+    ESP32 is the whole trap and the firmware runs the arming sweep itself
+    on a remote `ARM` -- the button calls a route that exists again
+    (`test_arm_route_sets_pending_command_not_reported_state`,
+    tests/test_app.py), so hiding it would now be the dishonest state:
+    an operator action available through the API but invisible on the
+    page they actually use.
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert 'onclick="arm(' not in html
-    assert ">Armar<" not in html
+    assert 'onclick="arm(' in html
+    assert ">Armar<" in html
 
 
 def test_the_desarmar_button_is_still_present() -> None:
     """Standing a trap down remotely stays possible -- the release drops
-    the servo without recording a capture -- so only Armar goes.
+    the servo without recording a capture -- so Desarmar was never at
+    risk of the same removal Armar briefly went through.
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
     assert 'onclick="disarm(' in html
@@ -1256,7 +1303,22 @@ def test_acknowledging_a_capture_survives_a_restart_through_the_route(tmp_path: 
     assert all(row["capture"] is None for row in rows)
 
 
-# --- 13.3/13.4: DISARM is recorded, not only applied in memory -------------
+# --- 13.3/13.4: ARM/DISARM are recorded, not only applied in memory -------
+
+
+def test_arm_is_recorded_as_an_operator_event(tmp_path: Path) -> None:
+    """event-store spec.md, "Capture persists until acknowledged" -- the
+    same store-write-before-registry discipline this slice applies to
+    disarm/edit-targets/acknowledge/cancel, now proven for arm again.
+    """
+    store = Store(tmp_path / "station.db")
+    c = TestClient(create_app(store=store))
+
+    assert c.post("/api/traps/7/arm").status_code == 200
+
+    armed = store.latest(7, OPERATOR_ARM)
+    assert armed is not None
+    assert armed.source == "operator"
 
 
 def test_disarm_is_recorded_as_an_operator_event(tmp_path: Path) -> None:
@@ -1293,6 +1355,7 @@ def test_operator_routes_still_work_with_no_store_configured() -> None:
     already reports with a 503 rather than a crash.
     """
     c, _ = client()
+    assert c.post("/api/traps/7/arm").status_code == 200
     assert c.post("/api/traps/7/disarm").status_code == 200
     assert c.post("/api/traps/7/acknowledge").status_code == 200
     assert c.post("/api/traps/7/cancel").status_code == 200
