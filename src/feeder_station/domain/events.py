@@ -66,6 +66,7 @@ _DECODERS: Mapping[int, Callable[[bytes], object]] = {
     payloads.VISIT: payloads.decode_visit,
     payloads.CAPTURED: payloads.decode_captured,
     payloads.FAULT: payloads.decode_fault,
+    payloads.TARGETS: payloads.decode_targets,
     payloads.ACK: payloads.decode_ack,
 }
 
@@ -190,6 +191,46 @@ def _fields_of(decoded: object) -> dict[str, object]:
     fighting the type checker. Every payload dataclass in this project
     stores its fields as plain instance attributes, so this holds for all of
     them.
+
+    ``payloads.Targets`` (0x07) is the first decoded payload to carry a
+    *sequence* of tags rather than one lone ``tag: bytes`` field (that
+    singular case is ``_tag_of``'s job, below, and stays untouched) -- a
+    tuple of ``bytes`` is hex-encoded element-wise, the same JSON-safety
+    ``bytes`` itself already gets one level up.
     """
     raw = vars(decoded)
-    return {key: (value.hex() if isinstance(value, bytes) else value) for key, value in raw.items()}
+    return {key: _json_safe(value) for key, value in raw.items()}
+
+
+def _json_safe(value: object) -> object:
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, tuple) and all(isinstance(item, bytes) for item in value):
+        return [item.hex() for item in value]
+    return value
+
+
+def tags_from_fields(fields: Mapping[str, object]) -> tuple[bytes, ...] | None:
+    """The exact bytes behind a `SET_TARGETS`/`TARGETS` row's own `"tags"`
+    field -- a list of hex strings once round-tripped through JSON (or,
+    live, straight out of `_fields_of` above), never anything else.
+    ``None`` for anything that is not that exact shape: a caller decides
+    for itself whether "not readable" (raise) or "not present" (skip) is
+    the right response, the same discipline `adapters/store.py`'s own
+    rehydration guards already apply one layer up.
+
+    Shared by `adapters/store.py` (reading a stored `SET_TARGETS`/`TARGETS`
+    row back out of JSON) and `adapters/ingest.py` (reading a live `TARGETS`
+    chunk's own, not-yet-persisted fields) so the one "how a tag list is
+    spelled in a fields dict" rule lives in one place, not two readings of
+    the same shape drifting apart.
+    """
+    raw_tags = fields.get("tags")
+    if not isinstance(raw_tags, list):
+        return None
+    tags: list[bytes] = []
+    for item in raw_tags:
+        if not isinstance(item, str):
+            return None
+        tags.append(bytes.fromhex(item))
+    return tuple(tags)

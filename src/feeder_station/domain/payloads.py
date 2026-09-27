@@ -30,6 +30,7 @@ VISIT = 0x03
 CAPTURED = 0x04
 FAULT = 0x05
 READS = 0x06
+TARGETS = 0x07
 ACK = 0x7F
 
 # Downlink message types (docs/protocol/messages.md, "Downlink, station to node").
@@ -39,6 +40,7 @@ SET_TARGETS = 0x83
 GET_STATE = 0x84
 TIME_SYNC = 0x85
 GET_BACKLOG = 0x86
+GET_TARGETS = 0x87
 
 TAG_BYTES = 7
 
@@ -314,6 +316,11 @@ def encode_get_state() -> bytes:
     return b""
 
 
+def encode_get_targets() -> bytes:
+    # GET_TARGETS has no payload; it is answered with TARGETS (messages.md).
+    return b""
+
+
 def encode_time_sync(*, epoch: int) -> bytes:
     # epoch: 4 bytes LE uint32 — pinned (Timestamps convention). No confidence
     # or refusal field: the protocol has none (D7); a station that must not
@@ -404,3 +411,42 @@ def encode_set_targets(*, targets_version: int, tags: Sequence[bytes]) -> list[b
         )
         frames.append(header + b"".join(chunk))
     return frames
+
+
+@dataclass(frozen=True)
+class Targets:
+    """One chunk of a `TARGETS` uplink (messages.md) — the exact mirror of
+    `encode_set_targets`'s own per-chunk header, read the other direction.
+    `tags` is this chunk's own slice, never the whole reassembled list:
+    completing that list across `seq`/`seq_total` is
+    `domain/targets_reassembly.py`'s job, not this decoder's.
+    """
+
+    targets_version: int
+    seq: int
+    seq_total: int
+    tags: tuple[bytes, ...]
+
+
+def decode_targets(payload: bytes) -> Targets:
+    """messages.md: `TARGETS` "mirrors `SET_TARGETS`'s own payload exactly" —
+    `targets_version` (2), `seq` (2), `seq_total` (2), `count` (1), then
+    `count` × `tag[7]`. Reusing `_SET_TARGETS_HEADER_BYTES` here, rather than
+    a second literal `7`, is the same "read the header width once" discipline
+    `TAGS_PER_SET_TARGETS_FRAME` already applies to the chunking arithmetic:
+    a future width change only has one constant to update, not two decoders
+    quietly agreeing by coincidence.
+    """
+    _require_min_len(payload, _SET_TARGETS_HEADER_BYTES, "TARGETS")
+    targets_version = payload[0] | (payload[1] << 8)
+    seq = payload[2] | (payload[3] << 8)
+    seq_total = payload[4] | (payload[5] << 8)
+    count = payload[6]
+    expected = _SET_TARGETS_HEADER_BYTES + count * TAG_BYTES
+    _require_len(payload, expected, "TARGETS")
+
+    tags = tuple(
+        bytes(payload[_SET_TARGETS_HEADER_BYTES + i * TAG_BYTES : _SET_TARGETS_HEADER_BYTES + (i + 1) * TAG_BYTES])
+        for i in range(count)
+    )
+    return Targets(targets_version=targets_version, seq=seq, seq_total=seq_total, tags=tags)

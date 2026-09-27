@@ -453,3 +453,54 @@ def test_encodes_a_40_tag_target_list_across_two_frames() -> None:
     assert count1 == 13
     assert frames[0][7:] == b"".join(tags[:27])
     assert frames[1][7:] == b"".join(tags[27:])
+
+
+# --- GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27) ------
+
+
+def test_encodes_a_get_targets_payload() -> None:
+    assert payloads.encode_get_targets() == b""
+
+
+def test_decodes_a_targets_payload_mirroring_set_targets() -> None:
+    """`TARGETS` mirrors `SET_TARGETS`'s own payload exactly (messages.md)
+    -- proved here by decoding bytes `encode_set_targets` itself produced,
+    the same "one side's encoder is the other's test vector" discipline
+    this module already documents for `READS`.
+    """
+    tags = [TAG, bytes([0xAA] * 7)]
+    (frame,) = payloads.encode_set_targets(targets_version=9, tags=tags)
+
+    result = payloads.decode_targets(frame)
+
+    assert result.targets_version == 9
+    assert result.seq == 0
+    assert result.seq_total == 1
+    assert result.tags == (TAG, bytes([0xAA] * 7))
+
+
+def test_decodes_a_split_targets_reply_across_two_chunks() -> None:
+    tags = [bytes([i, 0, 0, 0, 0, 0, 0]) for i in range(40)]
+    frame0, frame1 = payloads.encode_set_targets(targets_version=9, tags=tags)
+
+    result0 = payloads.decode_targets(frame0)
+    result1 = payloads.decode_targets(frame1)
+
+    assert (result0.seq, result0.seq_total) == (0, 2)
+    assert (result1.seq, result1.seq_total) == (1, 2)
+    assert result0.tags == tuple(tags[:27])
+    assert result1.tags == tuple(tags[27:])
+
+
+def test_decodes_a_targets_payload_with_zero_tags() -> None:
+    (frame,) = payloads.encode_set_targets(targets_version=1, tags=[])
+
+    result = payloads.decode_targets(frame)
+
+    assert result.tags == ()
+
+
+def test_rejects_a_truncated_targets_payload() -> None:
+    (frame,) = payloads.encode_set_targets(targets_version=9, tags=[TAG])
+    with pytest.raises(PayloadError):
+        payloads.decode_targets(frame[:-1])  # one byte short of its declared count
