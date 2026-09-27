@@ -44,6 +44,9 @@ class _StubStore:
     def append_batch(self, events, *, received_epoch, clock_trust):
         return _AppendedBatch()
 
+    def record_reported_targets(self, node_id, *, targets_version, tags):
+        return None
+
 
 class _RaisingStore:
     def append(self, event, *, received_epoch, clock_trust):
@@ -51,6 +54,9 @@ class _RaisingStore:
 
     def append_batch(self, events, *, received_epoch, clock_trust):
         raise RuntimeError("disk full")
+
+    def record_reported_targets(self, node_id, *, targets_version, tags):
+        raise AssertionError("must not be reached -- append() always raises first")
 
 
 class _SpyAckPort:
@@ -73,6 +79,9 @@ class _OrderedStore:
     def append_batch(self, events, *, received_epoch, clock_trust):
         self._calls.append("store.append_batch")
         return _AppendedBatch()
+
+    def record_reported_targets(self, node_id, *, targets_version, tags):
+        self._calls.append("store.record_reported_targets")
 
 
 class _OrderedAckPort:
@@ -156,6 +165,36 @@ def _reads_frame(
 
 def _seventeen_reads() -> list[tuple[bytes, int]]:
     return [(bytes([i] * 7), 1_735_000_000 + i) for i in range(17)]
+
+
+def _targets_frame(
+    *,
+    node_id: int,
+    msg_id: int,
+    targets_version: int,
+    seq: int,
+    seq_total: int,
+    tags: list[bytes],
+) -> bytes:
+    """One `TARGETS` (0x07) wire frame -- the payload mirrors `SET_TARGETS`'s
+    own header exactly (docs/protocol/messages.md), built by hand rather
+    than through `payloads.encode_set_targets` so a test can drive `seq`/
+    `seq_total` independently of how many tags actually fit in one real
+    chunk -- exactly what the interleaving/split tests below need.
+    """
+    header = bytes(
+        [
+            targets_version & 0xFF,
+            (targets_version >> 8) & 0xFF,
+            seq & 0xFF,
+            (seq >> 8) & 0xFF,
+            seq_total & 0xFF,
+            (seq_total >> 8) & 0xFF,
+            len(tags),
+        ]
+    )
+    payload = header + b"".join(tags)
+    return encode(Frame(msg_type=payloads.TARGETS, node_id=node_id, msg_id=msg_id, payload=payload))
 
 
 # --- 6.3/6.4: no ACK may leave the station for an event that is not committed
@@ -414,6 +453,9 @@ class _RoutingSpyStore:
         self.append_batch_calls.append(list(events))
         return _AppendedBatch()
 
+    def record_reported_targets(self, node_id, *, targets_version, tags):
+        return None
+
 
 def test_a_reads_frame_is_routed_through_append_batch_not_append() -> None:
     """The routing decision itself: `ingest_frame` must recognise
@@ -537,3 +579,194 @@ def test_a_reads_frame_publishes_once_not_once_per_read() -> None:
     )
 
     assert len(published) == 1
+
+
+# --- TARGETS (0x07): the GET_TARGETS answer, reassembled ------------------
+
+
+class _TargetsRecordingStore:
+    """A narrow double that also proves *when* `record_reported_targets` is
+    called: never for an incomplete reassembly, exactly once per completed
+    generation.
+    """
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[int, int, tuple[bytes, ...]]] = []
+
+    def append(self, event, *, received_epoch, clock_trust):
+        return _Appended()
+
+    def append_batch(self, events, *, received_epoch, clock_trust):
+        return _AppendedBatch()
+
+    def record_reported_targets(self, node_id, *, targets_version, tags):
+        self.recorded.append((node_id, targets_version, tuple(tags)))
+
+
+def test_a_single_chunk_targets_reply_updates_the_registry_and_is_persisted() -> None:
+    tag_a = bytes([0x01] * 7)
+    tag_b = bytes([0x02] * 7)
+    store = _TargetsRecordingStore()
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _targets_frame(
+            node_id=7, msg_id=1, targets_version=5, seq=0, seq_total=1, tags=[tag_a, tag_b]
+        ),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version == 5
+    assert trap.reported_tags == (tag_a, tag_b)
+    assert store.recorded == [(7, 5, (tag_a, tag_b))]
+
+
+def test_a_split_targets_reply_is_not_applied_until_every_part_arrives() -> None:
+    """S2's own rule, in the other direction: 'applied only once every part
+    has arrived' (docs/protocol/messages.md). A partial reassembly must
+    never be stored, or shown, as if it were complete.
+    """
+    tag_a = bytes([0x01] * 7)
+    tag_b = bytes([0x02] * 7)
+    store = _TargetsRecordingStore()
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=1, targets_version=9, seq=0, seq_total=2, tags=[tag_a]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert registry.trap(7).reported_tags is None  # one of two parts -- not complete
+    assert registry.trap(7).reported_targets_version is None
+    assert store.recorded == []  # nothing persisted for an incomplete generation
+
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=2, targets_version=9, seq=1, seq_total=2, tags=[tag_b]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    trap = registry.trap(7)
+    assert trap.reported_targets_version == 9
+    assert trap.reported_tags == (tag_a, tag_b)  # in seq order
+    assert store.recorded == [(7, 9, (tag_a, tag_b))]
+
+
+def test_a_chunk_from_a_newer_generation_discards_the_older_incomplete_one() -> None:
+    """The explicit choice `docs/protocol/messages.md`'s `GET_TARGETS`
+    section records: interleaved parts across two `targets_version`
+    generations never merge. Version 5's second part arrives *after*
+    version 6 has already completed -- it must not retroactively complete
+    version 5, nor disturb version 6's already-reported answer.
+    """
+    tag_a = bytes([0x0A] * 7)
+    tag_b = bytes([0x0B] * 7)
+    tag_c = bytes([0x0C] * 7)
+    store = _TargetsRecordingStore()
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    # Version 5, part 1 of 2 -- left incomplete.
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=1, targets_version=5, seq=0, seq_total=2, tags=[tag_a]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    # Version 6 arrives whole, in one chunk -- completes immediately and
+    # discards version 5's in-progress reassembly.
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=2, targets_version=6, seq=0, seq_total=1, tags=[tag_b]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+    assert registry.trap(7).reported_targets_version == 6
+    assert registry.trap(7).reported_tags == (tag_b,)
+    assert store.recorded == [(7, 6, (tag_b,))]
+
+    # Version 5's stray second part, arriving late -- must not complete
+    # version 5 (its part 1 is gone) and must not touch version 6's answer.
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=3, targets_version=5, seq=1, seq_total=2, tags=[tag_c]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+    assert registry.trap(7).reported_targets_version == 6
+    assert registry.trap(7).reported_tags == (tag_b,)
+    assert store.recorded == [(7, 6, (tag_b,))]  # nothing new persisted
+
+
+def test_a_targets_reply_does_not_touch_an_unrelated_pending_command() -> None:
+    """`TARGETS`/`GET_TARGETS` is the station's own automatic
+    reconciliation, entirely independent of an operator's pending
+    `ARM`/`DISARM`/`SET_TARGETS` (`PendingTargetsFetch`'s own docstring,
+    domain/traps.py) -- a reply must never clear or alter one.
+    """
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.command_arm(7, at=datetime.fromtimestamp(RECEIVED_EPOCH, tz=UTC))
+
+    ingest_frame(
+        _targets_frame(
+            node_id=7, msg_id=1, targets_version=1, seq=0, seq_total=1, tags=[TAG]
+        ),
+        store=_TargetsRecordingStore(),
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    assert registry.trap(7).pending_command is not None
+    assert registry.trap(7).reported_tags == (TAG,)
+
+
+def test_ingest_frame_stores_every_targets_chunk_against_a_real_store(tmp_path: Path) -> None:
+    """The full wire-to-store regression guard, against a real `Store`: each
+    chunk is its own durable row (the audit trail), and the completed
+    reassembly is additionally cached on `node_cursor`
+    (`Store.reported_targets`, SCHEMA_VERSION 4).
+    """
+    store = Store(tmp_path / "station.db")
+    registry = Registry(silence_after=timedelta(minutes=15))
+
+    ingest_frame(
+        _targets_frame(node_id=7, msg_id=1, targets_version=3, seq=0, seq_total=1, tags=[TAG]),
+        store=store,
+        ack_port=_SpyAckPort(),
+        registry=registry,
+        publish=lambda event: None,
+        received_epoch=RECEIVED_EPOCH,
+        clock_trust="rtc",
+    )
+
+    rows = store.events_since(node_id=7, after_seq=0)
+    assert len(rows) == 1
+    assert rows[0].msg_type == payloads.TARGETS
+    assert store.reported_targets(7) == (3, (TAG,))

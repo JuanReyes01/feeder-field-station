@@ -34,6 +34,7 @@ from feeder_station.domain.events import (
     UninterpretableFrame,
     interpret,
     interpret_reads,
+    tags_from_fields,
 )
 from feeder_station.domain.frames import FLAG_ACK_REQUIRED, Frame, FrameError
 from feeder_station.domain.payloads import PayloadError
@@ -53,6 +54,10 @@ class EventStore(Protocol):
     def append_batch(
         self, events: Sequence[StationEvent], *, received_epoch: float, clock_trust: str
     ) -> object: ...
+
+    def record_reported_targets(
+        self, node_id: int, *, targets_version: int, tags: Sequence[bytes]
+    ) -> None: ...
 
 
 class AckPort(Protocol):
@@ -155,7 +160,19 @@ def ingest_frame(
     # without a special case here.
     at = datetime.fromtimestamp(received_epoch, tz=UTC)
     for event in events:
-        _apply_to_registry(registry, event, at)
+        completed_targets = _apply_to_registry(registry, event, at)
+        if completed_targets is not None:
+            # A `TARGETS` chunk that just completed a reassembly
+            # (`_apply_targets_chunk`, below) -- durably cached on
+            # `node_cursor` (SCHEMA_VERSION 4) so a restart's rehydrate
+            # reads it back in one row rather than replaying every chunk
+            # this node has ever sent. Best-effort, the same standing every
+            # other write in this step already has (see
+            # `_apply_targets_chunk`'s own docstring).
+            targets_version, tags = completed_targets
+            store.record_reported_targets(
+                event.node_id, targets_version=targets_version, tags=tags
+            )
 
     # Step 9: SSE publish. Best-effort — see the module docstring. Once per
     # frame, not once per event: a 17-read batch is one thing that changed,
@@ -163,7 +180,20 @@ def ingest_frame(
     publish({"type": "traps_changed", "node_id": events[0].node_id})
 
 
-def _apply_to_registry(registry: Registry, event: StationEvent, at: datetime) -> None:
+def _apply_to_registry(
+    registry: Registry, event: StationEvent, at: datetime
+) -> tuple[int, tuple[bytes, ...]] | None:
+    """Applies one event to the in-memory registry (S9's step 8).
+
+    Returns ``(targets_version, tags)`` when, and only when, this event was
+    the `TARGETS` chunk that completed a reassembly (`_apply_targets_chunk`)
+    -- the one case this step produces a fact its caller (`ingest_frame`)
+    must additionally persist. Every other event type returns ``None``,
+    including every one that *does* mutate the registry (`HEARTBEAT`/
+    `CAPTURED`/`FAULT`): those facts are already durable from their own raw
+    row (steps 4-5), and never derive a second, cached fact the way a
+    completed reassembly does.
+    """
     if event.msg_type == payloads.HEARTBEAT:
         _apply_heartbeat(registry, event, at)
     elif event.msg_type == payloads.CAPTURED:
@@ -177,9 +207,54 @@ def _apply_to_registry(registry: Registry, event: StationEvent, at: datetime) ->
         # store and nothing here re-proves it is still an int.
         code = event.fields.get("code")
         registry.fault(event.node_id, at=at, code=code if isinstance(code, int) else None)
+    elif event.msg_type == payloads.TARGETS:
+        return _apply_targets_chunk(registry, event)
     # HELLO, VISIT and a node's own ACK carry nothing this slice's registry
     # model represents yet — the same "not every event type touches the
     # registry" precedent adapters/store.py's own rehydrate() already sets.
+    return None
+
+
+def _apply_targets_chunk(
+    registry: Registry, event: StationEvent
+) -> tuple[int, tuple[bytes, ...]] | None:
+    """One `TARGETS` uplink chunk (docs/protocol/messages.md) -- mirrors
+    `_apply_heartbeat`'s own defensive `isinstance` guards: `decode_targets`
+    always emits well-typed fields, but `event.fields` is the same
+    JSON-round-trippable dict every other handler here treats defensively.
+
+    Folding this chunk into the trap's reassembly (`Registry.
+    reported_targets_chunk`) is best-effort, the same step-8 standing every
+    other registry mutation in this function already has (module
+    docstring). Returns ``(targets_version, tags)`` exactly when this chunk
+    completed a generation, so `ingest_frame` can persist it
+    (`store.record_reported_targets`) -- a derived cache of data the raw
+    chunk event (already durably appended a few lines up this same call
+    stack, steps 4-5) fully supports rebuilding, so losing that write to a
+    crash costs one redundant `GET_TARGETS` after the next restart, never
+    data.
+    """
+    targets_version = event.fields.get("targets_version")
+    seq = event.fields.get("seq")
+    seq_total = event.fields.get("seq_total")
+    if not (
+        isinstance(targets_version, int) and isinstance(seq, int) and isinstance(seq_total, int)
+    ):
+        return None
+    tags = tags_from_fields(event.fields)
+    if tags is None:
+        return None
+
+    completed = registry.reported_targets_chunk(
+        event.node_id,
+        targets_version=targets_version,
+        seq=seq,
+        seq_total=seq_total,
+        tags=tags,
+    )
+    if completed is None:
+        return None
+    return targets_version, completed
 
 
 def _apply_captured(registry: Registry, event: StationEvent, at: datetime) -> None:
