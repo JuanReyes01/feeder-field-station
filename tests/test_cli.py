@@ -370,6 +370,7 @@ _TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
     "pending_command": ("pending_command", "desired_targets_version"),
     "capture": ("capture",),
     "desired_tags": ("targets",),
+    "armed_via_remote_command_at": ("armed_via_remote_command_at",),
 }
 
 
@@ -393,6 +394,7 @@ _VIEW_KEYS = frozenset(
         "targets",
         "last_seen",
         "capture",
+        "armed_via_remote_command_at",
     }
 )
 

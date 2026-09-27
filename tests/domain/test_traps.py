@@ -48,6 +48,37 @@ def test_arming_is_pending_until_the_trap_itself_reports_it() -> None:
     assert registry.trap(7).pending_command is None
 
 
+def test_command_arm_records_when_an_operator_asked_for_it_regardless_of_confirmation() -> None:
+    """station/remote-arm-restored: the honest caveat this project can
+    actually afford. `wall_reached()` in the trap firmware is a
+    placeholder that reports the commanded sweep finishing, not the cord
+    reaching the mechanism (docs/pending.md, "Nothing knows whether the
+    arm actually reached the wall") -- so a `HEARTBEAT` saying `armed`
+    after a remote `ARM` is confirmation the sweep ran, never confirmation
+    the trap is actually primed. This station cannot fix the firmware
+    placeholder, but it must not hide that the only evidence behind an
+    `armed` trap is an operator's own button press, at a known time, with
+    nothing having verified the mechanism.
+
+    Same precedent as `desired_tags` (S2/13.11-13.12): what the *station*
+    last asked for, independent of whether the trap has since confirmed
+    it -- never cleared by a heartbeat (S4 governs `state`, not this).
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, at=NOW)
+    assert registry.trap(7).armed_via_remote_command_at is None
+
+    registry.command_arm(7, at=NOW)
+    assert registry.trap(7).armed_via_remote_command_at == NOW
+
+    later = NOW + timedelta(seconds=30)
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=later)
+    assert registry.trap(7).pending_command is None  # confirmed, S4
+    # ...but the caveat survives confirmation: `state == ARMED` is the
+    # exact moment an operator most needs to see that nothing verified it.
+    assert registry.trap(7).armed_via_remote_command_at == NOW
+
+
 def test_disarm_pending_clears_when_the_trap_reports_not_armed() -> None:
     """DD15: the pre-DD15 model cleared `arm_pending` only when a heartbeat
     reported `ARMED`, which has no way to answer a pending *disarm* -- a

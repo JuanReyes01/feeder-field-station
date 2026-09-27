@@ -168,6 +168,33 @@ def test_arm_route_sets_pending_command_not_reported_state() -> None:
     assert c.get("/api/traps").json()[0]["pending_command"] == "arm"
 
 
+def test_arm_route_surfaces_when_the_operator_asked_remotely_even_once_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/pending.md, "Nothing knows whether the arm actually reached the
+    wall": firmware's `wall_reached()` is a placeholder that reports the
+    commanded sweep finishing, not the cord meeting the mechanism, so a
+    `HEARTBEAT` saying `armed` after this route is confirmation the sweep
+    ran, never confirmation the trap is primed. `/api/traps` must keep
+    saying so even after the command confirms -- the exact moment
+    (`state == "armed"`) an operator most needs to know nothing verified
+    the hardware, not only while the command is still `pending_command`.
+    """
+    arm_at = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(app_module, "now", lambda: arm_at)
+
+    c, registry = client()
+    assert c.get("/api/traps").json() == []
+
+    assert c.post("/api/traps/7/arm").status_code == 200
+    assert c.get("/api/traps").json()[0]["armed_via_remote_command_at"] == arm_at.isoformat()
+
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, at=arm_at + timedelta(seconds=30))
+    row = c.get("/api/traps").json()[0]
+    assert row["pending_command"] is None  # confirmed, S4
+    assert row["armed_via_remote_command_at"] == arm_at.isoformat()  # caveat survives confirmation
+
+
 def test_cancel_command_route_clears_a_pending_command() -> None:
     """docs/pending.md, "There is no way to cancel a pending command":
     even with fault-driven cancellation, a command the node never answers
@@ -693,6 +720,32 @@ def test_the_cancel_button_is_rendered_only_when_a_command_is_pending() -> None:
     assert pattern.search(html), (
         "the Cancelar button must be conditional on t.pending_command, not "
         "rendered unconditionally or removed"
+    )
+
+
+def test_the_arm_caveat_is_rendered_only_for_an_armed_trap_with_a_remote_command() -> None:
+    """station/remote-arm-restored: firmware's `wall_reached()` is still a
+    placeholder (docs/pending.md, "Nothing knows whether the arm actually
+    reached the wall"), so `state == "armed"` only ever confirms the
+    commanded sweep ran, never that the cord reached the mechanism. The
+    page must say so, gated on both facts at once -- a trap reporting
+    `armed` for a reason this station never commanded (a legacy row, a
+    heartbeat from before this capability existed) has nothing here to
+    caveat, and a still-pending arm already reads as pending elsewhere on
+    the page (`describePending`) -- the same ternary-pinning discipline
+    `test_stale_state_badge_in_render_trap_depends_on_the_flag_not_a_
+    constant` above uses, so a substring check alone could not tell an
+    unconditional caveat from a correctly gated one.
+    """
+    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r"""\$\{t\.state === "armed" && t\.armed_via_remote_command_at \? """
+        r"""'<p class="arm-caveat">[^<]*</p>' : ""\}"""
+    )
+    assert pattern.search(html), (
+        "the arm caveat must be conditional on both t.state === 'armed' and "
+        "t.armed_via_remote_command_at, not rendered unconditionally, "
+        "inverted, or removed"
     )
 
 

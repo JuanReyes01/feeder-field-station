@@ -32,6 +32,11 @@
      trap's own state must read at a glance next to "SIN CONTACTO", not
      as a footnote nobody notices. */
   .stale-badge { color: #ffcf7a; font-weight: 700; margin: .3rem 0; }
+  /* station/remote-arm-restored: same bold weight as .no-contact-badge and
+     .stale-badge, not a footnote -- an armed trap nobody physically
+     verified must read at a glance, same discipline WARNING 2 already set
+     for .stale-badge. */
+  .arm-caveat { color: #ffcf7a; font-weight: 700; margin: .3rem 0; }
   .pending { color: #7ec8ff; font-size: .85rem; }
   .muted { color: #999; font-size: .85rem; }
   .empty { color: #999; }
@@ -341,6 +346,7 @@ function renderTrap(t, readsByNode, nowEpoch) {
       <div class="state">Trampa ${t.node_id} · ${state}</div>
       ${noContact ? '<p class="no-contact-badge">⚠ SIN CONTACTO — este estado puede estar desactualizado</p>' : ""}
       ${t.state_may_be_stale ? '<p class="stale-badge">⚠ puede no ser el último reporte de esta trampa</p>' : ""}
+      ${t.state === "armed" && t.armed_via_remote_command_at ? '<p class="arm-caveat">⚠ Armada por comando remoto — nadie verificó que el mecanismo llegara al tope</p>' : ""}
       <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
       <p class="muted">Objetivos actuales: ${targets}</p>
       <div class="reads">

@@ -85,6 +85,19 @@ class Trap:
     # here -- this is what the *station* is asking for, not what a trap
     # has reported).
     desired_tags: tuple[bytes, ...] | None = None
+    # station/remote-arm-restored: the honest caveat this station can
+    # actually afford. Firmware's `wall_reached()` is still a placeholder
+    # (docs/pending.md, "Nothing knows whether the arm actually reached
+    # the wall") -- a HEARTBEAT reporting `armed` after a remote `ARM`
+    # confirms the commanded sweep ran, never that the cord reached the
+    # mechanism. This station cannot verify the hardware, so it records
+    # the one fact it actually has instead: when an operator last asked
+    # this trap to arm, remotely. Same independence as `desired_tags`
+    # above -- what the *station* asked for, never cleared by a
+    # heartbeat (S4 governs `state`, not this) -- so the caveat survives
+    # exactly into the moment (`state == ARMED`) an operator needs it
+    # most, rather than disappearing the instant the command confirms.
+    armed_via_remote_command_at: datetime | None = None
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
         if self.last_seen is None:
@@ -140,6 +153,13 @@ class Registry:
 
     def command_arm(self, node_id: int, at: datetime) -> None:
         self._set_pending(node_id, Command(kind=CommandKind.ARM))
+        # station/remote-arm-restored: recorded regardless of whether this
+        # call came from a live `POST /arm` or a rehydrated legacy
+        # `OPERATOR_ARM` row (`adapters/store.py::_rehydrate_desired_
+        # command`) -- both are equally "an operator asked this trap to
+        # arm, remotely", which is the fact `Trap.armed_via_remote_
+        # command_at`'s own docstring names.
+        self._traps[node_id].armed_via_remote_command_at = at
 
     def command_disarm(self, node_id: int, at: datetime) -> None:
         self._set_pending(node_id, Command(kind=CommandKind.DISARM))
@@ -391,6 +411,18 @@ class Registry:
                         else []
                     ),
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
+                    # station/remote-arm-restored: the honest caveat --
+                    # `wall_reached()` is still a firmware placeholder
+                    # (docs/pending.md), so `state == "armed"` only ever
+                    # confirms the commanded sweep ran, never that the
+                    # mechanism is primed. Never cleared by a heartbeat,
+                    # same independence as `targets` above -- what an
+                    # operator last asked for, not what the trap reports.
+                    "armed_via_remote_command_at": (
+                        trap.armed_via_remote_command_at.isoformat()
+                        if trap.armed_via_remote_command_at
+                        else None
+                    ),
                     "capture": (
                         {
                             "tag": trap.capture.tag.hex().upper(),
