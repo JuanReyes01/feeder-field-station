@@ -168,6 +168,38 @@ class Trap:
         return now - self.last_seen <= window
 
 
+def _targets_match(trap: Trap) -> bool | None:
+    """Whether what was asked for and what the trap reported actually agree.
+
+    Three answers, deliberately: ``None`` for "we cannot say", ``False`` for
+    "we can, and they disagree", ``True`` only for a comparison that means
+    something.
+
+    The `None` cases are the point. The obvious one is no `TARGETS` reply yet.
+    The other one cost a bug: `targets_version` 0 is the node saying it has
+    **never received `SET_TARGETS` at all** -- `components/target_list`'s own
+    meaning for that value, carried unchanged into the reply. The firmware's
+    encoding is explicit that an empty list and "never received" are
+    wire-identical (`count` 0) and are told apart *only* by `targets_version`.
+
+    A station's own desired list can also be empty, after a fresh install or a
+    wiped database. Compared by content those two agree, so a plain set
+    comparison answers `True` -- "verified in agreement" about a trap that has
+    never heard of this station. That is precisely the defect
+    `GET_TARGETS` exists to expose, so it must not be what `GET_TARGETS`
+    reports. There is nothing to agree with, so the answer is `None`.
+
+    Wanting a tag while the node holds nothing is a different matter: that is
+    knowably wrong whether or not the node was ever configured, so it stays
+    `False`.
+    """
+    if trap.reported_tags is None:
+        return None
+    if trap.reported_targets_version == 0 and not trap.desired_tags:
+        return None
+    return set(trap.desired_tags or ()) == set(trap.reported_tags)
+
+
 class Registry:
     """The traps the station has heard from, and what it knows about them."""
 
@@ -597,11 +629,7 @@ class Registry:
                     # `False` ("we know, and they disagree"). This is the
                     # divergence `targets`/`reported_targets` alone cannot
                     # show without an operator comparing two arrays by eye.
-                    "targets_match": (
-                        None
-                        if trap.reported_tags is None
-                        else set(trap.desired_tags or ()) == set(trap.reported_tags)
-                    ),
+                    "targets_match": _targets_match(trap),
                     # Whether an automatic GET_TARGETS is currently
                     # outstanding for this trap -- explains why
                     # `reported_targets` might still be stale or absent.

@@ -497,6 +497,43 @@ def test_view_reports_a_match_when_desired_and_reported_agree_by_content() -> No
     assert registry.view(now=NOW)[0]["targets_match"] is True
 
 
+def test_a_trap_that_has_never_been_configured_does_not_read_as_a_match() -> None:
+    """`targets_version` 0 is the node saying it has never received
+    `SET_TARGETS` at all -- `components/target_list`'s own meaning for that
+    value, carried unchanged into the `TARGETS` reply, and the firmware's
+    encoding notes say so explicitly: an empty list and "never received" are
+    wire-identical (`count` 0) and are distinguished *only* by
+    `targets_version`.
+
+    A station's own desired list can also be empty -- after a fresh install,
+    or a wiped database. Compared by content alone those two agree, so a plain
+    set comparison returns `True`: "verified in agreement" about a trap that
+    has never heard of this station. That is the exact defect this whole
+    feature exists to expose, so it must not be the thing the feature reports.
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, targets_version=0, at=NOW)
+    registry.reported_targets_chunk(7, targets_version=0, seq=0, seq_total=1, tags=[])
+
+    view = registry.view(now=NOW)[0]
+    assert view["reported_targets"] == []  # the trap did answer, and it holds nothing
+    assert view["reported_targets_version"] == 0
+    assert view["targets_match"] is None  # NOT True: nothing was ever applied to agree with
+
+
+def test_a_never_configured_trap_still_disagrees_with_a_desired_list() -> None:
+    """The other half: "never configured" only defeats a *match*, it does not
+    defeat a real disagreement. Wanting a tag and holding nothing is knowably
+    wrong, so this stays `False` rather than collapsing to "we don't know".
+    """
+    registry = Registry(silence_after=timedelta(minutes=5))
+    registry.heartbeat(node_id=7, state=TrapState.IDLE, targets_version=0, at=NOW)
+    registry.command_set_targets(7, targets_version=1, at=NOW, tags=[TAG])
+    registry.reported_targets_chunk(7, targets_version=0, seq=0, seq_total=1, tags=[])
+
+    assert registry.view(now=NOW)[0]["targets_match"] is False
+
+
 def test_restore_reported_targets_rehydrates_the_last_completed_reply() -> None:
     """Rehydration-only path: `Store.reported_targets` already resolved the
     reassembly to one row; this is a direct restore, not a replay.
