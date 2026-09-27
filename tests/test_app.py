@@ -780,12 +780,20 @@ def test_static_index_html_references_no_external_asset() -> None:
 def test_the_page_translates_trap_state_to_spanish() -> None:
     """docs/pending.md, "Operator-facing gaps": `armed`/`fired`/`idle` in
     English on a Spanish page must become Spanish, like every other label.
+
+    Position-model correction (docs/protocol/messages.md): a node this
+    open loop cannot verify its own reported state, so `idle`/`armed`/
+    `fired` render as the last position it was told to hold, not a
+    verified fact -- "armada" alone read as "this trap is armed", a claim
+    nothing checked. `fault` is left as a plain claim: unlike the other
+    three, it is a condition the node actually detected and reported, not
+    a position it was commanded into.
     """
     html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
 
-    assert re.search(r'idle:\s*"en reposo"', html)
-    assert re.search(r'armed:\s*"armada"', html)
-    assert re.search(r'fired:\s*"disparada"', html)
+    assert re.search(r'idle:\s*"posición comandada: en reposo"', html)
+    assert re.search(r'armed:\s*"posición comandada: armada"', html)
+    assert re.search(r'fired:\s*"posición comandada: disparada"', html)
     assert re.search(r'fault:\s*"en falla"', html)
     # The ternary that assigns `state` must call the translator, not render
     # `t.state` (the raw English wire value) directly -- the same

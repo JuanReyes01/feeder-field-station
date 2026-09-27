@@ -119,7 +119,24 @@ function escapeHtml(value) {
 // Spanish, like every other label. Falls back to the raw value for a state
 // this page does not know yet, rather than crashing on one docs/design.md
 // may add later.
-const STATE_ES = { idle: "en reposo", armed: "armada", fired: "disparada", fault: "en falla" };
+//
+// Position-model correction (docs/protocol/messages.md): a hobby servo
+// closes its own position loop inside its case -- three wires, nothing
+// comes back -- so the node cannot observe where its arm actually sits,
+// and neither can this page. "armada" read as "this trap is armed", a
+// fact nobody verified; it is really only the last position this trap was
+// told to hold. "en reposo" and "disparada" carry the identical gap --
+// idle is as unconfirmed as armed, and a capture is a real event but
+// whether the servo actually completed its sweep is exactly the open
+// question `armed_via_remote_command_at`'s own caveat already names below.
+// "en falla" is left alone: a fault is a condition the node actually
+// detected and reported, not a position it was told to hold.
+const STATE_ES = {
+  idle: "posición comandada: en reposo",
+  armed: "posición comandada: armada",
+  fired: "posición comandada: disparada",
+  fault: "en falla",
+};
 function translateState(state) { return STATE_ES[state] || state; }
 
 // docs/pending.md, "Operator-facing gaps": an ISO timestamp answers nothing
