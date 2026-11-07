@@ -99,6 +99,9 @@
     font: inherit; font-size: 16px; background: var(--surface); color: var(--ink);
   }
   textarea { resize: vertical; font-family: var(--mono); font-size: 15px; }
+  /* A long option must not widen its field past the row. */
+  .row > label { min-width: 0; }
+  label > select, label > input:not([type=checkbox]) { width: 100%; min-width: 0; }
   input[type=checkbox] { width: 24px; height: 24px; min-height: 0; }
   button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
   .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 13px; background: var(--soft); color: var(--muted); }
@@ -151,7 +154,7 @@ const TRAP_TABS = {
 const data = { overview: null, health: null, specimens: null, gateway: null, update: null };
 const ui = {
   filter: "all", period: "1", visitTrap: "", trapSearch: "", message: "", updateHidden: false,
-  filters: { species: "", day: "", text: "", status: "" }, scope: "all", entries: "",
+  filters: { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" }, scope: "all", entries: "",
 };
 
 // The real list has more than a thousand individuals: a screen shows what
@@ -161,7 +164,7 @@ const MAX_SEARCH_RESULTS = 20;
 
 function matchesSearch(s, text) {
   const q = text.trim().toLowerCase();
-  return !q || [s.biomark, s.tag, s.species, s.band_number].some((v) => (v || "").toLowerCase().includes(q));
+  return !q || [s.biomark, s.tag, s.species, s.band_number, s.cicg_id].some((v) => (v || "").toLowerCase().includes(q));
 }
 
 // Lists load after the page paints. Showing the last answer for the same list
@@ -346,7 +349,7 @@ async function saveSubject(event, tag) {
   const value = (name) => form.elements[name].value.trim() || null;
   const saved = await act(`/api/specimens/${tag}`, jsonBody("PATCH", {
     species: value("species"), species_code: value("species_code"), sex: value("sex"),
-    age: value("age"), band_number: value("band_number"), registered: true,
+    age: value("age"), band_number: value("band_number"), cicg_id: value("cicg_id"), registered: true,
   }));
   if (saved) { ui.message = "Guardado."; document.activeElement?.blur(); render(true); }
 }
@@ -361,7 +364,9 @@ async function importExcel(input) {
   });
   input.value = "";
   if (!result) return;
-  const parts = [`Importados: ${result.created} nuevos, ${result.updated} actualizados, ${result.dated} con fecha de captura.`];
+  const parts = [`${result.sheet ? `Hoja "${result.sheet}": ` : ""}${result.created} nuevos, ${result.updated} actualizados, ${result.dated} con fecha de captura.`];
+  if (result.replaced) parts.push(`${count(result.replaced, "tag reemplazado", "tags reemplazados")} (el colibrí ya lleva otro).`);
+  if (result.without_tag) parts.push(`${count(result.without_tag, "fila sin PIT se omitió", "filas sin PIT se omitieron")}: sin tag no hay lectura.`);
   if (result.error_count) parts.push(`${count(result.error_count, "fila", "filas")} sin importar: ${result.errors.slice(0, 3).join(" ")}`);
   if (result.warning_count) parts.push(`${count(result.warning_count, "aviso", "avisos")}: ${result.warnings.slice(0, 3).join(" ")}`);
   ui.message = parts.join(" ");
@@ -662,7 +667,7 @@ function subjectInterest(s) {
 
 // Individuos: the CICG's list filtered down to who to mark. The buttons act on
 // exactly what the filters show, in the traps the "Dónde" selector names.
-const NO_FILTERS = { species: "", day: "", text: "", status: "" };
+const NO_FILTERS = { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" };
 const NO_SPECIES = "__none__";
 
 function interestLimit() { return data.specimens?.of_interest_limit ?? 81; }
@@ -687,11 +692,31 @@ function dayLabel(day) {
 
 function registeredSubjects() { return (data.specimens?.specimens || []).filter((s) => s.registered); }
 
+function isMarked(s) { return s.all_traps || s.trap_ids.length > 0; }
+
+// Project, locality and dates must hold for one same capture: "captured in
+// Zona alta in 2026" is one capture, not one of each.
+function captureMatches(c, f) {
+  return (!f.project || c.project === f.project) && (!f.locality || c.locality === f.locality)
+    && (!f.from || c.day >= f.from) && (!f.to || c.day <= f.to);
+}
+
+// "Todos" means the tags birds wear now: a lost tag only shows when asked for,
+// or when it is still marked, so it can be removed.
+const STATUS_TEST = {
+  "": (s) => !s.replaced,
+  marked: isMarked,
+  unmarked: (s) => !s.replaced && !isMarked(s),
+  replaced: (s) => s.replaced,
+};
+
 function filteredSubjects() {
   const f = ui.filters;
+  const byCapture = f.project || f.locality || f.from || f.to;
   return registeredSubjects().filter((s) => (!f.species || (f.species === NO_SPECIES ? !s.species : s.species === f.species))
-    && (!f.day || s.capture_days.includes(f.day))
-    && (!f.status || (f.status === "marked") === (s.all_traps || s.trap_ids.length > 0))
+    && (!f.sex || s.sex === f.sex) && (!f.age || s.age === f.age)
+    && (!byCapture || s.captures.some((c) => captureMatches(c, f)))
+    && STATUS_TEST[f.status || ""](s)
     && matchesSearch(s, f.text))
     .sort((a, b) => (b.capture_days.at(-1) || "").localeCompare(a.capture_days.at(-1) || "") || a.biomark.localeCompare(b.biomark));
 }
@@ -814,15 +839,17 @@ function renderFilterResults() {
   target.innerHTML = rows.length ? more + rows.map((s) => {
     const [interest, css] = subjectInterest(s);
     const days = s.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (s.capture_days.length > 3 ? ` y ${s.capture_days.length - 3} más` : "");
+    const last = s.captures.at(-1);
+    const where = [last?.locality, last?.project].filter(Boolean).join(", ");
     const buttons = [];
     if (!wantedInScope(s)) buttons.push(`<button class="quiet" onclick="markOne('${s.tag}')">Marcar</button>`);
     if (removableInScope(s)) buttons.push(`<button class="quiet" onclick="unmarkOne('${s.tag}')">Quitar</button>`);
     return `<div class="row" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
       <a href="#/individuo/${s.tag}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
-        <span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
+        ${s.cicg_id ? `<span class="strong">${escapeHtml(s.cicg_id)}</span> · ` : ""}<span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
         <span class="mono small muted"> · ${escapeHtml(s.biomark)}${s.band_number ? ` · anillo ${escapeHtml(s.band_number)}` : ""}</span><br>
-        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
-        <span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
+        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"}${where ? ` (última: ${escapeHtml(where)})` : ""} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
+        ${s.replaced ? '<span class="chip warn">Tag reemplazado: el colibrí ya no lo lleva</span> ' : ""}<span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
       </a>
       <div class="row" style="flex:0 0 auto">${buttons.join("")}</div></div>`;
   }).join("") : '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la lista del CICG.</p>';
@@ -837,7 +864,16 @@ function renderIndividuos() {
   if (ui.scope !== "all" && !trapById(ui.scope)) ui.scope = "all";
   const scopes = [["all", "Todas las trampas"]].concat(traps.filter((t) => t.has_latch !== false).map((t) => [String(t.node_id), t.name]));
   const species = tally(registered.map((s) => s.species || NO_SPECIES)).sort((a, b) => (a[0] === NO_SPECIES) - (b[0] === NO_SPECIES) || a[0].localeCompare(b[0]));
-  const days = tally(registered.flatMap((s) => s.capture_days)).sort((a, b) => b[0].localeCompare(a[0]));
+  const captures = registered.flatMap((s) => s.captures);
+  const byName = (a, b) => a[0].localeCompare(b[0]);
+  const projects = tally(captures.map((c) => c.project).filter(Boolean)).sort(byName);
+  const localities = tally(captures.map((c) => c.locality).filter(Boolean)).sort(byName);
+  const sexes = tally(registered.map((s) => s.sex).filter(Boolean)).sort(byName);
+  const ages = tally(registered.map((s) => s.age).filter(Boolean)).sort(byName);
+  const days = captures.map((c) => c.day).sort();
+  const replaced = registered.filter((s) => s.replaced).length;
+  const pick = (name, label, values, any, show = (v) => v) => `<label style="flex:1 1 170px">${label}<select ${values.length ? "" : "disabled"} onchange="setFilterValue('${name}', this.value)">${filterOptions(values, f[name], any, show)}</select></label>`;
+  const day = (name, label) => `<label style="flex:1 1 150px">${label}<input type="date" value="${escapeHtml(f[name])}" min="${days[0] || ""}" max="${days.at(-1) || ""}" ${days.length ? "" : "disabled"} onchange="setFilterValue('${name}', this.value)"></label>`;
   $("screen").innerHTML = `
     <div class="row between">
       <h1>Individuos</h1>
@@ -853,26 +889,34 @@ function renderIndividuos() {
         <label style="flex:1 1 240px">Dónde<select onchange="setScope(this.value)">${scopes.map(([value, label]) => `<option value="${value}" ${ui.scope === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
       </div>
       <div class="step">
-        <label>Por biomark o anillo: escribe o pega uno o varios, separados por espacio, coma o línea
-          <textarea rows="2" oninput="ui.entries = this.value" placeholder="900_263007596629 C00103">${escapeHtml(ui.entries)}</textarea></label>
+        <label>Por biomark, código CICG o anillo: escribe o pega uno o varios, separados por espacio, coma o línea
+          <textarea rows="2" oninput="ui.entries = this.value" placeholder="900_263007596629 CICG_1441 G00530">${escapeHtml(ui.entries)}</textarea></label>
         <div class="row">
           <button class="primary" onclick="markEntries('add')">Marcar en ${escapeHtml(scopeName())}</button>
           <button onclick="markEntries('remove')">Quitar de ${escapeHtml(scopeName())}</button>
         </div>
-        <p class="small muted" style="margin:0">Un biomark que no está en la lista se registra al marcarlo.</p>
+        <p class="small muted" style="margin:0">Un código CICG marca el tag que el colibrí lleva ahora. Un biomark que no está en la lista se registra al marcarlo.</p>
       </div>
       <div class="step" style="border-top:1px solid var(--soft);padding-top:12px">
         <div class="strong">Por filtros</div>
         <div class="row" style="align-items:flex-end">
-          <label style="flex:2 1 220px">Especie<select onchange="setFilterValue('species', this.value)">${filterOptions(species, f.species, "Todas las especies", (v) => (v === NO_SPECIES ? "Sin especie" : v))}</select></label>
-          <label style="flex:1 1 180px">Día de captura<select ${days.length ? "" : "disabled"} onchange="setFilterValue('day', this.value)">${days.length ? filterOptions(days, f.day, "Cualquier día", dayLabel) : '<option value="">Importa la lista con fechas</option>'}</select></label>
-          <label style="flex:1 1 150px">Estado<select onchange="setFilterValue('status', this.value)">
-            <option value="" ${f.status ? "" : "selected"}>Todos</option>
+          ${pick("species", "Especie", species, "Todas las especies", (v) => (v === NO_SPECIES ? "Sin especie" : v))}
+          ${pick("sex", "Sexo", sexes, "Cualquiera")}
+          ${pick("age", "Edad", ages, "Cualquiera")}
+          <label style="flex:1 1 170px">Estado<select onchange="setFilterValue('status', this.value)">
+            <option value="" ${f.status ? "" : "selected"}>Todos (tags en uso)</option>
             <option value="marked" ${f.status === "marked" ? "selected" : ""}>De interés</option>
-            <option value="unmarked" ${f.status === "unmarked" ? "selected" : ""}>Sin marcar</option></select></label>
-          <label style="flex:2 1 220px">Buscar biomark, anillo o especie<input value="${escapeHtml(f.text)}" oninput="setFilterValue('text', this.value)" placeholder="coruscans"></label>
+            <option value="unmarked" ${f.status === "unmarked" ? "selected" : ""}>Sin marcar</option>
+            <option value="replaced" ${f.status === "replaced" ? "selected" : ""}>Tags reemplazados (${replaced})</option></select></label>
         </div>
-        <p class="small muted" style="margin:0">El día es el de marcaje o recaptura según la lista del CICG.</p>
+        <div class="row" style="align-items:flex-end">
+          ${pick("project", "Proyecto", projects, "Cualquier proyecto")}
+          ${pick("locality", "Localidad", localities, "Cualquier localidad")}
+          ${day("from", "Capturado desde")}
+          ${day("to", "Hasta")}
+        </div>
+        <label>Buscar biomark, código CICG, anillo o especie<input value="${escapeHtml(f.text)}" oninput="setFilterValue('text', this.value)" placeholder="CICG_1441"></label>
+        <p class="small muted" style="margin:0">Proyecto, localidad y fechas son de las capturas en la base del CICG (marcaje y recapturas) y se cumplen en una misma captura. Para un solo día, pon la misma fecha en las dos.</p>
         <div id="filter-actions" class="stack" style="gap:8px"></div>
       </div>
     </div>
@@ -907,7 +951,8 @@ function renderIndividuo(tag) {
   $("screen").innerHTML = `
     <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/individuos">Volver a individuos</a></div>
     <div><h1 class="${s.registered ? "italic" : "warn"}">${escapeHtml(s.registered ? (s.species || "Sin especie") : "Lectura desconocida")}</h1>
-      <div class="mono muted">${escapeHtml(s.biomark)}</div></div>
+      <div class="mono muted">${s.cicg_id ? `${escapeHtml(s.cicg_id)} · ` : ""}${escapeHtml(s.biomark)}</div>
+      ${s.replaced ? '<p class="warn strong" style="margin:8px 0 0">Tag reemplazado: el colibrí perdió este tag y ya lleva otro.</p>' : ""}</div>
     <div class="grid-wide">
       <div class="card"><h2>De interés en</h2>
         <button class="toggle ${s.all_traps ? "on" : ""}" onclick="toggleInterestEverywhere('${s.tag}')"><span class="strong">Todas las trampas</span><span>${s.all_traps ? "De interés" : "No"}</span></button>
@@ -921,8 +966,12 @@ function renderIndividuo(tag) {
           ${field("sex", "Sexo", s.sex)}
           ${field("age", "Edad", s.age)}
           ${field("band_number", "Anillo", s.band_number)}
+          ${field("cicg_id", "Código CICG", s.cicg_id)}
           <button>Guardar</button>
         </form></div>
+    </div>
+    <div class="card"><h2>Capturas en la base del CICG</h2>
+      ${s.captures.length ? s.captures.slice().reverse().map((c) => `<div class="line"><span>${escapeHtml(dayLabel(c.day))}</span><span class="muted">${escapeHtml([c.locality, c.project].filter(Boolean).join(" · ") || "—")}</span></div>`).join("") : '<p class="muted">Sin capturas en la lista importada.</p>'}
     </div>
     <div class="card scroll"><h2>Visitas</h2><div id="visit-rows"><p class="muted">Cargando…</p></div></div>`;
   loadVisits({ tag: s.tag, days: 36500 });

@@ -461,7 +461,7 @@ def _change(client: TestClient, **body: object) -> dict[str, object]:
     return result
 
 
-def test_import_keeps_each_subjects_days_and_a_new_list_replaces_them(tmp_path: Path) -> None:
+def test_import_keeps_each_subjects_days_and_another_list_adds_to_them(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     dated = f"PIT,Species,DateOfPIT\n{BIOMARK_A},X,Oct-14-2013\n{BIOMARK_A},X,Feb-9-2026\n"
     assert _import(client, dated)["dated"] == 1
@@ -469,7 +469,7 @@ def test_import_keeps_each_subjects_days_and_a_new_list_replaces_them(tmp_path: 
     assert row["capture_days"] == ["2013-10-14", "2026-02-09"]
     _import(client, f"PIT,Species,DateOfPIT\n{BIOMARK_A},X,Feb-10-2026\n")
     [row] = client.get("/api/specimens").json()["specimens"]
-    assert row["capture_days"] == ["2026-02-10"]
+    assert row["capture_days"] == ["2013-10-14", "2026-02-09", "2026-02-10"]
 
 
 def test_typed_biomarks_and_bands_are_marked_and_the_rest_reported(tmp_path: Path) -> None:
@@ -544,3 +544,58 @@ def test_more_than_a_trap_holds_is_refused_and_changes_nothing(tmp_path: Path) -
     assert response.status_code == 422
     assert "Trampa 0001" in response.json()["detail"]
     assert client.get("/api/specimens").json()["specimens"] == []
+
+
+def _excel_day(year: int, month: int, day: int) -> datetime:
+    return datetime(year, month, day)  # noqa: DTZ001 - an Excel date cell has no zone
+
+
+def test_the_individuals_database_imports_with_codes_projects_and_lost_tags(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Birds 2025"
+    sheet.append(["CICG CODE", None, "IDENTIFICATION"])
+    sheet.append(
+        ["CICG_ID", "Especie", "Pit tag code", "Ring", "Project", "Localidad", "Date", "Other code"]
+    )
+    sheet.append(["CICG_1", "X", "900_263002593695", "G1", "CICG", "CICG", _excel_day(2025, 1, 1)])
+    sheet.append(
+        [
+            "CICG_1",
+            "X",
+            BIOMARK_A,
+            "G1",
+            "Pit tagging intensivo",
+            "CICG-Zona alta",
+            _excel_day(2025, 6, 1),
+            "900_263002593695",
+        ]
+    )
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    client, store = _client(tmp_path)
+    response = client.post("/api/specimens/import?filename=base.xlsx", content=buffer.getvalue())
+    assert response.json()["sheet"] == "Birds 2025"
+    assert response.json()["replaced"] == 1
+    rows = {r["biomark"]: r for r in client.get("/api/specimens").json()["specimens"]}
+    assert rows[BIOMARK_A]["cicg_id"] == "CICG_1"
+    assert rows[BIOMARK_A]["captures"] == [
+        {"day": "2025-06-01", "project": "Pit tagging intensivo", "locality": "CICG-Zona alta"}
+    ]
+    assert rows["900_263002593695"]["replaced"] is True
+    # The short list cannot tell a lost tag, so it leaves the flag alone, and
+    # its day adds to the database's without erasing project and locality.
+    _import(client, "PIT,Species,DateOfPIT\n900_263002593695,X,Jan-1-2025\n")
+    rows = {r["biomark"]: r for r in client.get("/api/specimens").json()["specimens"]}
+    assert rows["900_263002593695"]["replaced"] is True
+    assert rows["900_263002593695"]["captures"] == [
+        {"day": "2025-01-01", "project": "CICG", "locality": "CICG"}
+    ]
+    # The bird's code means the tag it wears now.
+    _heartbeat(client, 1)
+    assert _change(client, action="add", entries=["cicg_1"])["changed"] == 1
+    assert store.wanted_tags_for(1) == [TAG_A]

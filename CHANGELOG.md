@@ -27,6 +27,13 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
 - Cada individuo muestra si su trampa ya lo tiene, si se le está enviando o si
   lo recibe al conectarse. Una lectura desconocida se marca de interés en un
   paso.
+- Importa la base de individuos del CICG (CICG_Individuals_database.xlsx): toma
+  la hoja de capturas, el código CICG, el anillo (Ring), proyecto y localidad de
+  cada captura, y cuenta las recapturas escritas sin PIT. Marca los tags que el
+  colibrí perdió (Other code o un PIT nuevo con el mismo código) para no gastar
+  cupo de la trampa en ellos.
+- Filtros nuevos: sexo, edad, proyecto, localidad y rango de fechas de captura;
+  se puede marcar escribiendo el código CICG.
 - Visitas agrupadas como en feeder-analysis (3 s sin leer cierran la visita)
   y exportación de lecturas y visitas a CSV.
 - Las trampas aparecen solas al prenderse, con el nombre que sale de su MAC.

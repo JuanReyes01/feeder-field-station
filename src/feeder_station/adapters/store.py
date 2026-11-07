@@ -21,7 +21,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -81,7 +81,7 @@ def _boot_count_is_newer(candidate: int, stored: int) -> bool:
     return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,8 @@ CREATE TABLE IF NOT EXISTS specimen_trap_interest (
 
 -- SCHEMA_VERSION 6: the days a subject appears on in the CICG's list (its
 -- marking and every recapture), as ISO dates. Filled only by importing the
--- list; the operator filters by them.
+-- list; the operator filters by them. SCHEMA_VERSION 7 adds each capture's
+-- project and locality (migration below).
 CREATE TABLE IF NOT EXISTS specimen_capture_day (
     tag BLOB NOT NULL,
     day TEXT NOT NULL,
@@ -310,6 +311,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             "UPDATE specimen SET registered = 1 "
             "WHERE species IS NOT NULL OR band_number IS NOT NULL OR of_interest = 1"
         )
+    if previous_version < 7:
+        # The CICG's individuals database: a bird's own code, whether the tag
+        # is one it lost (``replaced``), and where each capture happened.
+        conn.execute("ALTER TABLE specimen ADD COLUMN cicg_id TEXT")
+        conn.execute("ALTER TABLE specimen ADD COLUMN replaced INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE specimen_capture_day ADD COLUMN project TEXT")
+        conn.execute("ALTER TABLE specimen_capture_day ADD COLUMN locality TEXT")
 
     conn.execute(
         """
@@ -387,7 +395,14 @@ class SpecimenRow:
     age: str | None = None
     registered: bool = False
     trap_ids: tuple[int, ...] = ()
-    capture_days: tuple[str, ...] = ()  # ISO dates from the CICG's list, oldest first
+    # From the CICG's list, oldest first: (ISO day, project, locality).
+    captures: tuple[tuple[str, str | None, str | None], ...] = ()
+    cicg_id: str | None = None
+    replaced: bool = False  # the bird lost this tag and wears another
+
+    @property
+    def capture_days(self) -> tuple[str, ...]:
+        return tuple(day for day, _project, _locality in self.captures)
 
 
 @dataclass(frozen=True)
@@ -420,10 +435,11 @@ _SPECIMEN_EDITABLE_FIELDS = (
     "sex",
     "age",
     "band_number",
+    "cicg_id",
     "of_interest",
     "registered",
 )
-_SPECIMEN_DESCRIBING_FIELDS = ("species", "species_code", "sex", "age", "band_number")
+_SPECIMEN_DESCRIBING_FIELDS = ("species", "species_code", "sex", "age", "band_number", "cicg_id")
 
 
 @dataclass(frozen=True)
@@ -878,7 +894,7 @@ class Store:
             """
             SELECT s.tag, s.species, s.band_number, s.of_interest,
                    COALESCE(a.times_seen, 0), a.last_seen_epoch,
-                   s.species_code, s.sex, s.age, s.registered
+                   s.species_code, s.sex, s.age, s.registered, s.cicg_id, s.replaced
               FROM specimen s
               LEFT JOIN specimen_activity a ON a.tag = s.tag
              ORDER BY s.tag
@@ -889,11 +905,11 @@ class Store:
             "SELECT tag, node_id FROM specimen_trap_interest ORDER BY node_id"
         ):
             trap_ids.setdefault(tag, []).append(node_id)
-        capture_days: dict[bytes, list[str]] = {}
-        for tag, day in self._conn.execute(
-            "SELECT tag, day FROM specimen_capture_day ORDER BY day"
+        captures: dict[bytes, list[tuple[str, str | None, str | None]]] = {}
+        for tag, day, project, locality in self._conn.execute(
+            "SELECT tag, day, project, locality FROM specimen_capture_day ORDER BY day"
         ):
-            capture_days.setdefault(tag, []).append(day)
+            captures.setdefault(tag, []).append((day, project, locality))
         return [
             SpecimenRow(
                 tag=tag,
@@ -907,7 +923,9 @@ class Store:
                 age=age,
                 registered=bool(registered),
                 trap_ids=tuple(trap_ids.get(tag, ())),
-                capture_days=tuple(capture_days.get(tag, ())),
+                captures=tuple(captures.get(tag, ())),
+                cicg_id=cicg_id,
+                replaced=bool(replaced),
             )
             for (
                 tag,
@@ -920,6 +938,8 @@ class Store:
                 sex,
                 age,
                 registered,
+                cicg_id,
+                replaced,
             ) in rows
         ]
 
@@ -979,13 +999,18 @@ class Store:
     def register_specimens(
         self,
         specimens: Mapping[bytes, Mapping[str, str]],
-        capture_days: Mapping[bytes, Iterable[date]] | None = None,
+        captures: Mapping[bytes, Iterable[tuple[date, str | None, str | None]]] | None = None,
+        replaced: Collection[bytes] | None = None,
     ) -> tuple[int, int]:
         """Create or update registered subjects, never touching who is of
         interest: re-importing the list must not change what a trap hunts.
-        A subject's capture days are replaced by the ones given for it, so a
-        corrected date in the list does not leave the wrong one behind.
-        Returns how many were created and how many updated."""
+        Captures (day, project, locality) add to the ones already known: the
+        short list and the full database share days, and importing one must
+        not erase what only the other knows. A day already known keeps its
+        project and locality unless it had none. With ``replaced``, every
+        subject given is flagged as a lost tag or not by it; a file that cannot
+        tell passes None and leaves the flags alone. Returns how many were
+        created and how many updated."""
         conn = self._conn
         created = 0
         updated = 0
@@ -1004,13 +1029,23 @@ class Store:
                         conn.execute(
                             f"UPDATE specimen SET {key} = ? WHERE tag = ?", (fields[key], tag)
                         )
-            for tag, days in (capture_days or {}).items():
+            for tag, rows in (captures or {}).items():
                 if tag not in specimens:
                     continue
-                conn.execute("DELETE FROM specimen_capture_day WHERE tag = ?", (tag,))
                 conn.executemany(
-                    "INSERT OR IGNORE INTO specimen_capture_day (tag, day) VALUES (?, ?)",
-                    [(tag, day.isoformat()) for day in days],
+                    """
+                    INSERT INTO specimen_capture_day (tag, day, project, locality)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(tag, day) DO UPDATE SET
+                        project  = COALESCE(project, excluded.project),
+                        locality = COALESCE(locality, excluded.locality)
+                    """,
+                    [(tag, day.isoformat(), project, locality) for day, project, locality in rows],
+                )
+            if replaced is not None:
+                conn.executemany(
+                    "UPDATE specimen SET replaced = ? WHERE tag = ?",
+                    [(1 if tag in replaced else 0, tag) for tag in specimens],
                 )
             conn.execute("COMMIT")
         except BaseException:

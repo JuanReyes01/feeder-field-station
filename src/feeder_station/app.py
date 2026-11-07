@@ -150,7 +150,8 @@ class InterestChangeRequest(BaseModel):
 
     ``node_id`` None means every trap. ``tags`` are hex, as the page lists them;
     ``entries`` are whatever the operator typed or pasted: a BioMark, a PIT in
-    hex or a band number. A valid PIT nobody registered is registered on add.
+    hex, a CICG code (``CICG_1441``) or a band number. A CICG code means the tag
+    the bird wears now. A valid PIT nobody registered is registered on add.
     """
 
     action: Literal["add", "remove"]
@@ -199,6 +200,7 @@ class SpecimenUpdateRequest(BaseModel):
     sex: str | None = None
     age: str | None = None
     band_number: str | None = None
+    cicg_id: str | None = None
     of_interest: bool | None = None
     registered: bool | None = None
 
@@ -320,6 +322,12 @@ def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
         "band_number": row.band_number,
         "of_interest": row.of_interest,
         "times_seen": row.times_seen,
+        "cicg_id": row.cicg_id,
+        "replaced": row.replaced,
+        "captures": [
+            {"day": day, "project": project, "locality": locality}
+            for day, project, locality in row.captures
+        ],
         "capture_days": list(row.capture_days),
         # station/live-reads-view precedent: an ISO timestamp, never a raw
         # epoch, is what every other operator-facing time on this page uses.
@@ -1169,9 +1177,12 @@ def create_app(
         store = _require_store()
         rows = {row.tag: row for row in store.specimens()}
         by_band: dict[str, list[bytes]] = {}
+        by_code: dict[str, list[bytes]] = {}
         for listed in rows.values():
             if listed.band_number:
                 by_band.setdefault(listed.band_number.strip().lower(), []).append(listed.tag)
+            if listed.cicg_id and not listed.replaced:
+                by_code.setdefault(listed.cicg_id.strip().lower(), []).append(listed.tag)
 
         tags: list[bytes] = [_tag_from_path(tag) for tag in body.tags]
         missing: list[str] = []
@@ -1184,7 +1195,7 @@ def create_app(
             if tag is not None and (tag in rows or body.action == "add"):
                 tags.append(tag)
                 continue
-            matches = by_band.get(text.lower(), [])
+            matches = by_code.get(text.lower()) or by_band.get(text.lower(), [])
             if len(matches) == 1:
                 tags.append(matches[0])
             elif matches:
@@ -1230,13 +1241,19 @@ def create_app(
             raise HTTPException(status_code=413, detail="El archivo es demasiado grande.")
         table = await asyncio.to_thread(read_specimens, filename, data)
         created, updated = await asyncio.to_thread(
-            store.register_specimens, table.specimens, table.capture_days
+            store.register_specimens,
+            table.specimens,
+            {tag: list(days.values()) for tag, days in table.captures.items()},
+            table.replaced,
         )
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
+            "sheet": table.sheet,
             "created": created,
             "updated": updated,
-            "dated": len(table.capture_days),
+            "dated": len(table.captures),
+            "replaced": len(table.replaced or ()),
+            "without_tag": table.without_tag,
             "errors": table.errors[:50],
             "error_count": len(table.errors),
             "warnings": table.warnings[:50],
