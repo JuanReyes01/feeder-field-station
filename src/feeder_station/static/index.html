@@ -142,8 +142,8 @@ const TRAP_TABS = {
   visits: "Visitas", log: "Bitácora",
 };
 
-const data = { overview: null, health: null, specimens: null, gateway: null };
-const ui = { filter: "all", period: "1", visitTrap: "", search: "", trapSearch: "", picks: new Set(), message: "" };
+const data = { overview: null, health: null, specimens: null, gateway: null, update: null };
+const ui = { filter: "all", period: "1", visitTrap: "", search: "", trapSearch: "", picks: new Set(), message: "", updateHidden: false };
 
 // The real list has more than a thousand individuals: a screen shows what
 // matters and search reaches the rest.
@@ -378,9 +378,34 @@ function setPeriod(value) { ui.period = value; document.activeElement?.blur(); r
 function setVisitTrap(value) { ui.visitTrap = value; document.activeElement?.blur(); render(true); }
 function setSearch(value) { ui.search = value; renderSubjectRows(); }
 
+function updateBanner() {
+  const u = data.update;
+  if (!u?.enabled) return "";
+  const notes = u.notes_url ? `<a class="button quiet" href="${escapeHtml(u.notes_url)}" target="_blank" rel="noopener">Novedades</a>` : "";
+  if (u.state && u.state !== "idle") {
+    const css = u.state === "error" ? "banner-warn" : "banner-info";
+    return `<div class="banner ${css}"><div><div class="title">Actualización</div>${escapeHtml(u.message || "")}</div>${u.state === "error" ? notes : ""}</div>`;
+  }
+  if (!u.available || ui.updateHidden) return "";
+  const action = u.action === "install"
+    ? '<button class="primary" onclick="runUpdate()">Actualizar</button>'
+    : `<a class="button primary" href="${escapeHtml(u.url)}">Descargar</a>`;
+  const how = u.action === "install"
+    ? "Se descarga e instala sola; tus datos se quedan."
+    : "Es la versión portable: baja el archivo nuevo y úsalo en lugar de este. Tus datos se quedan.";
+  return `<div class="banner banner-info"><div><div class="title">Hay una versión nueva de la estación (${escapeHtml(u.latest)})</div>Tienes la ${escapeHtml(u.current)}. ${how}</div>
+    <div class="row">${action}${notes}<button class="quiet" onclick="ui.updateHidden = true; render(true)">Ahora no</button></div></div>`;
+}
+
+async function runUpdate() {
+  await act("/api/update", { method: "POST" });
+}
+
 function renderBanners() {
   const traps = data.overview?.traps || [];
   const parts = [];
+  const update = updateBanner();
+  if (update) parts.push(update);
   if (data.health?.clock_trust === "unset") {
     parts.push('<div class="banner banner-warn"><div><div class="title">Reloj de la estación sin confirmar</div>Las horas en esta pantalla pueden ser incorrectas.</div></div>');
   }
@@ -815,13 +840,14 @@ function render(force) {
 
 async function refresh(force) {
   const onGateway = route().screen === "gateway";
-  const [overview, health, specimens, gateway] = await Promise.all([
+  const [overview, health, specimens, gateway, update] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()).catch(() => data.overview),
     fetch("/health").then((r) => r.json()).catch(() => data.health),
     fetch("/api/specimens").then((r) => r.json()).catch(() => data.specimens),
     onGateway ? fetch("/api/gateway").then((r) => r.json()).catch(() => data.gateway) : data.gateway,
+    fetch("/api/update").then((r) => r.json()).catch(() => data.update),
   ]);
-  Object.assign(data, { overview, health, specimens, gateway });
+  Object.assign(data, { overview, health, specimens, gateway, update });
   render(force === true);
 }
 

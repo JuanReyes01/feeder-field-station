@@ -1,10 +1,18 @@
-# Every v* tag: run the tests, build the double-click executable on Linux and
-# Windows (packaging/cicg-estacion.spec), smoke-test each one, and attach both
-# to the GitHub release for that tag.
+# Every v* tag: run the tests, build the station on Linux and Windows,
+# smoke-test each build, and publish four files on the release for the tag:
+#
+#   EstacionCICG-<version>-Windows-Instalador.exe   (packaging/cicg-estacion.iss)
+#   EstacionCICG-<version>-Windows-Portable.exe
+#   EstacionCICG-<version>-Linux-Instalador.tar.gz  (binary + instalar.sh)
+#   EstacionCICG-<version>-Linux-Portable
+#
+# The station's update notice (adapters/updates.py) looks for exactly these
+# names. The release text comes from CHANGELOG.md (packaging/release_notes.py).
+# The tag must match __version__ in src/feeder_station/__init__.py:
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# A tag with a hyphen (v0.2.0-rc1) makes a pre-release.
+# A tag with a hyphen (v0.2.0-rc2) makes a pre-release.
 name: Release
 
 on:
@@ -22,10 +30,21 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
+      - name: The tag matches the code's version
+        id: version
+        run: |
+          version=$(uv run --no-sync python -c "import feeder_station; print(feeder_station.__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but __version__ is $version"
+            exit 1
+          fi
       - run: uv run ruff check src tests
       - run: uv run mypy src
       - run: uv run pytest -q
@@ -36,17 +55,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The oldest supported glibc this runner image has, so the binary
-          # also runs on older distributions than the one it was built on.
+          # The oldest glibc this runner image has, so the binary also runs
+          # on older distributions than the one it was built on.
           - os: ubuntu-22.04
-            name: linux
+            system: Linux
             binary: dist/cicg-estacion
-            asset: cicg-estacion-linux-x86_64
           - os: windows-latest
-            name: windows
+            system: Windows
             binary: dist/cicg-estacion.exe
-            asset: cicg-estacion-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
@@ -68,43 +87,49 @@ jobs:
           kill "$pid" 2>/dev/null || true
           cat smoke.log
           test "$ok" = 1
-      - name: Build the Windows installer
+      - name: Linux files
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p out "EstacionCICG-$VERSION-Linux"
+          cp dist/cicg-estacion "out/EstacionCICG-$VERSION-Linux-Portable"
+          cp dist/cicg-estacion packaging/linux/instalar.sh packaging/linux/LEEME.txt "EstacionCICG-$VERSION-Linux/"
+          chmod +x "EstacionCICG-$VERSION-Linux/cicg-estacion" "EstacionCICG-$VERSION-Linux/instalar.sh"
+          tar czf "out/EstacionCICG-$VERSION-Linux-Instalador.tar.gz" "EstacionCICG-$VERSION-Linux"
+          ls -l out
+      - name: Windows files
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
           $iscc = Get-ChildItem "${env:ProgramFiles(x86)}", "$env:ProgramFiles" -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $iscc) { throw "ISCC.exe not found after installing Inno Setup" }
-          $version = (uv run --no-sync python -c "import feeder_station; print(feeder_station.__version__)").Trim()
-          & $iscc.FullName "/DAppVersion=$version" packaging/cicg-estacion.iss
+          & $iscc.FullName "/DAppVersion=$env:VERSION" packaging/cicg-estacion.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
-      - name: Collect the assets
-        shell: bash
-        run: |
-          mkdir out
-          cp "${{ matrix.binary }}" "out/${{ matrix.asset }}"
-          if [ -f dist/cicg-estacion-setup.exe ]; then
-            cp dist/cicg-estacion-setup.exe out/cicg-estacion-windows-setup.exe
-          fi
-          ls -l out
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist/cicg-estacion.exe "out/EstacionCICG-$env:VERSION-Windows-Portable.exe"
+          Copy-Item "dist/EstacionCICG-$env:VERSION-Windows-Instalador.exe" out/
+          Get-ChildItem out
       - uses: actions/upload-artifact@v6
         with:
-          name: assets-${{ matrix.name }}
+          name: estacion-${{ matrix.system }}
           path: out/*
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [test, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
         with:
           path: assets
           merge-multiple: true
+      - run: python3 packaging/release_notes.py "${{ needs.test.outputs.version }}" > notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          name: Estación CICG ${{ needs.test.outputs.version }}
+          body_path: notes.md
           files: assets/*
-          generate_release_notes: true
-          # v0.2.0-rc1 and the like: a pre-release, to try the build first.
+          # v0.2.0-rc2 and the like: a pre-release, to try the build first.
           prerelease: ${{ contains(github.ref_name, '-') }}

@@ -25,6 +25,7 @@ adapters/settings.py), otherwise ``auto``.
 from __future__ import annotations
 
 import argparse
+import signal
 import socket
 import sys
 import threading
@@ -37,6 +38,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from feeder_station import __version__, desktop
+from feeder_station.adapters import updates
 from feeder_station.adapters.serial_gateway import AUTO_DEVICE, SerialGateway, device_config_for
 from feeder_station.adapters.settings import load_settings, settings_path_for
 from feeder_station.adapters.store import Store
@@ -155,8 +157,36 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
         # just reports the link down and keeps retrying.
         gateway = SerialGateway(device_config_for(serial_device))
 
-    app = create_app(config=config, store=store, gateway=gateway, settings_path=settings_path)
+    app = create_app(
+        config=config,
+        store=store,
+        gateway=gateway,
+        settings_path=settings_path,
+        updates=update_checker() if is_frozen() else None,
+    )
     return app, args
+
+
+def _shut_down_soon() -> None:
+    """Stops the server the way Ctrl+C does, a moment after the response
+    that asked for it has gone out."""
+    threading.Timer(2.0, signal.raise_signal, args=(signal.SIGINT,)).start()
+
+
+def update_checker() -> updates.UpdateChecker:
+    """The executable's own update notice (adapters/updates.py)."""
+    user_agent = f"cicg-estacion/{__version__}"
+    system = updates.current_system()
+    return updates.UpdateChecker(
+        current=__version__,
+        system=system,
+        mode=updates.install_mode(Path(sys.executable), system, Path.home()),
+        fetch=lambda: updates.fetch_releases(user_agent),
+        download=lambda url, target: updates.download(url, target, user_agent),
+        launch_installer=updates.launch_installer,
+        reinstall=updates.reinstall_from,
+        request_shutdown=_shut_down_soon,
+    )
 
 
 def _desktop_command(args: argparse.Namespace) -> int:

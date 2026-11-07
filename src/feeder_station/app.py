@@ -36,6 +36,7 @@ from feeder_station.adapters.serial_gateway import (
 from feeder_station.adapters.settings import StationSettings, save_settings
 from feeder_station.adapters.specimen_import import read_specimens
 from feeder_station.adapters.store import SpecimenRow, Store, StoredEvent
+from feeder_station.adapters.updates import UpdateChecker
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain import event_log, pacing, payloads
@@ -506,6 +507,7 @@ def create_app(
     store: Store | None = None,
     gateway: _HealthReportingGateway | None = None,
     settings_path: Path | None = None,
+    updates: UpdateChecker | None = None,
 ) -> FastAPI:
     resolved_config = config or StationConfig.load()
     resolved_clock: Clock = clock or StationClock()
@@ -588,6 +590,8 @@ def create_app(
     # Where the interface's own choices are saved (adapters/settings.py);
     # None keeps them for this run only.
     app.state.settings_path = settings_path
+    # Only the packaged executable checks for new releases (cli.py).
+    app.state.updates = updates
     # design.md section 7's concurrency table, "Registry" row: "One
     # threading.Lock, owned by the shell... because domain/ stays free of
     # concurrency primitives." Before this slice, exactly one thread (the
@@ -1390,6 +1394,28 @@ def create_app(
             ) from exc
         app.state.broadcaster.publish({"type": "traps_changed"})
         return _gateway_json(gateway)
+
+    @app.get("/api/update")
+    def update_status() -> dict[str, Any]:
+        """Whether a newer release exists; the first call of the day asks
+        GitHub in the background, so this never waits on the network."""
+        checker = app.state.updates
+        if checker is None:
+            return {"enabled": False, "available": False}
+        status: dict[str, Any] = checker.status()
+        return status
+
+    @app.post("/api/update")
+    def start_update() -> dict[str, Any]:
+        """The "Actualizar" button of an installed copy."""
+        checker = app.state.updates
+        if checker is None:
+            raise HTTPException(status_code=409, detail="Esta copia no se actualiza sola.")
+        try:
+            status: dict[str, Any] = checker.start_update()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return status
 
     @app.get("/favicon.png", include_in_schema=False)
     def favicon() -> FileResponse:

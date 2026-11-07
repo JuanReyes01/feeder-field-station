@@ -60,3 +60,17 @@ def test_uninstall_removes_only_what_install_wrote(tmp_path: Path) -> None:
     assert not any(path.exists() for path in written)
     assert data.read_bytes() == b"field data"
     assert desktop.uninstall(home) == []
+
+
+def test_reinstalling_replaces_the_binary_by_renaming_never_writing_into_it(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    binary, _, _ = desktop.install(_fake_executable(tmp_path), home)
+    inode_before = binary.stat().st_ino
+    newer = tmp_path / "newer"
+    newer.write_bytes(b"\x7fELF newer")
+
+    desktop.install(newer, home)
+
+    assert binary.read_bytes() == b"\x7fELF newer"
+    assert binary.stat().st_ino != inode_before  # a new file, the running one untouched
+    assert not binary.with_name("cicg-estacion.nuevo").exists()

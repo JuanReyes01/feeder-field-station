@@ -13,6 +13,7 @@ Windows gets the same from its installer (packaging/cicg-estacion.iss).
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -49,7 +50,14 @@ def install(executable: Path, home: Path) -> list[Path]:
     for path in (binary, icon, launcher):
         path.parent.mkdir(parents=True, exist_ok=True)
     if executable.resolve() != binary.resolve():
-        shutil.copy2(executable, binary)
+        # Copied beside it and renamed over it: the installed copy may be
+        # the very process running right now (an update from the station
+        # itself), and writing into a running executable fails on Linux;
+        # a rename leaves the running one intact until it exits.
+        staged = binary.with_name(binary.name + ".nuevo")
+        shutil.copy2(executable, staged)
+        staged.chmod(0o755)
+        os.replace(staged, binary)
     binary.chmod(0o755)
     shutil.copyfile(ICON, icon)
     # An absolute icon path: found at once, with no icon-cache refresh and

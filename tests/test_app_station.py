@@ -413,3 +413,42 @@ def test_the_page_has_its_icon(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.content[:4] == b"\x89PNG"
     assert 'href="/favicon.png"' in client.get("/").text
+
+
+# --- the update notice -----------------------------------------------------
+
+
+def test_a_source_run_has_no_update_notice(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    assert client.get("/api/update").json() == {"enabled": False, "available": False}
+    assert client.post("/api/update").status_code == 409
+
+
+def test_the_update_notice_and_button_go_through_the_checker(tmp_path: Path) -> None:
+    from feeder_station.adapters.updates import INSTALLED, UpdateChecker, asset_name
+
+    launched: list[Path] = []
+    name = asset_name("0.3.0", "windows", INSTALLED)
+    release = {
+        "tag_name": "v0.3.0",
+        "html_url": "https://github.com/x/releases/tag/v0.3.0",
+        "assets": [{"name": name, "browser_download_url": f"https://dl/{name}"}],
+    }
+    checker = UpdateChecker(
+        current="0.2.0",
+        system="windows",
+        mode=INSTALLED,
+        fetch=lambda: [release],
+        download=lambda _url, target: target.write_bytes(b"setup"),
+        launch_installer=launched.append,
+        reinstall=lambda _p: None,
+        request_shutdown=lambda: None,
+        background=False,
+    )
+    client = TestClient(create_app(store=Store(tmp_path / "campo.db"), updates=checker))
+
+    status = client.get("/api/update").json()
+    assert status["available"] is True
+    assert status["latest"] == "0.3.0"
+    assert client.post("/api/update").json()["state"] == "done"
+    assert [p.name for p in launched] == [name]

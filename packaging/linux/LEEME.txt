@@ -1,0 +1,17 @@
+Estación CICG para Linux
+========================
+
+Instalar (queda en el menú de aplicaciones):
+
+    ./instalar.sh
+
+Después búscala como "Estación CICG". Se abre en una terminal: ahí se ve la
+dirección de la interfaz, y cerrar esa terminal apaga la estación.
+
+Los datos quedan en ~/CICG (estacion.db). Desinstalar no los borra:
+
+    ~/.local/bin/cicg-estacion --desinstalar
+
+Si la gateway no aparece, tu usuario necesita permiso sobre el puerto serial:
+
+    sudo usermod -aG dialout $USER     (y cierra sesión y vuelve a entrar)

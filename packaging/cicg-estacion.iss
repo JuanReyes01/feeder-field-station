@@ -5,7 +5,7 @@
 ;
 ; Built by .github/workflows/release.yml after PyInstaller:
 ;   ISCC /DAppVersion=0.2.0 packaging\cicg-estacion.iss
-; Output: dist\cicg-estacion-setup.exe
+; Output: dist\EstacionCICG-<version>-Windows-Instalador.exe
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -22,7 +22,7 @@ DefaultGroupName=Estación CICG
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=cicg-estacion-setup
+OutputBaseFilename=EstacionCICG-{#AppVersion}-Windows-Instalador
 SetupIconFile=cicg-estacion.ico
 UninstallDisplayIcon={app}\cicg-estacion.exe
 UninstallDisplayName=Estación CICG
@@ -40,6 +40,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\cicg-estacion.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Tells the station it is the installed copy, so its update notice can
+; download and run the next installer (adapters/updates.py).
+Source: "instalado.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Estación CICG"; Filename: "{app}\cicg-estacion.exe"

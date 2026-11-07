@@ -1,0 +1,2 @@
+Instalada con el instalador de Estación CICG.
+La estación usa este archivo para saber que se actualiza con el instalador.

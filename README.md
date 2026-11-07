@@ -85,39 +85,50 @@ USB) `auto` does not guess: choose the port on the Gateway screen, or pass
 
 ## The executable (Windows and Linux)
 
-Every `v*` tag builds a single-file executable for Linux and Windows, plus a
-Windows installer, and attaches them to that GitHub release
-(`.github/workflows/release.yml`, `packaging/cicg-estacion.spec`,
-`packaging/cicg-estacion.iss`):
+Every `v*` tag publishes four files on that GitHub release
+(`.github/workflows/release.yml`), named so the station's own update notice
+can find them:
 
-- Windows: `cicg-estacion-windows-setup.exe` installs "Estación CICG" for the
-  user (Start menu, optional desktop icon, uninstaller); no administrator
-  needed. `cicg-estacion-windows-x86_64.exe` is the same program, portable.
-- Linux: `chmod +x cicg-estacion-linux-x86_64 && ./cicg-estacion-linux-x86_64
-  --instalar` copies it to `~/.local/bin` and adds "Estación CICG" to the
-  application menu; `--desinstalar` takes it out (the data stays).
+| | Install (recommended) | Portable |
+|---|---|---|
+| Windows | `EstacionCICG-<v>-Windows-Instalador.exe` | `EstacionCICG-<v>-Windows-Portable.exe` |
+| Linux | `EstacionCICG-<v>-Linux-Instalador.tar.gz` | `EstacionCICG-<v>-Linux-Portable` |
 
-Started from the menu or double-clicked, with no flags, it:
+- Windows installer (`packaging/cicg-estacion.iss`, Inno Setup): per user, no
+  administrator; Start menu, optional desktop icon, uninstaller.
+- Linux installer: the binary plus `instalar.sh`, which runs
+  `cicg-estacion --instalar`: copied to `~/.local/bin`, "Estación CICG" in the
+  application menu. `--desinstalar` takes it out; the data stays.
+- Portable: the same program, opened in place.
 
-- keeps the database in `CICG/estacion.db` in the user's home folder;
-- finds the gateway on its own (`--serial-device auto`);
-- opens the interface in the browser;
-- leaves the console window open on a startup error, so it can be read.
-  Closing that window stops the station.
+Started from the menu or double-clicked, with no flags, it keeps the
+database in `CICG/estacion.db` in the user's home folder, finds the gateway
+(see above), opens the interface in the browser, and leaves the console
+window open on a startup error so it can be read. Closing that window stops
+the station.
+
+**Updates.** The executable asks GitHub, at most once a day, whether a newer
+release exists (`adapters/updates.py`; the repository must be public). An
+installed copy shows "Actualizar": it downloads the new installer (Windows,
+then shuts itself down so the installer can replace it) or the new binary
+(Linux, which reinstalls itself), checked against GitHub's SHA-256 digest of
+the file. A portable copy shows "Descargar", a link to the new portable file.
+A pre-release is offered only to a copy that is itself a pre-release. The
+data folder is never touched.
 
 On Windows the first start asks to let it through the firewall (it serves
-the LAN, for phones) and SmartScreen may warn that the file is unsigned:
-"More info" -> "Run anyway". Without the Linux kernel's NTP status, the
-station checks its clock against a time server (SNTP) before it hands time
-to the traps.
+the LAN, for phones) and SmartScreen warns that the file is unsigned:
+"Más información" -> "Ejecutar de todas formas". Without the Linux kernel's
+NTP status, the station checks its clock against a time server (SNTP)
+before it hands time to the traps.
 
 To cut a release:
 
-```bash
-# bump __version__ in src/feeder_station/__init__.py, commit, then
-git tag v0.2.0
-git push origin main v0.2.0
-```
+1. Set `__version__` in `src/feeder_station/__init__.py` (`0.3.0`, or
+   `0.3.0-rc1` for a test build) and add its section to `CHANGELOG.md`; the
+   release text comes from there (`packaging/release_notes.py`).
+2. Commit, then `git tag v0.3.0 && git push origin main v0.3.0`. The
+   workflow refuses a tag that does not match `__version__`.
 
 To build one locally:
 
