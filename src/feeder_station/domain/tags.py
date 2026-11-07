@@ -4,8 +4,11 @@ The RFID module and the radio carry a tag as 7 bytes (14 hex characters). A
 person never should: the capture log and every analysis use BioMark, a
 transformation of those same bytes, not a prefix plus the hex. The first 2 bytes
 and the last 5 are each written in decimal and joined by ``_``, so
-``0384199C87EC06`` is ``900_110000335878``. Same formula as
-``feeder-rfid-legacy``'s ``create_biomark_column``.
+``0384199C87EC06`` is ``900_110000335878``. The second part always has 12
+digits, as the CICG's individuals database and a BioMark reader write it:
+``038504E3B6461B`` is ``901_021000242715``, never ``901_21000242715``.
+Same formula as ``feeder-rfid-legacy``'s ``create_biomark_column`` and
+``feeder-analysis``.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ def to_biomark(tag: bytes) -> str:
         raise ValueError(f"a tag is {TAG_BYTES} bytes, got {len(tag)}")
     prefix = int.from_bytes(tag[:_PREFIX_BYTES], "big")
     suffix = int.from_bytes(tag[_PREFIX_BYTES:], "big")
-    return f"{prefix}_{suffix}"
+    return f"{prefix:03d}_{suffix:012d}"
 
 
 def _from_parts(prefix: int, suffix: int) -> bytes | None:

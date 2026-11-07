@@ -236,7 +236,7 @@ def test_export_reads_is_in_biomark_and_flags_unknown_readings(tmp_path: Path) -
     assert response.headers["content-type"].startswith("text/csv")
     assert "attachment" in response.headers["content-disposition"]
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
-    assert [r["biomark"] for r in rows] == [BIOMARK_A, "900_48879"]
+    assert [r["biomark"] for r in rows] == [BIOMARK_A, "900_000000048879"]
     assert {r["trampa"] for r in rows} == {"0001"}
     assert rows[0]["especie"] == "Anthracothorax nigricollis"
     assert rows[0]["clasificacion"] == "registrado"

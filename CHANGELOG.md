@@ -16,7 +16,9 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
 - Interfaz nueva: Inicio, cada trampa (preparar, control, configuración,
   lista de interés, visitas, bitácora), individuos, visitas, capturas y
   bitácora en vivo.
-- Biomark en toda la interfaz y en las exportaciones.
+- Biomark en toda la interfaz y en las exportaciones, con 12 cifras después
+  del guion bajo como en la base del CICG: los tags 901 se ven como
+  `901_021000242715`, no `901_21000242715`.
 - Individuos: importar la lista del CICG (Excel o CSV), agregar a mano,
   marcar de interés en todas las trampas o en algunas. Los tags que no son de
   nadie quedan como "lectura desconocida".
