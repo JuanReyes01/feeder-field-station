@@ -25,7 +25,7 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
 - Marcar de interés por filtros: especie, día de captura (marcaje o
   recaptura, de la lista del CICG), estado o búsqueda; o pegando varios
   biomark o anillos. Se marca en todas las trampas o en una, avisando antes si
-  una trampa pasaría de 81.
+  una trampa pasaría de 78.
 - Cada individuo muestra si su trampa ya lo tiene, si se le está enviando o si
   lo recibe al conectarse. Una lectura desconocida se marca de interés en un
   paso.
@@ -43,6 +43,9 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   registrar captura; "Desarmar para mantenimiento" la deja suelta.
 - Al responder una captura ("Capturado" o "Sin colibrí") la trampa vuelve a
   aceptar ese mismo tag.
+- Las listas de más de 26 individuos ahora sí llegan a la trampa: iban en
+  partes de 27 que la gateway no podía reenviar y botaba sin avisar. Ahora van
+  de a 26, y cada trampa admite hasta 78 individuos de interés.
 - La lista de interés ya no se queda en "Enviando a la trampa…": cada lista
   nueva lleva un número que la trampa no ha visto, y si la trampa sigue
   reportando sin confirmarla, se reenvía con otro número. Se reintenta al

@@ -1735,7 +1735,7 @@ def test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire(
     chunked send: the only prior split-list test uses `_AllowAllBudget()`.
 
     Two traps, each given the largest tag list `TargetsRequest` now
-    accepts (81 tags, three `SET_TARGETS` chunks -- BEHAVIOUR 1's own
+    accepts (78 tags, three `SET_TARGETS` chunks -- BEHAVIOUR 1's own
     bound, tied to `pacing.DEFAULT_CAPACITY`), submitted before either
     trap has ever been polled or synced. `rotation_index` starts at 0
     (`adapters/workers.py`) and only advances once the roster is non-empty,
@@ -1761,7 +1761,7 @@ def test_a_chunked_set_targets_send_charges_n_tokens_off_the_real_wire(
     master_fd, slave_fd = pty.openpty()
     slave_name = os.ttyname(slave_fd)
     os.close(slave_fd)
-    tags = [f"{i:014X}" for i in range(81)]  # BEHAVIOUR 1's own bound: 3 chunks, the max allowed
+    tags = [f"{i:014X}" for i in range(78)]  # BEHAVIOUR 1's own bound: 3 chunks, the max allowed
 
     app, _args = build_app(
         [

@@ -8,7 +8,7 @@ the same way ``test_frames.py`` pins the frame header.
 
 import pytest
 
-from feeder_station.domain import payloads
+from feeder_station.domain import frames, payloads
 from feeder_station.domain.payloads import PayloadError
 from feeder_station.domain.traps import TrapState
 
@@ -449,10 +449,20 @@ def test_encodes_a_40_tag_target_list_across_two_frames() -> None:
     assert version0 == version1 == 9
     assert seq_total0 == seq_total1 == 2
     assert (seq0, seq1) == (0, 1)
-    assert count0 == 27
-    assert count1 == 13
-    assert frames[0][7:] == b"".join(tags[:27])
-    assert frames[1][7:] == b"".join(tags[27:])
+    assert count0 == 26
+    assert count1 == 14
+    assert frames[0][7:] == b"".join(tags[:26])
+    assert frames[1][7:] == b"".join(tags[26:])
+
+
+def test_a_full_set_targets_frame_fits_inside_the_gateways_link_frame() -> None:
+    """The gateway forwards the whole station frame, header included, as the
+    payload of one ESP-NOW link frame, which holds at most 200 bytes. A
+    27-tag chunk made a 205-byte frame the gateway dropped without a word."""
+    tags = [bytes([i, 0, 0, 0, 0, 0, 0]) for i in range(payloads.TAGS_PER_SET_TARGETS_FRAME)]
+    [payload] = payloads.encode_set_targets(targets_version=9, tags=tags)
+    raw = frames.encode(frames.Frame(msg_type=payloads.SET_TARGETS, node_id=1, payload=payload))
+    assert len(raw) <= 200
 
 
 # --- GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27) ------
@@ -488,8 +498,8 @@ def test_decodes_a_split_targets_reply_across_two_chunks() -> None:
 
     assert (result0.seq, result0.seq_total) == (0, 2)
     assert (result1.seq, result1.seq_total) == (1, 2)
-    assert result0.tags == tuple(tags[:27])
-    assert result1.tags == tuple(tags[27:])
+    assert result0.tags == tuple(tags[:26])
+    assert result1.tags == tuple(tags[26:])
 
 
 def test_decodes_a_targets_payload_with_zero_tags() -> None:

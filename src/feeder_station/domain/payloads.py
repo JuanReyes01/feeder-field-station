@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from .frames import PAYLOAD_MAX
+from .frames import HEADER_BYTES, PAYLOAD_MAX
 from .traps import TrapState
 
 # Uplink message types (docs/protocol/messages.md, "Uplink, node to station").
@@ -47,9 +47,15 @@ TAG_BYTES = 7
 
 # SET_TARGETS header: targets_version (2) + seq (2) + seq_total (2) + count (1).
 _SET_TARGETS_HEADER_BYTES = 7
-# How many tags fit in one 200-byte payload alongside that header — this is
-# what pins messages.md's "a 200-byte payload carries 27 tags" (200-7)//7=27.
-TAGS_PER_SET_TARGETS_FRAME = (PAYLOAD_MAX - _SET_TARGETS_HEADER_BYTES) // TAG_BYTES
+# How many tags one SET_TARGETS (or TARGETS) frame carries. Not (200-7)//7=27,
+# messages.md's original arithmetic: a trap is reached through the gateway,
+# which carries the WHOLE station frame, 9-byte header included, as the
+# payload of one ESP-NOW link frame -- and that payload is also at most 200
+# bytes. So the station frame must be 200 bytes in total: (200-9-7)//7 = 26.
+# With 27, the first chunk of any list longer than 26 was a 205-byte frame the
+# gateway could not encode and dropped without a word, so those lists never
+# reached the trap (seen 2026-11-07: a 48-tag list resent for minutes).
+TAGS_PER_SET_TARGETS_FRAME = (PAYLOAD_MAX - HEADER_BYTES - _SET_TARGETS_HEADER_BYTES) // TAG_BYTES
 
 
 class PayloadError(ValueError):
@@ -394,7 +400,7 @@ def encode_set_targets(*, targets_version: int, tags: Sequence[bytes]) -> list[b
     # seq, seq_total: 2 bytes LE each — assumption; counters sized like
     # reads_today/boot_count, since nothing bounds how many frames a very
     # long target list could need.
-    # count: 1 byte — assumption; bounded by frame capacity (<=27, see
+    # count: 1 byte — assumption; bounded by frame capacity (<=26, see
     # TAGS_PER_SET_TARGETS_FRAME above), mirroring frames.py's own
     # frame-bounded `payload_len` field rather than the open-ended counters.
     for tag in tags:

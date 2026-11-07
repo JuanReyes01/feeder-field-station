@@ -449,7 +449,7 @@ def test_a_chunked_set_targets_send_charges_n_tokens_for_n_frames_not_one() -> N
     `_AllowAllBudget()`, which is exactly why the one-token-for-N-frames
     bypass survived -- it never inspects what the budget itself was asked
     for. A 40-tag list needs two `SET_TARGETS` frames
-    (`TAGS_PER_SET_TARGETS_FRAME` is 27); the charge for sending both must
+    (`TAGS_PER_SET_TARGETS_FRAME` is 26); the charge for sending both must
     be `[2]`, one atomic two-token spend, never `[1]`.
     """
     registry = Registry(silence_after=timedelta(minutes=15))
