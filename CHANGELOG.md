@@ -49,5 +49,9 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   menos cada 30 s.
 - Enviar una lista ya no cancela un Armar ni deja la trampa suelta después de
   "Disparar (prueba)": la lista espera y sale cuando la trampa confirma.
+- Aviso de captura con sonido: una campana suena en la estación cada 6 s hasta
+  que respondes la captura, con notificación del sistema y "¡Captura!" en el
+  título de la pestaña. Se activa una vez con "Sonido de captura" en el menú
+  (el navegador exige un clic) y queda recordado en ese computador.
 - En Windows, la estación comprueba su reloj contra un servidor de hora antes
   de pasárselo a las trampas.

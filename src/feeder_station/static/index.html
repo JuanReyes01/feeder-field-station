@@ -423,6 +423,7 @@ function renderBanners() {
       <div class="row">
         <button class="danger" onclick="ack(${t.node_id}, 'capturado')">Capturado</button>
         <button onclick="ack(${t.node_id}, 'sin_colibri')">Sin colibrí</button>
+        ${sound.on ? "" : '<button class="quiet" onclick="toggleCaptureSound()">Activar sonido</button>'}
       </div></div>`);
   }
   for (const t of traps.filter((x) => !isPrepared(x) && x.has_latch === null)) {
@@ -1020,8 +1021,81 @@ function isEditing() {
 
 // An operator's half-typed value must survive a refresh: while a field has
 // focus, new data waits. Everything else repaints, including the banners.
+// A capture rings a bell at the station until someone answers it, so whoever
+// is nearby hears it without watching the screen. Browsers only allow sound
+// after a click on the page, so the operator turns it on once; the choice is
+// remembered on this computer.
+const sound = { on: false, ctx: null, lastRing: 0, notified: new Set() };
+try { sound.on = localStorage.getItem("captureSound") === "on"; } catch (_) { /* private window: off */ }
+const RING_EVERY_MS = 6000;
+
+function audioReady() {
+  if (!sound.ctx) {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return false;
+    sound.ctx = new Context();
+  }
+  if (sound.ctx.state === "suspended") sound.ctx.resume();
+  return sound.ctx.state === "running";
+}
+
+// Two strikes, ding-dong, each a few inharmonic partials fading out like a bell.
+function bell() {
+  if (!audioReady()) return;
+  const ctx = sound.ctx;
+  const strike = (at, base) => {
+    for (const [ratio, level] of [[1, 0.35], [2.76, 0.12], [5.4, 0.05]]) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = base * ratio;
+      gain.gain.setValueAtTime(level, at);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 1.6);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(at);
+      osc.stop(at + 1.7);
+    }
+  };
+  strike(ctx.currentTime, 880);
+  strike(ctx.currentTime + 0.45, 660);
+}
+
+function toggleCaptureSound() {
+  sound.on = !sound.on;
+  try { localStorage.setItem("captureSound", sound.on ? "on" : "off"); } catch (_) { /* not remembered */ }
+  if (sound.on) {
+    bell();
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+  }
+  render(true);
+}
+
+// The first click anywhere also unlocks the sound when it was left on.
+document.addEventListener("pointerdown", () => { if (sound.on) audioReady(); }, { once: true });
+
+function announceCaptures() {
+  const pending = (data.overview?.traps || []).filter((t) => t.capture);
+  document.title = pending.length ? `¡Captura! · Estación CICG` : "Estación CICG";
+  if (!pending.length || !sound.on) return;
+  if (Date.now() - sound.lastRing >= RING_EVERY_MS) {
+    sound.lastRing = Date.now();
+    bell();
+  }
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  for (const t of pending) {
+    const key = `${t.node_id}:${t.capture.at}`;
+    if (sound.notified.has(key)) continue;
+    sound.notified.add(key);
+    const subject = subjectByTag(t.capture.tag);
+    new Notification(`Captura en ${t.name}`, {
+      body: subject?.registered ? `${subject.species || "Sin especie"} · ${subject.biomark}` : "Lectura desconocida",
+      requireInteraction: true,
+    });
+  }
+}
+
 function render(force) {
   renderBanners();
+  announceCaptures();
   const r = route();
   document.querySelectorAll("nav a").forEach((a) => {
     const name = a.dataset.nav;
@@ -1031,7 +1105,10 @@ function render(force) {
   });
   const online = (data.overview?.traps || []).filter((t) => t.reachable).length;
   const link = data.health?.link;
-  $("nav-status").innerHTML = `<div><a href="#/gateway">${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</a></div><div>${count(online, "trampa en línea", "trampas en línea")}</div>`;
+  const soundNote = !sound.on ? "Sonido de captura: apagado"
+    : sound.ctx?.state === "running" ? "Sonido de captura: encendido" : "Sonido: haz clic en la página";
+  $("nav-status").innerHTML = `<div><a href="#/gateway">${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</a></div><div>${count(online, "trampa en línea", "trampas en línea")}</div>
+    <div style="margin-top:10px"><a href="#" onclick="toggleCaptureSound(); return false">${soundNote}</a></div>`;
   if (!force && isEditing()) return;
   if (r.screen === "trampa") renderTrampa(r.id, r.tab);
   else if (r.screen === "individuos") renderIndividuos();
