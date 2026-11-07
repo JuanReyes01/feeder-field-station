@@ -11,7 +11,10 @@ back under the same ``/dev/ttyUSBn`` name.
 1. An explicit configured path.
 2. ``/dev/serial/by-id/*`` matching a configured substring.
 3. VID:PID through ``serial.tools.list_ports``.
-4. Nothing matched: the link is down. The gateway never pretends otherwise.
+4. Automatic: the one USB serial port there is, on any OS (``COM3`` on
+   Windows). Several, or none, is not guessed at: the link stays down and
+   ``last_error`` says which ports it saw.
+5. Nothing matched: the link is down. The gateway never pretends otherwise.
 
 **Reconnect.** A ``SerialException`` on open, read, or write closes the port,
 marks the link down, and backs off: 1, 2, 4, 8, 16, 30 seconds, capped at 30.
@@ -74,6 +77,8 @@ class DeviceConfig:
     by_id_substring: str | None = None
     vid: int | None = None
     pid: int | None = None
+    # Step 4: take the only USB serial port, if there is exactly one.
+    auto: bool = False
 
 
 def _default_by_id_entries(
@@ -125,7 +130,34 @@ def resolve_device(
             if port.vid == config.vid and port.pid == config.pid:
                 return port.device
 
+    if config.auto:
+        candidates = usb_serial_ports(list_ports)
+        if len(candidates) == 1:
+            return candidates[0]
+
     return None
+
+
+def usb_serial_ports(list_ports: Callable[[], Iterable[ListedPort]]) -> list[str]:
+    """Device names of the serial ports that sit on USB -- the only kind a
+    gateway can be. A port with no VID is a built-in UART or a Bluetooth
+    one, never the gateway."""
+    return sorted(port.device for port in list_ports() if port.vid is not None)
+
+
+def unresolved_reason(config: DeviceConfig, list_ports: Callable[[], Iterable[ListedPort]]) -> str:
+    """What the operator should be told when :func:`resolve_device` finds
+    nothing. Spanish where an operator of the executable reads it."""
+    if not config.auto:
+        return "no serial device matched the configured resolution rules"
+    candidates = usb_serial_ports(list_ports)
+    if not candidates:
+        return "no hay ningún puerto USB: conecta la gateway"
+    shown = ", ".join(candidates)
+    return (
+        f"hay varios puertos USB ({shown}): deja conectada solo la gateway, "
+        f"o arranca la estación con --serial-device {candidates[0]}"
+    )
 
 
 def _default_open_port(device: str) -> SerialPort:
@@ -198,6 +230,11 @@ class SerialGateway:
         self._write_lock = threading.Lock()
 
     @property
+    def config(self) -> DeviceConfig:
+        """How this gateway was told to find its radio."""
+        return self._config
+
+    @property
     def link_state(self) -> LinkState:
         return LinkState(
             connected=self._port is not None,
@@ -226,7 +263,7 @@ class SerialGateway:
         """Resolve and open the port exactly once. No sleep, no retry."""
         device = self.resolve()
         if device is None:
-            self._disconnect("no serial device matched the configured resolution rules")
+            self._disconnect(unresolved_reason(self._config, self._list_ports))
             return False
         try:
             port = self._open_port(device)

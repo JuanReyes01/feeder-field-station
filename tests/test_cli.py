@@ -17,6 +17,7 @@ import os
 import pty
 import select
 import sqlite3
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,7 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from feeder_station.adapters.ingest import _apply_to_registry
-from feeder_station.adapters.serial_gateway import SerialGateway
+from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.store import Store, trap_state_from_wire
 from feeder_station.cli import build_app
 from feeder_station.config import DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA, StationConfig
@@ -89,7 +90,36 @@ def test_without_no_gateway_a_gateway_is_still_constructed_even_with_no_device(
 
     assert args.no_gateway is False
     assert app.state.gateway is not None
-    assert app.state.gateway.resolve() is None
+    # With no flag the station looks for the one USB serial port there is
+    # (step 4); whether one is plugged in depends on the machine.
+    assert app.state.gateway.config == DeviceConfig(auto=True)
+
+
+def test_the_executable_keeps_its_database_in_a_cicg_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _, args = build_app(["--no-gateway"])
+
+    assert Path(args.db_path) == tmp_path / "CICG" / "estacion.db"
+    assert (tmp_path / "CICG").is_dir()
+    assert args.open_browser is True
+
+
+def test_a_source_run_keeps_the_old_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    _, args = build_app(["--no-gateway"])
+
+    assert args.db_path == "station.db"
+    assert args.open_browser is False
+
+
+def test_serial_device_auto_is_the_same_as_leaving_it_out(tmp_path: Path) -> None:
+    app, _ = build_app(["--db-path", str(tmp_path / "station.db"), "--serial-device", "auto"])
+    assert app.state.gateway is not None
+    assert app.state.gateway.config == DeviceConfig(auto=True)
 
 
 def test_transport_defaults_to_serial_so_the_bench_cable_keeps_working(tmp_path: Path) -> None:

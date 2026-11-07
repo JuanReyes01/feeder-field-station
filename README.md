@@ -76,6 +76,43 @@ uv run pytest -q               # the tests
 
 Open `http://<the station's address>:8000` from a phone on the same network.
 
+`--serial-device` defaults to `auto`: the one USB serial port there is. With
+several boards plugged in (the bench: gateway plus a trap on USB) it does not
+guess; pass the gateway's port, `--serial-device /dev/ttyUSB0` or `COM3`.
+
+## The executable (Windows and Linux)
+
+Every `v*` tag builds a single-file executable for Linux and Windows and
+attaches both to that GitHub release (`.github/workflows/release.yml`,
+`packaging/cicg-estacion.spec`). Double-clicking it, with no flags:
+
+- keeps the database in `CICG/estacion.db` in the user's home folder;
+- finds the gateway on its own (`--serial-device auto`);
+- opens the interface in the browser;
+- leaves the console window open on a startup error, so it can be read.
+  Closing that window stops the station.
+
+On Windows the first start asks to let it through the firewall (it serves
+the LAN, for phones) and SmartScreen may warn that the file is unsigned:
+"More info" -> "Run anyway". Without the Linux kernel's NTP status, the
+station checks its clock against a time server (SNTP) before it hands time
+to the traps.
+
+To cut a release:
+
+```bash
+# bump __version__ in src/feeder_station/__init__.py, commit, then
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+To build one locally:
+
+```bash
+uv sync --frozen --no-dev
+uv run --no-sync --with pyinstaller==6.22.3 pyinstaller --noconfirm packaging/cicg-estacion.spec
+```
+
 ## Layout
 
 ```
@@ -90,7 +127,8 @@ src/feeder_station/
   adapters/workers.py  the gateway and scheduler threads, and their wiring
   adapters/command_sender.py  pending commands -> real downlink frames
   adapters/scheduler.py  backlog rotation -> GET_BACKLOG frames
-  adapters/clock.py    DS3231 / NTP trust, and the gate on TIME_SYNC
+  adapters/clock.py    DS3231 / NTP trust (SNTP off Linux), and the gate on
+                       TIME_SYNC
   adapters/export.py   the event record copied to removable media
   config.py            values that must not be literals inside other modules
   app.py               HTTP routes and Server-Sent Events; the page itself is
@@ -98,6 +136,8 @@ src/feeder_station/
   static/index.html    the operator page (DD1, slice 10 — a 400-line HTML
                        string in app.py was not reviewable as Python)
   cli.py               entry point; also where the gateway is turned on
+packaging/             the PyInstaller spec for the executable
+.github/workflows/     CI on every push; the release build on every v* tag
 ```
 
 `domain/` is pure logic with no FastAPI and no I/O, which is what makes it

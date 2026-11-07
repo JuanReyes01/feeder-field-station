@@ -9,23 +9,52 @@ device is configured") -- ``--db-path`` and ``--serial-device`` point it at
 real on-disk state and a real device, and ``--no-gateway`` is the rollback
 kill switch that starts the HTTP interface with no gateway or scheduler
 thread at all, whatever hardware is or is not attached.
+
+The same entry point is frozen into the executable a biologist double-clicks
+(packaging/, `pyinstaller`): there, with no flags at all, the station keeps
+its database in a CICG folder in the user's home, finds the gateway on its
+own (the one USB serial port there is), opens the browser on the interface,
+and keeps the console window open if it fails to start, so the reason can be
+read.
 """
 
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
+import threading
+import time
+import webbrowser
 from collections.abc import Sequence
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
 
+from feeder_station import __version__
 from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.store import Store
 from feeder_station.app import create_app
 from feeder_station.config import StationConfig
 
 DEFAULT_DB_PATH = "station.db"
+FROZEN_DB_PATH = Path("CICG") / "estacion.db"  # under the user's home
+AUTO_DEVICE = "auto"
+
+
+def is_frozen() -> bool:
+    """Whether this is the packaged executable rather than a source run."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def default_db_path() -> str:
+    """The executable keeps the database in the user's own CICG folder, where
+    it survives the executable being replaced by a newer one; a source
+    checkout keeps the old relative default."""
+    if is_frozen():
+        return str(Path.home() / FROZEN_DB_PATH)
+    return DEFAULT_DB_PATH
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -34,17 +63,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--db-path",
-        default=DEFAULT_DB_PATH,
+        default=default_db_path(),
         help="Path to the station's own SQLite event store (S9).",
     )
     parser.add_argument(
         "--serial-device",
-        default=None,
+        default=AUTO_DEVICE,
         help=(
-            "Explicit serial device path -- step 1 of the 4-step device "
-            "resolution order (adapters/serial_gateway.py::resolve_device). "
-            "Omit it to fall back to by-id/VID:PID resolution."
+            "Explicit serial device path (/dev/ttyUSB0, COM3) -- step 1 of the "
+            "device resolution order (adapters/serial_gateway.py::"
+            "resolve_device). The default, 'auto', takes the only USB serial "
+            "port there is and reports the link down when there are several."
         ),
+    )
+    parser.add_argument(
+        "--open-browser",
+        action=argparse.BooleanOptionalAction,
+        default=is_frozen(),
+        help="Open the interface in the default browser once the server is up.",
     )
     parser.add_argument(
         "--transport",
@@ -91,6 +127,7 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
     """
     args, _unknown = _build_parser().parse_known_args(list(argv))
     config = StationConfig.load(argv)
+    Path(args.db_path).parent.mkdir(parents=True, exist_ok=True)
     store = Store(args.db_path)
 
     gateway: SerialGateway | None = None
@@ -99,16 +136,60 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
         # real, supported shape here too -- the radio not being plugged
         # in yet must never crash station startup; the gateway thread
         # just reports the link down and keeps retrying.
-        gateway = SerialGateway(DeviceConfig(explicit_path=args.serial_device))
+        gateway = SerialGateway(device_config(args.serial_device))
 
     app = create_app(config=config, store=store, gateway=gateway)
     return app, args
 
 
+def device_config(serial_device: str | None) -> DeviceConfig:
+    """``--serial-device``: a path wins outright; ``auto`` (or nothing) asks
+    for the only USB serial port there is."""
+    if serial_device is None or serial_device == AUTO_DEVICE:
+        return DeviceConfig(auto=True)
+    return DeviceConfig(explicit_path=serial_device)
+
+
+def _open_browser_when_listening(port: int, *, timeout_s: float = 30.0) -> None:
+    """Waits for the server to accept connections, then opens the page --
+    opening it before uvicorn is listening shows the browser's own error."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.3)
+    else:
+        return
+    webbrowser.open(f"http://localhost:{port}/")
+
+
 def main(argv: list[str] | None = None) -> None:
     resolved_argv = list(sys.argv[1:]) if argv is None else list(argv)
-    app, args = build_app(resolved_argv)
-    uvicorn.run(app, host=args.host, port=args.port)
+    try:
+        app, args = build_app(resolved_argv)
+        print(f"Estación CICG {__version__}", flush=True)
+        print(f"Base de datos: {Path(args.db_path).resolve()}", flush=True)
+        print(
+            f"Interfaz: http://localhost:{args.port}/ (cierra esta ventana para apagar la estación)",
+            flush=True,
+        )
+        if args.open_browser:
+            threading.Thread(
+                target=_open_browser_when_listening, args=(args.port,), daemon=True
+            ).start()
+        uvicorn.run(app, host=args.host, port=args.port)
+    except (Exception, SystemExit) as exc:
+        if not is_frozen():
+            raise
+        # A double-clicked console closes the moment the process exits:
+        # without this the reason (a port already in use, an unreadable
+        # database) vanishes before anyone can read it.
+        if not isinstance(exc, SystemExit):
+            print(f"\nLa estación no pudo arrancar: {exc!r}")
+        input("\nPresiona Enter para cerrar esta ventana...")
+        raise
 
 
 if __name__ == "__main__":

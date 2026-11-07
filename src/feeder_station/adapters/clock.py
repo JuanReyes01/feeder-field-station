@@ -17,14 +17,22 @@ which is still an open question.
 from __future__ import annotations
 
 import ctypes
-import fcntl
+import socket
 import struct
 import subprocess
-from collections.abc import Callable
+import sys
+import threading
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+
+if sys.platform != "win32":
+    # Linux's RTC ioctl. Windows has neither the module nor the device: there
+    # `_default_read_rtc_epoch` raises OSError, which is "no RTC evidence".
+    import fcntl
 
 from feeder_station.domain.clock_trust import ClockTrust, may_distribute_time, trust_from_evidence
 from feeder_station.domain.events import STATION_TIME_SYNC_WITHHELD, StationEvent
@@ -59,6 +67,8 @@ def _default_read_rtc_epoch(device: Path = Path("/dev/rtc0")) -> float:
     of it); the caller, `StationClock._rtc_epoch_or_none`, is the one place
     that turns that into "no evidence" rather than a guessed time.
     """
+    if sys.platform == "win32":
+        raise OSError("no RTC device on Windows")
     buf = bytearray(_RTC_TIME_SIZE)
     with open(device, "rb") as handle:
         fcntl.ioctl(handle, RTC_RD_TIME, buf)
@@ -148,17 +158,129 @@ def _timedatectl_synchronized() -> bool | None:
     return result.stdout.strip() == "yes"
 
 
+# --- SNTP fallback: for a station that is not a Linux box (the Windows ------
+# --- executable), ask a time server directly. -------------------------------
+
+_NTP_UNIX_OFFSET_S = 2208988800  # 1900-01-01 to 1970-01-01
+SNTP_SERVERS: tuple[str, ...] = ("time.windows.com", "pool.ntp.org", "time.google.com")
+# The system clock counts as synchronized when a server says it is within
+# this of real time. TIME_SYNC carries whole seconds, so 2 s is already
+# finer than what a node can be told.
+SNTP_MAX_OFFSET_S = 2.0
+SNTP_RECHECK_OK_S = 600.0
+SNTP_RECHECK_FAILED_S = 60.0
+
+
+def sntp_offset_s(server: str, *, port: int = 123, timeout_s: float = 1.0) -> float | None:
+    """How far the system clock is from `server`'s, in seconds (positive:
+    the system clock is behind), from one SNTP v3 client exchange (RFC
+    4330). `None` when the server cannot be reached, answers garbage, or
+    says it is not synchronized itself -- never a guessed offset.
+    """
+    request = b"\x1b" + 47 * b"\0"  # LI 0, version 3, mode 3 (client)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout_s)
+            sent = time.time()
+            sock.sendto(request, (server, port))
+            reply, _ = sock.recvfrom(512)
+            received = time.time()
+    except OSError:
+        return None
+    if len(reply) < 48:
+        return None
+    leap_indicator = reply[0] >> 6
+    stratum = reply[1]
+    if leap_indicator == 3 or stratum == 0:  # server unsynchronized, or kiss-o'-death
+        return None
+
+    def stamp(offset: int) -> float:
+        seconds, fraction = struct.unpack("!II", reply[offset : offset + 8])
+        return float(seconds - _NTP_UNIX_OFFSET_S) + float(fraction) / 2**32
+
+    server_received = stamp(32)
+    server_sent = stamp(40)
+    return ((server_received - sent) + (server_sent - received)) / 2
+
+
+class SntpProbe:
+    """Whether the system clock agrees with a time server, cached.
+
+    `StationClock.trust()` is asked on every event the station stores, so
+    this cannot go to the network each time. The first call checks
+    synchronously, so the answer is real from the start; after that the
+    check reruns in the background every `SNTP_RECHECK_OK_S`
+    (`SNTP_RECHECK_FAILED_S` while it fails) and callers read the last
+    answer. Unlike the kernel probes this one measures the clock itself,
+    so it also catches a clock that is synchronized to nothing at all.
+    """
+
+    def __init__(
+        self,
+        servers: Sequence[str] = SNTP_SERVERS,
+        *,
+        offset: Callable[[str], float | None] = sntp_offset_s,
+        monotonic: Callable[[], float] = time.monotonic,
+        background: bool = True,
+    ) -> None:
+        self._servers = tuple(servers)
+        self._offset = offset
+        self._monotonic = monotonic
+        self._background = background
+        self._lock = threading.Lock()
+        self._synchronized = False
+        self._checked = False
+        self._next_check = 0.0
+        self._running = False
+
+    def synchronized(self) -> bool:
+        with self._lock:
+            first = not self._checked
+            due = not self._running and self._monotonic() >= self._next_check
+            if due:
+                self._running = True
+        if due:
+            if first or not self._background:
+                self._check()
+            else:
+                threading.Thread(target=self._check, name="sntp-probe", daemon=True).start()
+        with self._lock:
+            return self._synchronized
+
+    def _check(self) -> None:
+        synchronized = False
+        for server in self._servers:
+            measured = self._offset(server)
+            if measured is not None:
+                synchronized = abs(measured) <= SNTP_MAX_OFFSET_S
+                break
+        with self._lock:
+            self._synchronized = synchronized
+            self._checked = True
+            self._running = False
+            self._next_check = self._monotonic() + (
+                SNTP_RECHECK_OK_S if synchronized else SNTP_RECHECK_FAILED_S
+            )
+
+
+_SNTP_PROBE = SntpProbe()
+
+
 def _default_ntp_synchronized() -> bool:
     """`adjtimex` first; `timedatectl` only when that probe could not even
-    be made. Either probe answering "not synchronized" is a real answer,
-    not a failure -- only both being *inconclusive* degrades to `False`,
-    the same "never guess" discipline the RTC read follows.
+    be made; an SNTP exchange only when neither kernel probe exists at all
+    (Windows, and any image with neither). Either kernel probe answering
+    "not synchronized" is a real answer, not a failure -- only all of them
+    being *inconclusive* degrades to `False`, the same "never guess"
+    discipline the RTC read follows.
     """
     probed = _adjtimex_synchronized()
     if probed is not None:
         return probed
     fallback = _timedatectl_synchronized()
-    return bool(fallback)
+    if fallback is not None:
+        return fallback
+    return _SNTP_PROBE.synchronized()
 
 
 def _system_now() -> datetime:

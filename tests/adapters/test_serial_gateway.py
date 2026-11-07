@@ -24,6 +24,7 @@ from feeder_station.adapters.serial_gateway import (
     SerialGateway,
     SerialPort,
     resolve_device,
+    unresolved_reason,
 )
 
 
@@ -60,7 +61,9 @@ LIST_PORTS = [_ListedPort("/dev/ttyUSB7", vid=0x10C4, pid=0xEA60)]
 
 
 def _resolve(config: DeviceConfig) -> str | None:
-    return resolve_device(config, by_id_entries=lambda: BY_ID_ENTRIES, list_ports=lambda: LIST_PORTS)
+    return resolve_device(
+        config, by_id_entries=lambda: BY_ID_ENTRIES, list_ports=lambda: LIST_PORTS
+    )
 
 
 # --- 5.1/5.2: device resolution order -----------------------------------------
@@ -93,6 +96,40 @@ def test_resolves_explicit_path_then_by_id_then_vid_pid_then_down() -> None:
     # Nothing configured or nothing matches at all: step 4, the link is down.
     nothing_left = replace(no_by_id, vid=None, pid=None)
     assert _resolve(nothing_left) is None
+
+
+# --- step 4: automatic, for the executable a biologist double-clicks ----------
+
+
+def _auto(ports: list[_ListedPort]) -> str | None:
+    return resolve_device(DeviceConfig(auto=True), by_id_entries=list, list_ports=lambda: ports)
+
+
+def test_auto_takes_the_only_usb_serial_port() -> None:
+    ports = [_ListedPort("COM1", vid=None, pid=None), _ListedPort("COM4", vid=0x10C4, pid=0xEA60)]
+    assert _auto(ports) == "COM4"  # COM1 is a built-in UART, never the gateway
+
+
+def test_auto_does_not_guess_between_several_ports() -> None:
+    ports = [
+        _ListedPort("COM4", vid=0x10C4, pid=0xEA60),
+        _ListedPort("COM7", vid=0x1A86, pid=0x7523),
+    ]
+    assert _auto(ports) is None
+    reason = unresolved_reason(DeviceConfig(auto=True), lambda: ports)
+    assert "COM4, COM7" in reason
+    assert "--serial-device COM4" in reason
+
+
+def test_auto_with_no_port_says_to_connect_the_gateway() -> None:
+    assert _auto([]) is None
+    assert "conecta la gateway" in unresolved_reason(DeviceConfig(auto=True), list)
+
+
+def test_an_explicit_device_still_wins_over_auto() -> None:
+    ports = [_ListedPort("COM4", vid=0x10C4, pid=0xEA60)]
+    config = DeviceConfig(explicit_path="COM9", auto=True)
+    assert resolve_device(config, by_id_entries=list, list_ports=lambda: ports) == "COM9"
 
 
 # --- 5.3/5.4: reconnect with backoff -------------------------------------------

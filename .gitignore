@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 data/
+# Station databases are field data, never source.
+*.db
+*.db-shm
+*.db-wal
+# PyInstaller output (packaging/cicg-estacion.spec).
+/build/

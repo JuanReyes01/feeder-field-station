@@ -11,9 +11,23 @@ fall back to a guessed system-clock time.
 
 from __future__ import annotations
 
+import socket
+import struct
+import threading
+import time
 from datetime import UTC, datetime
 
-from feeder_station.adapters.clock import StationClock, attempt_time_sync
+import pytest
+
+from feeder_station.adapters import clock as clock_module
+from feeder_station.adapters.clock import (
+    SNTP_RECHECK_FAILED_S,
+    SNTP_RECHECK_OK_S,
+    SntpProbe,
+    StationClock,
+    attempt_time_sync,
+    sntp_offset_s,
+)
 from feeder_station.domain.clock_trust import ClockTrust
 from feeder_station.domain.events import STATION_TIME_SYNC_WITHHELD, StationEvent
 from feeder_station.domain.frames import decode
@@ -160,3 +174,114 @@ def test_time_sync_resumes_once_trusted() -> None:
         | (frame.payload[3] << 24)
     )
     assert epoch == int(at.timestamp())
+
+
+# --- SNTP fallback (the Windows executable has no kernel NTP probe) --------
+
+
+def _ntp_stamp(unix_seconds: float) -> bytes:
+    ntp = unix_seconds + 2208988800
+    return struct.pack("!II", int(ntp), int((ntp % 1) * 2**32))
+
+
+def _one_shot_ntp_server(*, skew_s: float, leap_indicator: int = 0) -> tuple[int, threading.Thread]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(2.0)
+    port = sock.getsockname()[1]
+
+    def serve() -> None:
+        with sock:
+            _request, peer = sock.recvfrom(512)
+            now = time.time() + skew_s
+            header = bytes([(leap_indicator << 6) | (3 << 3) | 4, 2, 0, 0]) + 28 * b"\0"
+            sock.sendto(header + _ntp_stamp(now) + _ntp_stamp(now), peer)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return port, thread
+
+
+def test_sntp_measures_how_far_the_system_clock_is() -> None:
+    port, thread = _one_shot_ntp_server(skew_s=5.0)
+    measured = sntp_offset_s("127.0.0.1", port=port, timeout_s=1.0)
+    thread.join()
+    assert measured == pytest.approx(5.0, abs=0.2)
+
+
+def test_an_unsynchronized_server_is_no_answer() -> None:
+    port, thread = _one_shot_ntp_server(skew_s=0.0, leap_indicator=3)
+    assert sntp_offset_s("127.0.0.1", port=port, timeout_s=1.0) is None
+    thread.join()
+
+
+def test_an_unreachable_server_is_no_answer() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert sntp_offset_s("127.0.0.1", port=port, timeout_s=0.2) is None
+
+
+class _FakeOffsets:
+    def __init__(self, answers: dict[str, float | None]) -> None:
+        self.answers = answers
+        self.asked: list[str] = []
+
+    def __call__(self, server: str) -> float | None:
+        self.asked.append(server)
+        return self.answers[server]
+
+
+def test_the_probe_uses_the_first_server_that_answers_and_caches_it() -> None:
+    offsets = _FakeOffsets({"a": None, "b": 0.4, "c": 0.0})
+    now = [100.0]
+    probe = SntpProbe(("a", "b", "c"), offset=offsets, monotonic=lambda: now[0], background=False)
+
+    assert probe.synchronized() is True
+    assert offsets.asked == ["a", "b"]
+
+    now[0] += SNTP_RECHECK_OK_S - 1
+    assert probe.synchronized() is True
+    assert offsets.asked == ["a", "b"]  # cached: no network on every event
+
+    now[0] += 2
+    probe.synchronized()
+    assert offsets.asked == ["a", "b", "a", "b"]
+
+
+def test_a_clock_far_from_the_server_is_not_synchronized() -> None:
+    offsets = _FakeOffsets({"a": 30.0})
+    now = [0.0]
+    probe = SntpProbe(("a",), offset=offsets, monotonic=lambda: now[0], background=False)
+    assert probe.synchronized() is False
+    now[0] += SNTP_RECHECK_FAILED_S
+    probe.synchronized()
+    assert len(offsets.asked) == 2  # a failure is rechecked sooner
+
+
+def test_no_server_at_all_is_not_synchronized() -> None:
+    probe = SntpProbe(("a",), offset=_FakeOffsets({"a": None}), background=False)
+    assert probe.synchronized() is False
+
+
+def test_without_any_kernel_probe_the_station_asks_a_time_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clock_module, "_adjtimex_synchronized", lambda: None)
+    monkeypatch.setattr(clock_module, "_timedatectl_synchronized", lambda: None)
+    monkeypatch.setattr(
+        clock_module,
+        "_SNTP_PROBE",
+        SntpProbe(("a",), offset=_FakeOffsets({"a": 0.1}), background=False),
+    )
+    assert clock_module._default_ntp_synchronized() is True
+
+
+def test_a_kernel_probe_answer_wins_over_the_time_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(clock_module, "_adjtimex_synchronized", lambda: False)
+    offsets = _FakeOffsets({"a": 0.0})
+    monkeypatch.setattr(
+        clock_module, "_SNTP_PROBE", SntpProbe(("a",), offset=offsets, background=False)
+    )
+    assert clock_module._default_ntp_synchronized() is False
+    assert offsets.asked == []
