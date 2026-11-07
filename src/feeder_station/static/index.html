@@ -3,6 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Estación CICG</title>
+<link rel="icon" type="image/png" href="/favicon.png">
 <style>
   :root {
     color-scheme: light;
@@ -28,6 +29,7 @@
     text-decoration: none; font-weight: 500;
   }
   nav a.on { background: #fff; color: var(--ink); }
+  nav .status a { display: inline; min-height: 0; padding: 0; color: inherit; text-decoration: underline; font-weight: 400; }
   nav .status {
     margin-top: 16px; padding: 12px 10px; border-top: 1px solid #3D4A43; font-size: 13px;
     color: #E4EAE6;
@@ -140,7 +142,7 @@ const TRAP_TABS = {
   visits: "Visitas", log: "Bitácora",
 };
 
-const data = { overview: null, health: null, specimens: null };
+const data = { overview: null, health: null, specimens: null, gateway: null };
 const ui = { filter: "all", period: "1", visitTrap: "", search: "", trapSearch: "", picks: new Set(), message: "" };
 
 // The real list has more than a thousand individuals: a screen shows what
@@ -384,7 +386,7 @@ function renderBanners() {
   }
   const link = data.health?.link;
   if (link && link.connected === false) {
-    parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div></div>`);
+    parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div>${route().screen === "gateway" ? "" : '<a class="button" href="#/gateway">Elegir puerto</a>'}</div>`);
   }
   for (const t of traps.filter((x) => x.capture)) {
     const subject = subjectByTag(t.capture.tag);
@@ -799,7 +801,7 @@ function render(force) {
   });
   const online = (data.overview?.traps || []).filter((t) => t.reachable).length;
   const link = data.health?.link;
-  $("nav-status").innerHTML = `<div>${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</div><div>${count(online, "trampa en línea", "trampas en línea")}</div>`;
+  $("nav-status").innerHTML = `<div><a href="#/gateway">${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</a></div><div>${count(online, "trampa en línea", "trampas en línea")}</div>`;
   if (!force && isEditing()) return;
   if (r.screen === "trampa") renderTrampa(r.id, r.tab);
   else if (r.screen === "individuos") renderIndividuos();
@@ -807,20 +809,66 @@ function render(force) {
   else if (r.screen === "visitas") renderVisitas();
   else if (r.screen === "capturas") renderCapturas();
   else if (r.screen === "bitacora") renderBitacora();
+  else if (r.screen === "gateway") renderGateway();
   else renderInicio();
 }
 
 async function refresh(force) {
-  const [overview, health, specimens] = await Promise.all([
+  const onGateway = route().screen === "gateway";
+  const [overview, health, specimens, gateway] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()).catch(() => data.overview),
     fetch("/health").then((r) => r.json()).catch(() => data.health),
     fetch("/api/specimens").then((r) => r.json()).catch(() => data.specimens),
+    onGateway ? fetch("/api/gateway").then((r) => r.json()).catch(() => data.gateway) : data.gateway,
   ]);
-  Object.assign(data, { overview, health, specimens });
+  Object.assign(data, { overview, health, specimens, gateway });
   render(force === true);
 }
 
-window.addEventListener("hashchange", () => { ui.message = ""; render(true); });
+// The port the gateway is on: chosen here, tried at once, remembered for the
+// next start. "Automático" is right whenever only the gateway is plugged in.
+function renderGateway() {
+  const g = data.gateway;
+  if (!g) {
+    $("screen").innerHTML = '<h1>Gateway</h1><div class="card muted">Cargando…</div>';
+    return;
+  }
+  if (!g.enabled) {
+    $("screen").innerHTML = '<h1>Gateway</h1><div class="card">La estación arrancó sin gateway (--no-gateway).</div>';
+    return;
+  }
+  const state = g.connected
+    ? `<span class="ok strong">Conectada</span> en <span class="mono">${escapeHtml(g.device)}</span>`
+    : `<span class="warn strong">Sin conexión</span>${g.last_error ? `: ${escapeHtml(g.last_error)}` : ""}`;
+  const listed = g.ports.some((p) => p.device === g.configured);
+  const option = (value, label) => `<option value="${escapeHtml(value)}" ${g.configured === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  const options = [option("auto", "Automático (el único puerto USB)")]
+    .concat(g.ports.map((p) => option(p.device, `${p.device}${p.description ? ` · ${p.description}` : ""}${p.usb ? "" : " (no es USB)"}`)))
+    .concat(g.configured && g.configured !== "auto" && !listed ? [option(g.configured, `${g.configured} (no está conectado)`)] : []);
+  $("screen").innerHTML = `
+    <h1>Gateway</h1>
+    <div class="card stack narrow">
+      <div>${state}</div>
+      <label>Puerto de la gateway<select id="gateway-port">${options.join("")}</select></label>
+      <div class="row"><button class="primary" onclick="chooseGatewayPort()">Usar este puerto</button></div>
+      <p class="small muted" style="margin:0">Se prueba de inmediato y la estación lo recuerda la próxima vez que la abras. "Automático" sirve cuando la gateway es lo único conectado por USB; con varias placas conectadas, elige el puerto.</p>
+    </div>`;
+}
+
+async function chooseGatewayPort() {
+  const device = $("gateway-port").value;
+  document.activeElement?.blur();
+  const result = await act("/api/gateway", jsonBody("PUT", { device }));
+  if (result) {
+    ui.message = device === "auto" ? "Gateway en automático." : `Gateway en ${device}.`;
+    render(true);
+  }
+}
+
+window.addEventListener("hashchange", () => {
+  ui.message = "";
+  if (route().screen === "gateway") refresh(true); else render(true);
+});
 new EventSource("/api/events").onmessage = () => refresh();
 refresh(true);
 setInterval(refresh, 5000);

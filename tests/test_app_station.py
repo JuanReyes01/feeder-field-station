@@ -3,6 +3,7 @@ themselves, unknown readings, Excel import and reading export."""
 
 import csv
 import io
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from feeder_station import app as app_module
 from feeder_station.adapters.clock import StationClock
+from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
+from feeder_station.adapters.settings import load_settings
 from feeder_station.adapters.store import Store
 from feeder_station.app import create_app, reconcile_targets
 from feeder_station.domain import payloads
@@ -344,3 +347,69 @@ def test_a_reset_while_arming_cancels_the_pending_arm(tmp_path: Path) -> None:
     client.post("/api/traps/1/arm")
     registry.fault(1, at=at, code=10)
     assert registry.trap(1).pending_command is None
+
+
+# --- the gateway's port, chosen from the interface ---------------------------
+
+
+@dataclass
+class _Listed:
+    device: str
+    vid: int | None
+    pid: int | None
+    description: str = ""
+
+
+def _gateway_client(tmp_path: Path) -> tuple[TestClient, SerialGateway]:
+    ports = [
+        _Listed("/dev/ttyUSB1", 0x10C4, 0xEA60, "CP2102"),
+        _Listed("/dev/ttyUSB0", 0x10C4, 0xEA60),
+    ]
+    gateway = SerialGateway(DeviceConfig(auto=True), list_ports=lambda: ports)
+    app = create_app(
+        store=Store(tmp_path / "campo.db"),
+        gateway=gateway,
+        settings_path=tmp_path / "campo.settings.json",
+    )
+    return TestClient(app), gateway
+
+
+def test_the_interface_lists_the_ports_the_gateway_could_be_on(tmp_path: Path) -> None:
+    client, _ = _gateway_client(tmp_path)
+    body = client.get("/api/gateway").json()
+    assert body["enabled"] is True
+    assert body["configured"] == "auto"
+    assert [p["device"] for p in body["ports"]] == ["/dev/ttyUSB0", "/dev/ttyUSB1"]
+    assert body["ports"][1]["description"] == "CP2102"
+
+
+def test_choosing_a_port_applies_it_and_remembers_it(tmp_path: Path) -> None:
+    client, gateway = _gateway_client(tmp_path)
+    body = client.put("/api/gateway", json={"device": "/dev/ttyUSB1"}).json()
+
+    assert body["configured"] == "/dev/ttyUSB1"
+    assert gateway.config == DeviceConfig(explicit_path="/dev/ttyUSB1")
+    saved = load_settings(tmp_path / "campo.settings.json")
+    assert saved.serial_device == "/dev/ttyUSB1"
+
+    client.put("/api/gateway", json={"device": "auto"})
+    assert gateway.config == DeviceConfig(auto=True)
+
+
+def test_an_empty_port_choice_is_refused(tmp_path: Path) -> None:
+    client, _ = _gateway_client(tmp_path)
+    assert client.put("/api/gateway", json={"device": "  "}).status_code == 422
+
+
+def test_a_station_without_gateway_says_so(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    assert client.get("/api/gateway").json()["enabled"] is False
+    assert client.put("/api/gateway", json={"device": "COM3"}).status_code == 409
+
+
+def test_the_page_has_its_icon(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    response = client.get("/favicon.png")
+    assert response.status_code == 200
+    assert response.content[:4] == b"\x89PNG"
+    assert 'href="/favicon.png"' in client.get("/").text

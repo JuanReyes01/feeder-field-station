@@ -15,7 +15,11 @@ The same entry point is frozen into the executable a biologist double-clicks
 its database in a CICG folder in the user's home, finds the gateway on its
 own (the one USB serial port there is), opens the browser on the interface,
 and keeps the console window open if it fails to start, so the reason can be
-read.
+read. ``--instalar`` puts it in the Linux application menu (desktop.py).
+
+Which port the gateway is on: ``--serial-device`` when given, otherwise the
+port last chosen in the interface (saved next to the database,
+adapters/settings.py), otherwise ``auto``.
 """
 
 from __future__ import annotations
@@ -32,15 +36,15 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
-from feeder_station import __version__
-from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
+from feeder_station import __version__, desktop
+from feeder_station.adapters.serial_gateway import AUTO_DEVICE, SerialGateway, device_config_for
+from feeder_station.adapters.settings import load_settings, settings_path_for
 from feeder_station.adapters.store import Store
 from feeder_station.app import create_app
 from feeder_station.config import StationConfig
 
 DEFAULT_DB_PATH = "station.db"
 FROZEN_DB_PATH = Path("CICG") / "estacion.db"  # under the user's home
-AUTO_DEVICE = "auto"
 
 
 def is_frozen() -> bool:
@@ -68,13 +72,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--serial-device",
-        default=AUTO_DEVICE,
+        default=None,
         help=(
             "Explicit serial device path (/dev/ttyUSB0, COM3) -- step 1 of the "
             "device resolution order (adapters/serial_gateway.py::"
-            "resolve_device). The default, 'auto', takes the only USB serial "
-            "port there is and reports the link down when there are several."
+            "resolve_device). Left out: the port last chosen in the interface, "
+            f"else '{AUTO_DEVICE}', which takes the only USB serial port there "
+            "is and reports the link down when there are several."
         ),
+    )
+    parser.add_argument(
+        "--instalar",
+        action="store_true",
+        help="Linux executable: add 'Estación CICG' to the application menu, then exit.",
+    )
+    parser.add_argument(
+        "--desinstalar",
+        action="store_true",
+        help="Linux executable: remove it from the application menu (the data stays), then exit.",
     )
     parser.add_argument(
         "--open-browser",
@@ -129,6 +144,8 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
     config = StationConfig.load(argv)
     Path(args.db_path).parent.mkdir(parents=True, exist_ok=True)
     store = Store(args.db_path)
+    settings_path = settings_path_for(args.db_path)
+    serial_device = args.serial_device or load_settings(settings_path).serial_device
 
     gateway: SerialGateway | None = None
     if not args.no_gateway:
@@ -136,18 +153,34 @@ def build_app(argv: Sequence[str]) -> tuple[FastAPI, argparse.Namespace]:
         # real, supported shape here too -- the radio not being plugged
         # in yet must never crash station startup; the gateway thread
         # just reports the link down and keeps retrying.
-        gateway = SerialGateway(device_config(args.serial_device))
+        gateway = SerialGateway(device_config_for(serial_device))
 
-    app = create_app(config=config, store=store, gateway=gateway)
+    app = create_app(config=config, store=store, gateway=gateway, settings_path=settings_path)
     return app, args
 
 
-def device_config(serial_device: str | None) -> DeviceConfig:
-    """``--serial-device``: a path wins outright; ``auto`` (or nothing) asks
-    for the only USB serial port there is."""
-    if serial_device is None or serial_device == AUTO_DEVICE:
-        return DeviceConfig(auto=True)
-    return DeviceConfig(explicit_path=serial_device)
+def _desktop_command(args: argparse.Namespace) -> int:
+    """``--instalar`` / ``--desinstalar``; returns the exit status."""
+    if sys.platform == "win32":
+        print("En Windows la estación se instala con cicg-estacion-setup.exe.")
+        return 2
+    if not is_frozen():
+        print(
+            "--instalar es para el ejecutable; desde el código fuente usa 'uv run feeder-station'."
+        )
+        return 2
+    if args.desinstalar:
+        removed = desktop.uninstall(Path.home())
+        print("Quitado del menú de aplicaciones:" if removed else "No estaba instalado.")
+        for path in removed:
+            print(f"  {path}")
+        print(f"Los datos de la estación siguen en {Path.home() / FROZEN_DB_PATH.parent}.")
+        return 0
+    written = desktop.install(Path(sys.executable), Path.home())
+    print("Listo: busca 'Estación CICG' en tus aplicaciones.")
+    for path in written:
+        print(f"  {path}")
+    return 0
 
 
 def _open_browser_when_listening(port: int, *, timeout_s: float = 30.0) -> None:
@@ -167,6 +200,9 @@ def _open_browser_when_listening(port: int, *, timeout_s: float = 30.0) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     resolved_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    early, _ = _build_parser().parse_known_args(resolved_argv)
+    if early.instalar or early.desinstalar:
+        raise SystemExit(_desktop_command(early))
     try:
         app, args = build_app(resolved_argv)
         print(f"Estación CICG {__version__}", flush=True)

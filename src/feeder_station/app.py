@@ -22,12 +22,18 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
-from feeder_station.adapters.serial_gateway import LinkState
+from feeder_station.adapters.serial_gateway import (
+    AUTO_DEVICE,
+    LinkState,
+    SerialGateway,
+    device_config_for,
+)
+from feeder_station.adapters.settings import StationSettings, save_settings
 from feeder_station.adapters.specimen_import import read_specimens
 from feeder_station.adapters.store import SpecimenRow, Store, StoredEvent
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
@@ -142,6 +148,11 @@ class TrapProfileRequest(BaseModel):
     name: str | None = None
     has_latch: bool | None = None
     setup_done: bool | None = None
+
+
+class GatewayPortRequest(BaseModel):
+    # A device path (/dev/ttyUSB0, COM3) or "auto".
+    device: str
 
 
 class NewSpecimenRequest(BaseModel):
@@ -494,6 +505,7 @@ def create_app(
     clock: Clock | None = None,
     store: Store | None = None,
     gateway: _HealthReportingGateway | None = None,
+    settings_path: Path | None = None,
 ) -> FastAPI:
     resolved_config = config or StationConfig.load()
     resolved_clock: Clock = clock or StationClock()
@@ -573,6 +585,9 @@ def create_app(
     app.state.config = resolved_config
     app.state.store = store
     app.state.gateway = gateway
+    # Where the interface's own choices are saved (adapters/settings.py);
+    # None keeps them for this run only.
+    app.state.settings_path = settings_path
     # design.md section 7's concurrency table, "Registry" row: "One
     # threading.Lock, owned by the shell... because domain/ stays free of
     # concurrency primitives." Before this slice, exactly one thread (the
@@ -1322,6 +1337,63 @@ def create_app(
                 app.state.broadcaster.unsubscribe(queue)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    def _gateway_json(gateway: SerialGateway) -> dict[str, Any]:
+        config = gateway.config
+        state = gateway.link_state
+        return {
+            "enabled": True,
+            "configured": AUTO_DEVICE if config.auto else config.explicit_path,
+            "connected": state.connected,
+            "device": state.device,
+            "last_error": state.last_error,
+            "ports": [
+                {"device": device, "description": description, "usb": usb}
+                for device, description, usb in gateway.available_ports()
+            ],
+        }
+
+    @app.get("/api/gateway")
+    def gateway_port() -> dict[str, Any]:
+        """Which port the gateway is on, and every port it could be on."""
+        gateway = app.state.gateway
+        if not isinstance(gateway, SerialGateway):
+            return {
+                "enabled": False,
+                "configured": None,
+                "connected": False,
+                "device": None,
+                "last_error": None,
+                "ports": [],
+            }
+        return _gateway_json(gateway)
+
+    @app.put("/api/gateway")
+    def set_gateway_port(body: GatewayPortRequest) -> dict[str, Any]:
+        """The operator picks the gateway's port; it is tried at once and
+        remembered for the next start (unless ``--serial-device`` is given
+        then, which still wins)."""
+        gateway = app.state.gateway
+        if not isinstance(gateway, SerialGateway):
+            raise HTTPException(
+                status_code=409, detail="La estación arrancó sin gateway (--no-gateway)."
+            )
+        device = body.device.strip()
+        if not device:
+            raise HTTPException(status_code=422, detail="Elige un puerto.")
+        gateway.reconfigure(device_config_for(device))
+        try:
+            save_settings(app.state.settings_path, StationSettings(serial_device=device))
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Se usa el puerto, pero no se pudo guardar: {exc}"
+            ) from exc
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return _gateway_json(gateway)
+
+    @app.get("/favicon.png", include_in_schema=False)
+    def favicon() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "favicon.png", media_type="image/png")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:

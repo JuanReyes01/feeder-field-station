@@ -23,6 +23,8 @@ from feeder_station.adapters.serial_gateway import (
     DeviceConfig,
     SerialGateway,
     SerialPort,
+    device_config_for,
+    open_failure_reason,
     resolve_device,
     unresolved_reason,
 )
@@ -130,6 +132,78 @@ def test_an_explicit_device_still_wins_over_auto() -> None:
     ports = [_ListedPort("COM4", vid=0x10C4, pid=0xEA60)]
     config = DeviceConfig(explicit_path="COM9", auto=True)
     assert resolve_device(config, by_id_entries=list, list_ports=lambda: ports) == "COM9"
+
+
+def test_device_config_for_maps_the_flag_and_the_interface_choice() -> None:
+    assert device_config_for(None) == DeviceConfig(auto=True)
+    assert device_config_for("auto") == DeviceConfig(auto=True)
+    assert device_config_for("COM3") == DeviceConfig(explicit_path="COM3")
+
+
+def test_a_port_that_will_not_open_is_explained_in_words_an_operator_can_act_on() -> None:
+    missing = serial.SerialException(2, "could not open port /dev/ttyUSB0: No such file")
+    assert open_failure_reason("/dev/ttyUSB0", missing).startswith(
+        "el puerto /dev/ttyUSB0 no existe"
+    )
+    busy = serial.SerialException(16, "could not open port /dev/ttyUSB0: Device or resource busy")
+    assert "ocupado" in open_failure_reason("/dev/ttyUSB0", busy)
+    windows = serial.SerialException(
+        "could not open port 'COM3': PermissionError(13, 'Acceso denegado.')"
+    )
+    assert "sin permiso para abrir COM3" in open_failure_reason("COM3", windows)
+    other = serial.SerialException("something else")
+    assert open_failure_reason("COM3", other) == "something else"
+
+
+# --- choosing the port from the interface --------------------------------------
+
+
+def test_reconfigure_moves_a_connected_gateway_to_the_new_port() -> None:
+    opened: list[str] = []
+    ports: dict[str, _FakePort] = {}
+
+    def open_port(device: str) -> _FakePort:
+        opened.append(device)
+        ports[device] = _FakePort()
+        return ports[device]
+
+    gateway = SerialGateway(
+        DeviceConfig(explicit_path="/dev/ttyUSB0"), open_port=open_port, sleep=lambda _s: None
+    )
+    assert gateway.ensure_connected()
+
+    gateway.reconfigure(DeviceConfig(explicit_path="/dev/ttyUSB1"))
+    assert gateway.config == DeviceConfig(explicit_path="/dev/ttyUSB1")  # before it applies
+
+    assert gateway.read_frames() == []  # the gateway thread's next read applies it
+    assert ports["/dev/ttyUSB0"].closed
+    assert gateway.link_state.connected is False
+    assert gateway.link_state.last_error is None
+
+    assert gateway.ensure_connected()
+    assert opened == ["/dev/ttyUSB0", "/dev/ttyUSB1"]
+    assert gateway.link_state.device == "/dev/ttyUSB1"
+
+
+def test_reconfigure_reaches_a_gateway_that_is_waiting_to_reconnect() -> None:
+    ports = [
+        _ListedPort("COM4", vid=0x10C4, pid=0xEA60),
+        _ListedPort("COM7", vid=0x1A86, pid=0x7523),
+    ]
+    gateway = SerialGateway(
+        DeviceConfig(auto=True), open_port=lambda _d: _FakePort(), list_ports=lambda: ports
+    )
+    # Two USB ports: auto does not guess, so the default (interruptible)
+    # backoff sleep is where the gateway thread would be waiting.
+    gateway.reconfigure(DeviceConfig(explicit_path="COM7"))
+    assert gateway.ensure_connected()
+    assert gateway.link_state.device == "COM7"
+
+
+def test_available_ports_lists_every_port_and_says_which_are_usb() -> None:
+    ports = [_ListedPort("COM7", vid=0x1A86, pid=0x7523), _ListedPort("COM1", vid=None, pid=None)]
+    gateway = SerialGateway(DeviceConfig(auto=True), list_ports=lambda: ports)
+    assert gateway.available_ports() == [("COM1", "", False), ("COM7", "", True)]
 
 
 # --- 5.3/5.4: reconnect with backoff -------------------------------------------

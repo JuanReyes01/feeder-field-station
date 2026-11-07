@@ -39,9 +39,11 @@ jobs:
           # The oldest supported glibc this runner image has, so the binary
           # also runs on older distributions than the one it was built on.
           - os: ubuntu-22.04
+            name: linux
             binary: dist/cicg-estacion
             asset: cicg-estacion-linux-x86_64
           - os: windows-latest
+            name: windows
             binary: dist/cicg-estacion.exe
             asset: cicg-estacion-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
@@ -66,13 +68,29 @@ jobs:
           kill "$pid" 2>/dev/null || true
           cat smoke.log
           test "$ok" = 1
-      - name: Name the asset
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}", "$env:ProgramFiles" -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after installing Inno Setup" }
+          $version = (uv run --no-sync python -c "import feeder_station; print(feeder_station.__version__)").Trim()
+          & $iscc.FullName "/DAppVersion=$version" packaging/cicg-estacion.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+      - name: Collect the assets
         shell: bash
-        run: mv "${{ matrix.binary }}" "${{ matrix.asset }}"
+        run: |
+          mkdir out
+          cp "${{ matrix.binary }}" "out/${{ matrix.asset }}"
+          if [ -f dist/cicg-estacion-setup.exe ]; then
+            cp dist/cicg-estacion-setup.exe out/cicg-estacion-windows-setup.exe
+          fi
+          ls -l out
       - uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: assets-${{ matrix.name }}
+          path: out/*
           if-no-files-found: error
 
   release:

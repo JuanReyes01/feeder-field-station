@@ -138,11 +138,41 @@ def resolve_device(
     return None
 
 
+AUTO_DEVICE = "auto"
+
+
+def device_config_for(serial_device: str | None) -> DeviceConfig:
+    """``--serial-device`` or the interface's port choice: a path wins
+    outright; ``auto`` (or nothing) asks for the only USB serial port."""
+    if serial_device is None or serial_device == AUTO_DEVICE:
+        return DeviceConfig(auto=True)
+    return DeviceConfig(explicit_path=serial_device)
+
+
 def usb_serial_ports(list_ports: Callable[[], Iterable[ListedPort]]) -> list[str]:
     """Device names of the serial ports that sit on USB -- the only kind a
     gateway can be. A port with no VID is a built-in UART or a Bluetooth
     one, never the gateway."""
     return sorted(port.device for port in list_ports() if port.vid is not None)
+
+
+def open_failure_reason(device: str, exc: serial.SerialException) -> str:
+    """Why ``device`` would not open, in words an operator can act on; the
+    original error stays at the end for whoever has to dig further."""
+    text = str(exc)
+    code = getattr(exc, "errno", None)
+    if code == 2 or "FileNotFoundError" in text:
+        hint = f"el puerto {device} no existe: ¿está conectada la gateway?"
+    elif code == 16 or "busy" in text.lower():
+        hint = f"el puerto {device} está ocupado por otro programa (¿un monitor serial abierto?)"
+    elif code == 13 or "PermissionError" in text:
+        hint = (
+            f"sin permiso para abrir {device}: en Windows suele ser otro programa usándolo; "
+            "en Linux, agrega tu usuario al grupo dialout"
+        )
+    else:
+        return text
+    return f"{hint} ({text})"
 
 
 def unresolved_reason(config: DeviceConfig, list_ports: Callable[[], Iterable[ListedPort]]) -> str:
@@ -199,14 +229,19 @@ class SerialGateway:
         config: DeviceConfig,
         *,
         open_port: Callable[[str], SerialPort] = _default_open_port,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] | None = None,
         clock: Callable[[], float] = time.time,
         by_id_entries: Callable[[], Iterable[tuple[str, str]]] = _default_by_id_entries,
         list_ports: Callable[[], Iterable[ListedPort]] = _default_list_ports,
     ) -> None:
         self._config = config
         self._open_port = open_port
-        self._sleep = sleep
+        # The default backoff sleep wakes early when reconfigure() is called,
+        # so a newly chosen port is tried at once, not after up to 30 s.
+        self._wake = threading.Event()
+        self._sleep = sleep if sleep is not None else self._interruptible_sleep
+        self._config_lock = threading.Lock()
+        self._pending_config: DeviceConfig | None = None
         self._clock = clock
         self._by_id_entries = by_id_entries
         self._list_ports = list_ports
@@ -231,8 +266,42 @@ class SerialGateway:
 
     @property
     def config(self) -> DeviceConfig:
-        """How this gateway was told to find its radio."""
-        return self._config
+        """How this gateway was told to find its radio, including a change
+        the gateway thread has not picked up yet."""
+        with self._config_lock:
+            return self._pending_config or self._config
+
+    def reconfigure(self, config: DeviceConfig) -> None:
+        """Point the gateway at another port, from the interface. Safe from
+        any thread: the gateway thread applies it on its next read (within
+        the port's 1 s read timeout), or at once while it is waiting to
+        reconnect."""
+        with self._config_lock:
+            self._pending_config = config
+        self._wake.set()
+
+    def available_ports(self) -> list[tuple[str, str, bool]]:
+        """Every serial port the OS lists: device, description, and whether
+        it is on USB (the only kind a gateway can be)."""
+        return [
+            (port.device, str(getattr(port, "description", "") or ""), port.vid is not None)
+            for port in sorted(self._list_ports(), key=lambda listed: listed.device)
+        ]
+
+    def _apply_pending_config(self) -> bool:
+        with self._config_lock:
+            pending = self._pending_config
+            self._pending_config = None
+        if pending is None:
+            return False
+        self._config = pending
+        self._disconnect(None)
+        self._last_error = None
+        return True
+
+    def _interruptible_sleep(self, seconds: float) -> None:
+        self._wake.wait(seconds)
+        self._wake.clear()
 
     @property
     def link_state(self) -> LinkState:
@@ -268,7 +337,7 @@ class SerialGateway:
         try:
             port = self._open_port(device)
         except serial.SerialException as exc:
-            self._disconnect(str(exc))
+            self._disconnect(open_failure_reason(device, exc))
             return False
 
         self._port = port
@@ -301,6 +370,8 @@ class SerialGateway:
 
         attempt = 0
         while not stop():
+            if self._apply_pending_config():
+                attempt = 0
             if self.connect_once():
                 return True
             delay = BACKOFF_SCHEDULE_S[min(attempt, len(BACKOFF_SCHEDULE_S) - 1)]
@@ -317,6 +388,8 @@ class SerialGateway:
         upward — the link going down is reported through ``link_state``,
         never as an exception the ingest loop must catch.
         """
+        if self._apply_pending_config():
+            return []
         if self._port is None:
             return []
         try:

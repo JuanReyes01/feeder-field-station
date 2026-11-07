@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from feeder_station.adapters.ingest import _apply_to_registry
 from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.store import Store, trap_state_from_wire
-from feeder_station.cli import build_app
+from feeder_station.cli import build_app, main
 from feeder_station.config import DEFAULT_CHANNEL_BUDGET_FRAMES_PER_S_LORA, StationConfig
 from feeder_station.domain import frames, payloads
 from feeder_station.domain.events import (
@@ -107,13 +107,55 @@ def test_the_executable_keeps_its_database_in_a_cicg_folder(
     assert args.open_browser is True
 
 
-def test_a_source_run_keeps_the_old_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_source_run_keeps_the_old_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delattr(sys, "frozen", raising=False)
     _, args = build_app(["--no-gateway"])
 
     assert args.db_path == "station.db"
     assert args.open_browser is False
+
+
+def test_the_port_chosen_in_the_interface_is_used_at_the_next_start(tmp_path: Path) -> None:
+    (tmp_path / "campo.settings.json").write_text('{"serial_device": "/dev/ttyUSB3"}')
+    app, _ = build_app(["--db-path", str(tmp_path / "campo.db")])
+    assert app.state.gateway is not None
+    assert app.state.gateway.config == DeviceConfig(explicit_path="/dev/ttyUSB3")
+    assert app.state.settings_path == tmp_path / "campo.settings.json"
+
+
+def test_an_explicit_serial_device_flag_still_wins(tmp_path: Path) -> None:
+    (tmp_path / "campo.settings.json").write_text('{"serial_device": "/dev/ttyUSB3"}')
+    app, _ = build_app(["--db-path", str(tmp_path / "campo.db"), "--serial-device", "/dev/ttyUSB0"])
+    assert app.state.gateway is not None
+    assert app.state.gateway.config == DeviceConfig(explicit_path="/dev/ttyUSB0")
+
+
+def test_instalar_is_only_for_the_executable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    with pytest.raises(SystemExit) as stopped:
+        main(["--instalar"])
+    assert stopped.value.code == 2
+    assert "ejecutable" in capsys.readouterr().out
+
+
+def test_instalar_from_the_executable_installs_and_does_not_start_a_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe = tmp_path / "cicg-estacion"
+    exe.write_bytes(b"\x7fELF fake")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    with pytest.raises(SystemExit) as stopped:
+        main(["--instalar"])
+    assert stopped.value.code == 0
+    assert (tmp_path / "home/.local/share/applications/cicg-estacion.desktop").exists()
+    assert not (tmp_path / "home/CICG").exists()  # no server, no database
 
 
 def test_serial_device_auto_is_the_same_as_leaving_it_out(tmp_path: Path) -> None:

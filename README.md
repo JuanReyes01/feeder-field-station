@@ -76,15 +76,28 @@ uv run pytest -q               # the tests
 
 Open `http://<the station's address>:8000` from a phone on the same network.
 
-`--serial-device` defaults to `auto`: the one USB serial port there is. With
-several boards plugged in (the bench: gateway plus a trap on USB) it does not
-guess; pass the gateway's port, `--serial-device /dev/ttyUSB0` or `COM3`.
+Which port the gateway is on: `--serial-device` when given; otherwise the
+port last chosen in the interface (the "Gateway" screen, saved next to the
+database as `<db>.settings.json`); otherwise `auto`, the one USB serial port
+there is. With several boards plugged in (the bench: gateway plus a trap on
+USB) `auto` does not guess: choose the port on the Gateway screen, or pass
+`--serial-device /dev/ttyUSB0` / `COM3`.
 
 ## The executable (Windows and Linux)
 
-Every `v*` tag builds a single-file executable for Linux and Windows and
-attaches both to that GitHub release (`.github/workflows/release.yml`,
-`packaging/cicg-estacion.spec`). Double-clicking it, with no flags:
+Every `v*` tag builds a single-file executable for Linux and Windows, plus a
+Windows installer, and attaches them to that GitHub release
+(`.github/workflows/release.yml`, `packaging/cicg-estacion.spec`,
+`packaging/cicg-estacion.iss`):
+
+- Windows: `cicg-estacion-windows-setup.exe` installs "Estación CICG" for the
+  user (Start menu, optional desktop icon, uninstaller); no administrator
+  needed. `cicg-estacion-windows-x86_64.exe` is the same program, portable.
+- Linux: `chmod +x cicg-estacion-linux-x86_64 && ./cicg-estacion-linux-x86_64
+  --instalar` copies it to `~/.local/bin` and adds "Estación CICG" to the
+  application menu; `--desinstalar` takes it out (the data stays).
+
+Started from the menu or double-clicked, with no flags, it:
 
 - keeps the database in `CICG/estacion.db` in the user's home folder;
 - finds the gateway on its own (`--serial-device auto`);

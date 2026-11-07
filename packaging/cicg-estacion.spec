@@ -5,7 +5,10 @@
 #
 # Output: dist/cicg-estacion (Linux) or dist/cicg-estacion.exe (Windows).
 # .github/workflows/release.yml runs exactly this on both systems for every
-# v* tag and attaches the results to the GitHub release.
+# v* tag and attaches the results to the GitHub release; on Windows it then
+# wraps the .exe in an installer (cicg-estacion.iss).
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 a = Analysis(
@@ -28,4 +31,7 @@ exe = EXE(
     # and it is where the address and any startup error are shown.
     console=True,
     upx=False,
+    # Windows shows it on the .exe, the Start menu and the taskbar. Linux
+    # binaries carry no icon: `--instalar` puts static/icon.png in the menu.
+    icon=os.path.join(SPECPATH, "cicg-estacion.ico") if sys.platform == "win32" else None,
 )
