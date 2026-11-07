@@ -152,6 +152,13 @@ class Trap:
     # `command_set_targets`/`restore_desired_tags` (`desired_tags`).
     reported_targets_version: int | None = None
     reported_tags: tuple[bytes, ...] | None = None
+    # The highest list version this station has ever sent this trap. A trap
+    # ignores any version it has already started to receive, even one it
+    # never finished (components/target_list), so the next list must be
+    # newer than both what the trap confirmed and what was last sent:
+    # numbering from the confirmed version alone reused a number while a list
+    # was in flight, and the trap then ignored every list after it.
+    requested_targets_version: int | None = None
     # In-flight `TARGETS` reassembly (`domain/targets_reassembly.py`) -- pure,
     # transient, never persisted directly: losing an *incomplete* generation
     # on a station restart is safe (a fresh `GET_TARGETS` simply asks again),
@@ -296,6 +303,21 @@ class Registry:
             node_id, Command(kind=CommandKind.SET_TARGETS, targets_version=targets_version)
         )
         self._traps[node_id].desired_tags = tuple(tags)
+        self.note_requested_targets_version(node_id, targets_version)
+
+    def note_requested_targets_version(self, node_id: int, targets_version: int) -> None:
+        """Remember the highest list version sent to this trap (also replayed
+        from the store at boot)."""
+        trap = self._traps.setdefault(node_id, Trap(node_id=node_id))
+        trap.requested_targets_version = max(trap.requested_targets_version or 0, targets_version)
+
+    def next_targets_version(self, node_id: int) -> int:
+        """The version for a new list: newer than anything the trap confirmed
+        and anything this station already sent it."""
+        trap = self._traps.get(node_id)
+        if trap is None:
+            return 1
+        return max(trap.targets_version or 0, trap.requested_targets_version or 0) + 1
 
     def _set_pending(self, node_id: int, command: Command) -> None:
         """Shared by every `command_*` method: create the trap on first
@@ -639,6 +661,8 @@ class Registry:
                         else [tag.hex().upper() for tag in trap.reported_tags]
                     ),
                     "reported_targets_version": trap.reported_targets_version,
+                    # The highest list version this station has sent it.
+                    "requested_targets_version": trap.requested_targets_version,
                     # Whether the two facts above actually agree, compared by
                     # content (a set, not wire order) -- `None` for "we don't
                     # know yet" (no `TARGETS` reply), never conflated with

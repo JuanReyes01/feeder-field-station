@@ -249,7 +249,9 @@ function clockNote(t) {
 }
 
 function listNote(t) {
-  if (t.pending_command === "set_targets") return ["Enviando a la trampa…", "info"];
+  if (t.pending_command === "set_targets") {
+    return t.reachable ? ["Enviando a la trampa…", "info"] : ["Sin conexión; la recibe al conectarse", "warn"];
+  }
   if (t.targets_match === true) return ["Confirmada por la trampa", "ok"];
   if (t.targets_match === false) return ["Distinta en la trampa; se corrige sola", "warn"];
   return ["Sin confirmar todavía", "muted"];
@@ -590,7 +592,7 @@ function renderControl(t) {
           : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}
       </div>
       ${t.pending_command || t.test_fire_pending ? `<div class="banner banner-info"><div>${pending}: esperando confirmación de la trampa…</div><button onclick="cancelCommand(${t.node_id})">Cancelar</button></div>` : ""}
-      <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un sujeto de su lista; el mismo tag no la vuelve a disparar en 10 min. "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
+      <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un sujeto de su lista; el mismo tag no la vuelve a disparar hasta que respondas la captura (o 10 min). "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
     </div>
     <div class="card"><h2>Últimos comandos</h2><div id="log-rows" class="muted">Cargando…</div></div>
   </div>`;

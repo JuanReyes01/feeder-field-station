@@ -43,5 +43,11 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   registrar captura; "Desarmar para mantenimiento" la deja suelta.
 - Al responder una captura ("Capturado" o "Sin colibrí") la trampa vuelve a
   aceptar ese mismo tag.
+- La lista de interés ya no se queda en "Enviando a la trampa…": cada lista
+  nueva lleva un número que la trampa no ha visto, y si la trampa sigue
+  reportando sin confirmarla, se reenvía con otro número. Se reintenta al
+  menos cada 30 s.
+- Enviar una lista ya no cancela un Armar ni deja la trampa suelta después de
+  "Disparar (prueba)": la lista espera y sale cuando la trampa confirma.
 - En Windows, la estación comprueba su reloj contra un servidor de hora antes
   de pasárselo a las trampas.

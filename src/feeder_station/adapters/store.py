@@ -1825,6 +1825,9 @@ class Store:
                 # race, with nothing counted or flagged.
                 _unreadable("SET_TARGETS tags", latest_targets.fields.get("tags"))
             registry.restore_desired_tags(node_id, tags)
+            sent_version = latest_targets.fields.get("targets_version")
+            if isinstance(sent_version, int):
+                registry.note_requested_targets_version(node_id, sent_version)
 
         latest: StoredEvent | None = None
         latest_kind: CommandKind | None = None

@@ -4,7 +4,7 @@ themselves, unknown readings, Excel import and reading export."""
 import csv
 import io
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -14,11 +14,16 @@ from feeder_station.adapters.clock import StationClock
 from feeder_station.adapters.serial_gateway import DeviceConfig, SerialGateway
 from feeder_station.adapters.settings import load_settings
 from feeder_station.adapters.store import Store
-from feeder_station.app import create_app, reconcile_targets
+from feeder_station.app import (
+    create_app,
+    finish_test_fires,
+    reconcile_targets,
+    renumber_unconfirmed_lists,
+)
 from feeder_station.domain import payloads
-from feeder_station.domain.commands import CommandKind
+from feeder_station.domain.commands import Command, CommandKind
 from feeder_station.domain.events import StationEvent
-from feeder_station.domain.traps import TrapState
+from feeder_station.domain.traps import Registry, TrapState
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 TAG_A = bytes.fromhex("03843D3C797055")
@@ -599,3 +604,118 @@ def test_the_individuals_database_imports_with_codes_projects_and_lost_tags(
     _heartbeat(client, 1)
     assert _change(client, action="add", entries=["cicg_1"])["changed"] == 1
     assert store.wanted_tags_for(1) == [TAG_A]
+
+
+def _registry(client: TestClient) -> Registry:
+    registry: Registry = client.app.state.registry  # type: ignore[attr-defined]
+    return registry
+
+
+def test_a_new_list_never_reuses_a_number_still_in_flight(tmp_path: Path) -> None:
+    """A trap ignores a version it already started to receive, so reusing one
+    while a list is in flight left the trap ignoring every list after it."""
+    client, _ = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)  # the trap holds version 1
+    _change(client, action="add", tags=[HEX_A])
+    trap = _registry(client).trap(1)
+    assert trap.pending_command is not None
+    assert trap.pending_command.targets_version == 2
+    _change(client, action="add", tags=[HEX_B])  # before the trap confirms 2
+    assert trap.pending_command.targets_version == 3
+
+
+def test_the_last_number_sent_survives_a_restart(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    _change(client, action="add", tags=[HEX_A])  # sent as 2, never confirmed
+    registry = Registry(silence_after=timedelta(minutes=5))
+    store.rehydrate(registry)
+    assert registry.next_targets_version(1) == 3
+
+
+def test_a_list_waits_for_a_pending_arm_instead_of_replacing_it(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    registry = _registry(client)
+    client.post("/api/traps/1/arm")
+    _change(client, action="add", tags=[HEX_A])
+    trap = registry.trap(1)
+    assert trap.pending_command is not None
+    assert trap.pending_command.kind is CommandKind.ARM
+    assert trap.desired_tags == (TAG_A,)
+    # Once the trap confirms the arm and reports its list, the list goes out.
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    registry.restore_reported_targets(1, targets_version=1, tags=())
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    assert reconcile_targets(store, registry, StationClock(), at) == [1]
+    assert trap.pending_command is not None
+    assert trap.pending_command.kind is CommandKind.SET_TARGETS
+
+
+def test_a_test_fire_is_not_left_released_by_a_list(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    client.post("/api/traps/1/test-fire")
+    _change(client, action="add", tags=[HEX_A])  # waits: the test fire keeps the slot
+    trap = registry.trap(1)
+    assert trap.pending_command is not None
+    assert trap.pending_command.kind is CommandKind.DISARM
+    registry.heartbeat(1, TrapState.IDLE, at=at, targets_version=1)
+    assert finish_test_fires(store, registry, StationClock(), at) == [1]
+    assert trap.pending_command is not None
+    assert trap.pending_command.kind is CommandKind.ARM
+
+
+def test_a_list_already_in_flight_does_not_hold_a_test_fire_released(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.IDLE, at=at, targets_version=1)
+    registry.command_set_targets(1, targets_version=2, at=at, tags=[TAG_A])
+    registry.trap(1).rearm_after_test_fire = True
+    assert finish_test_fires(store, registry, StationClock(), at) == [1]
+    pending = registry.trap(1).pending_command
+    assert pending is not None
+    assert pending.kind is CommandKind.ARM
+
+
+def test_an_unconfirmed_list_gets_a_new_number_while_the_trap_keeps_reporting(
+    tmp_path: Path,
+) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    _change(client, action="add", tags=[HEX_A])  # version 2
+    registry = _registry(client)
+    trap = registry.trap(1)
+    sent = datetime.now(UTC)
+    for _ in range(3):
+        assert trap.pending_command is not None
+        trap.pending_command = trap.pending_command.sent(sent)
+    later = sent + timedelta(seconds=5)
+    # Nothing heard since the last send: maybe out of range, so no new number.
+    assert renumber_unconfirmed_lists(store, registry, StationClock(), later) == []
+    # The trap reports, still on its old version: version 2 got dropped.
+    registry.heartbeat(1, TrapState.IDLE, at=later, targets_version=1)
+    assert renumber_unconfirmed_lists(store, registry, StationClock(), later) == [1]
+    assert trap.pending_command is not None
+    assert (trap.pending_command.targets_version, trap.pending_command.attempts) == (3, 0)
+    latest = store.latest(1, app_module.OPERATOR_SET_TARGETS)
+    assert latest is not None
+    assert latest.fields["targets_version"] == 3
+
+
+def test_a_list_is_resent_at_least_every_30_s() -> None:
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    listed = Command(kind=CommandKind.SET_TARGETS, targets_version=2, attempts=9, last_sent_at=at)
+    arm = Command(kind=CommandKind.ARM, attempts=9, last_sent_at=at)
+    later = at + timedelta(seconds=31)
+    assert listed.due_for_resend(later)
+    assert not arm.due_for_resend(later)

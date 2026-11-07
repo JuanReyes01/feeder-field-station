@@ -350,6 +350,7 @@ _TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
     "armed_via_remote_command_at": ("armed_via_remote_command_at",),
     # GET_TARGETS/TARGETS (docs/protocol/messages.md, added 2026-09-27):
     "reported_targets_version": ("reported_targets_version",),
+    "requested_targets_version": ("requested_targets_version",),
     "reported_tags": ("reported_targets", "targets_match"),
     # `targets_reassembly` has no view() key of its own -- it is a transient,
     # in-progress buffer (`domain/targets_reassembly.py`), never rendered
@@ -385,6 +386,7 @@ _VIEW_KEYS = frozenset(
         "armed_via_remote_command_at",
         "reported_targets",
         "reported_targets_version",
+        "requested_targets_version",
         "targets_match",
         "targets_fetch_pending",
         "test_fire_pending",

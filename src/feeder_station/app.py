@@ -40,6 +40,7 @@ from feeder_station.adapters.updates import UpdateChecker
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
 from feeder_station.config import StationConfig
 from feeder_station.domain import event_log, pacing, payloads
+from feeder_station.domain.commands import CommandKind
 from feeder_station.domain.events import (
     OPERATOR_ARM,
     OPERATOR_CANCEL_COMMAND,
@@ -342,9 +343,20 @@ def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
 def _push_targets(
     store: Store, registry: Registry, clock: Clock, *, node_id: int, tags: Sequence[bytes]
 ) -> None:
-    """Ask one trap to hold this list, durably first. Caller holds ``registry_lock``."""
+    """Ask one trap to hold this list, durably first. Caller holds ``registry_lock``.
+
+    A trap has one slot for a pending command. An arm, a disarm or a test fire
+    in flight keeps it: the list waits (``desired_tags`` already says what is
+    wanted) and :func:`reconcile_targets` sends it once that is confirmed. A
+    list must never knock out an arm, or the trap is left released."""
     trap = registry.trap(node_id)
-    next_version = (trap.targets_version or 0) + 1
+    pending = trap.pending_command
+    if trap.rearm_after_test_fire or (
+        pending is not None and pending.kind is not CommandKind.SET_TARGETS
+    ):
+        registry.restore_desired_tags(node_id, tags)
+        return
+    next_version = registry.next_targets_version(node_id)
     _record_operator_event(
         store,
         clock,
@@ -377,6 +389,8 @@ def reconcile_targets(store: Store, registry: Registry, clock: Clock, at: dateti
     pushed: list[int] = []
     for trap in registry.traps():
         if not trap.is_reachable(at) or trap.pending_command is not None:
+            continue
+        if trap.rearm_after_test_fire:
             continue
         if trap.reported_tags is None or trap.pending_targets_fetch is not None:
             continue
@@ -433,7 +447,12 @@ def finish_test_fires(
     send ARM. Caller holds ``registry_lock``."""
     armed: list[int] = []
     for trap in registry.traps():
-        if not trap.rearm_after_test_fire or trap.pending_command is not None:
+        pending = trap.pending_command
+        # A list still in flight does not hold the trap released: the ARM
+        # takes the slot and reconcile_targets sends the list again after.
+        if not trap.rearm_after_test_fire or (
+            pending is not None and pending.kind is not CommandKind.SET_TARGETS
+        ):
             continue
         if not trap.is_reachable(at) or trap.state is TrapState.ARMED:
             continue
@@ -442,6 +461,47 @@ def finish_test_fires(
         registry.command_arm(trap.node_id, at=at)
         armed.append(trap.node_id)
     return armed
+
+
+# Resends of one list version before giving it a new number. A trap that keeps
+# answering heartbeats with the old version after this many has dropped that
+# version (a list left half-received is never accepted again under the same
+# number), so only a newer one can get through.
+_LIST_SENDS_BEFORE_NEW_VERSION = 3
+
+
+def renumber_unconfirmed_lists(
+    store: Store | None, registry: Registry, clock: Clock, at: datetime
+) -> list[int]:
+    """Give a new version to a list the trap keeps not confirming while it is
+    plainly listening. Caller holds ``registry_lock``."""
+    renumbered: list[int] = []
+    if store is None:
+        return renumbered
+    for trap in registry.traps():
+        command = trap.pending_command
+        if command is None or command.kind is not CommandKind.SET_TARGETS:
+            continue
+        if command.attempts < _LIST_SENDS_BEFORE_NEW_VERSION or command.last_sent_at is None:
+            continue
+        # It must have reported since the last send: silence means out of
+        # range, where a new number would not help.
+        if not trap.is_reachable(at) or trap.last_seen is None:
+            continue
+        if trap.last_seen <= command.last_sent_at:
+            continue
+        old_version = command.targets_version
+        _push_targets(
+            store, registry, clock, node_id=trap.node_id, tags=store.wanted_tags_for(trap.node_id)
+        )
+        _LOG.info(
+            "trap %04X never confirmed list version %s; sent it as version %s",
+            trap.node_id,
+            old_version,
+            registry.trap(trap.node_id).requested_targets_version,
+        )
+        renumbered.append(trap.node_id)
+    return renumbered
 
 
 def _reading_of(event: StoredEvent) -> Reading | None:
@@ -512,6 +572,7 @@ def _run_reconcile_loop(
             with lock:
                 pushed = reconcile_targets(store, registry, clock, now())
                 pushed += finish_test_fires(store, registry, clock, now())
+                pushed += renumber_unconfirmed_lists(store, registry, clock, now())
             if pushed:
                 publish({"type": "traps_changed"})
         except Exception:  # noqa: BLE001 - one bad pass must not end the loop for good
@@ -904,11 +965,7 @@ def create_app(
         # cannot raise.
         tags = [bytes.fromhex(tag) for tag in body.tags]
         with app.state.registry_lock:
-            try:
-                current_version = app.state.registry.trap(node_id).targets_version
-            except KeyError:
-                current_version = None
-            next_version = (current_version or 0) + 1
+            next_version = app.state.registry.next_targets_version(node_id)
 
             # trap-commands spec.md: nothing anywhere stored what a trap is
             # hunting before this slice -- `encode_set_targets` had no

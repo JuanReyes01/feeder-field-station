@@ -51,6 +51,10 @@ RESEND_BACKOFF_S: tuple[float, ...] = (
     300.0,
 )
 
+# A target list is what a trap hunts with, so it is never left waiting minutes
+# between resends: once the trap is back in range it gets the list within this.
+SET_TARGETS_MAX_RESEND_S = 30.0
+
 
 class CommandKind(str, Enum):
     ARM = "arm"
@@ -126,7 +130,10 @@ class Command:
         if self.last_sent_at is None:
             return True
         index = min(self.attempts - 1, len(RESEND_BACKOFF_S) - 1)
-        return now - self.last_sent_at >= timedelta(seconds=RESEND_BACKOFF_S[index])
+        delay = RESEND_BACKOFF_S[index]
+        if self.kind is CommandKind.SET_TARGETS:
+            delay = min(delay, SET_TARGETS_MAX_RESEND_S)
+        return now - self.last_sent_at >= timedelta(seconds=delay)
 
     def sent(self, at: datetime) -> Command:
         """A new value recording that this command was just (re)sent."""
