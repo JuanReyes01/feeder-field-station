@@ -94,11 +94,17 @@
   .event .text { flex: 1 1 240px; }
   .step { display: flex; flex-direction: column; gap: 8px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
-  input, select {
+  input, select, textarea {
     min-height: 44px; padding: 8px 12px; border: 1px solid #8A968F; border-radius: 6px;
     font: inherit; font-size: 16px; background: var(--surface); color: var(--ink);
   }
+  textarea { resize: vertical; font-family: var(--mono); font-size: 15px; }
   input[type=checkbox] { width: 24px; height: 24px; min-height: 0; }
+  button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 13px; background: var(--soft); color: var(--muted); }
+  .chip.ok { background: var(--accent-soft); color: var(--accent-ink); }
+  .chip.info { background: var(--info-soft); color: var(--info-ink); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn-ink); }
   .check { flex-direction: row; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
   code { font-family: var(--mono); font-size: 13px; background: var(--soft); padding: 2px 6px; border-radius: 4px; }
   .hidden-file { position: absolute; left: -9999px; }
@@ -143,7 +149,10 @@ const TRAP_TABS = {
 };
 
 const data = { overview: null, health: null, specimens: null, gateway: null, update: null };
-const ui = { filter: "all", period: "1", visitTrap: "", search: "", trapSearch: "", picks: new Set(), message: "", updateHidden: false };
+const ui = {
+  filter: "all", period: "1", visitTrap: "", trapSearch: "", message: "", updateHidden: false,
+  filters: { species: "", day: "", text: "", status: "" }, scope: "all", entries: "",
+};
 
 // The real list has more than a thousand individuals: a screen shows what
 // matters and search reaches the rest.
@@ -316,20 +325,6 @@ function toggleInterestEverywhere(tag) {
   return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: !subject.all_traps, node_ids: [] }));
 }
 
-async function markPicked(allTraps) {
-  const tags = [...ui.picks];
-  if (!tags.length) { ui.message = "Selecciona al menos un individuo."; render(true); return; }
-  ui.picks.clear();
-  await act("/api/specimens/interest", jsonBody("POST", { tags, all_traps: allTraps, node_ids: [] }));
-}
-
-function togglePick(tag, checked) {
-  if (checked) ui.picks.add(tag); else ui.picks.delete(tag);
-  $("pick-count").textContent = ui.picks.size
-    ? count(ui.picks.size, "seleccionado", "seleccionados")
-    : "Selecciona varios para marcarlos de una vez";
-}
-
 function registerUnknown(tag) {
   return act(`/api/specimens/${tag}`, jsonBody("PATCH", { registered: true }));
 }
@@ -366,7 +361,7 @@ async function importExcel(input) {
   });
   input.value = "";
   if (!result) return;
-  const parts = [`Importados: ${result.created} nuevos, ${result.updated} actualizados.`];
+  const parts = [`Importados: ${result.created} nuevos, ${result.updated} actualizados, ${result.dated} con fecha de captura.`];
   if (result.error_count) parts.push(`${count(result.error_count, "fila", "filas")} sin importar: ${result.errors.slice(0, 3).join(" ")}`);
   if (result.warning_count) parts.push(`${count(result.warning_count, "aviso", "avisos")}: ${result.warnings.slice(0, 3).join(" ")}`);
   ui.message = parts.join(" ");
@@ -376,7 +371,6 @@ async function importExcel(input) {
 function setFilter(value) { ui.filter = value; render(true); }
 function setPeriod(value) { ui.period = value; document.activeElement?.blur(); render(true); }
 function setVisitTrap(value) { ui.visitTrap = value; document.activeElement?.blur(); render(true); }
-function setSearch(value) { ui.search = value; renderSubjectRows(); }
 
 function updateBanner() {
   const u = data.update;
@@ -660,86 +654,246 @@ function loadVisits({ nodeId, tag, days }) {
     </tr>`).join("")}</tbody></table>` : '<p class="muted">Sin visitas en este periodo.</p>'));
 }
 
-function setInterestEverywhere(tag, on) {
-  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: on, node_ids: [] }));
-}
-
-function interestNowRows() {
-  const marked = (data.specimens?.specimens || []).filter((s) => s.registered && (s.all_traps || s.trap_ids.length));
-  if (!marked.length) return '<p class="muted">Nadie marcado. Agrega un individuo arriba o usa "Marcar" en la lista.</p>';
-  return marked.map((s) => {
-    const [where] = subjectInterest(s);
-    return `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
-      <a href="#/individuo/${s.tag}" style="flex:1 1 220px;color:inherit"><span class="italic">${escapeHtml(s.species || "Sin especie")}</span> · <span class="mono small">${escapeHtml(s.biomark)}</span></a>
-      <span class="ok small strong">${escapeHtml(where)}</span>
-      <button class="quiet" onclick="setInterestEverywhere('${s.tag}', false)">Quitar</button></div>`;
-  }).join("");
-}
-
 function subjectInterest(s) {
   if (s.all_traps) return ["De interés en todas", "ok"];
   if (s.trap_ids.length) return [`De interés en ${s.trap_ids.map(trapName).join(" y ")}`, "ok"];
   return ["Sin marcar", "muted"];
 }
 
-function renderSubjectRows() {
-  const target = $("subject-rows");
-  if (!target) return;
-  const matching = (data.specimens?.specimens || [])
-    .filter((s) => s.registered && matchesSearch(s, ui.search));
-  const rows = matching.slice(0, MAX_LISTED);
-  const more = matching.length > rows.length
-    ? `<p class="small muted">Mostrando ${rows.length} de ${matching.length}. Usa la búsqueda para encontrar el resto.</p>`
+// Individuos: the CICG's list filtered down to who to mark. The buttons act on
+// exactly what the filters show, in the traps the "Dónde" selector names.
+const NO_FILTERS = { species: "", day: "", text: "", status: "" };
+const NO_SPECIES = "__none__";
+
+function interestLimit() { return data.specimens?.of_interest_limit ?? 81; }
+
+function scopeId() { return ui.scope === "all" ? null : Number(ui.scope); }
+
+function scopeName() { return ui.scope === "all" ? "todas las trampas" : trapName(ui.scope); }
+
+// Wanted where the selector points: every trap, or that one.
+function wantedInScope(s) {
+  return ui.scope === "all" ? s.all_traps : isOfInterest(s, ui.scope);
+}
+
+// What "Quitar" would change: in "todas", any interest at all.
+function removableInScope(s) {
+  return ui.scope === "all" ? (s.all_traps || s.trap_ids.length > 0) : isOfInterest(s, ui.scope);
+}
+
+function dayLabel(day) {
+  return new Date(`${day}T00:00:00`).toLocaleDateString("es-CO", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function registeredSubjects() { return (data.specimens?.specimens || []).filter((s) => s.registered); }
+
+function filteredSubjects() {
+  const f = ui.filters;
+  return registeredSubjects().filter((s) => (!f.species || (f.species === NO_SPECIES ? !s.species : s.species === f.species))
+    && (!f.day || s.capture_days.includes(f.day))
+    && (!f.status || (f.status === "marked") === (s.all_traps || s.trap_ids.length > 0))
+    && matchesSearch(s, f.text))
+    .sort((a, b) => (b.capture_days.at(-1) || "").localeCompare(a.capture_days.at(-1) || "") || a.biomark.localeCompare(b.biomark));
+}
+
+// The fullest list after marking these, mirroring the station's own check:
+// each known trap, plus a trap that connects later when marking in all.
+function fullestAfterAdding(subjects) {
+  const adding = new Set(subjects.map((s) => s.tag));
+  const all = data.specimens?.specimens || [];
+  const ids = ui.scope === "all" ? (data.overview?.traps || []).map((t) => t.node_id).concat(null) : [scopeId()];
+  return ids.map((id) => ({
+    id,
+    count: all.filter((s) => adding.has(s.tag) || (id === null ? s.all_traps : isOfInterest(s, id))).length,
+  })).sort((a, b) => b.count - a.count)[0];
+}
+
+// Where a subject stands in each trap: what the trap itself reported, not what
+// the station asked for.
+function syncChips(s) {
+  const traps = data.overview?.traps || [];
+  const chips = [];
+  for (const t of traps) {
+    const wanted = isOfInterest(s, t.node_id);
+    const has = (t.reported || []).some((r) => r.tag === s.tag);
+    if (wanted && has) chips.push([`En ${t.name}`, "ok"]);
+    else if (wanted) chips.push(t.reachable ? [`Enviando a ${t.name}…`, "info"] : [`${t.name}: lo recibe al conectarse`, "warn"]);
+    else if (has) chips.push(t.reachable ? [`Saliendo de ${t.name}…`, "info"] : [`${t.name}: lo quita al conectarse`, "warn"]);
+  }
+  if (s.all_traps && !traps.length) chips.push(["Todas las trampas, al conectarse", ""]);
+  return chips.map(([text, css]) => `<span class="chip ${css}">${escapeHtml(text)}</span>`).join(" ");
+}
+
+function changeSummary(result, action) {
+  const n = result.changed;
+  const verb = action === "add" ? (n === 1 ? "Marcado" : "Marcados") : (n === 1 ? "Quitado" : "Quitados");
+  const parts = [n ? `${verb} ${n} en ${scopeName()}.` : "Nada cambió."];
+  if (result.unchanged) parts.push(`${result.unchanged} ya ${result.unchanged === 1 ? "estaba" : "estaban"} así.`);
+  if (result.created.length) parts.push(`Registrados como nuevos: ${result.created.join(", ")}.`);
+  if (result.missing.length) parts.push(`No encontrados: ${result.missing.join(", ")}.`);
+  if (result.ambiguous.length) parts.push(`Anillo de varios individuos, usa el biomark: ${result.ambiguous.join(", ")}.`);
+  return parts.join(" ");
+}
+
+async function changeInterest(action, body) {
+  const result = await act("/api/specimens/interest/change", jsonBody("POST", { action, node_id: scopeId(), ...body }));
+  if (!result) return null;
+  ui.message = changeSummary(result, action);
+  render(true);
+  return result;
+}
+
+function markOne(tag) { return changeInterest("add", { tags: [tag] }); }
+function unmarkOne(tag) { return changeInterest("remove", { tags: [tag] }); }
+
+function markFiltered(action) {
+  const subjects = filteredSubjects().filter((s) => (action === "add" ? !wantedInScope(s) : removableInScope(s)));
+  if (!subjects.length) return null;
+  return changeInterest(action, { tags: subjects.map((s) => s.tag) });
+}
+
+async function markEntries(action) {
+  const entries = ui.entries.split(/[\s,;]+/).filter(Boolean);
+  if (!entries.length) { ui.message = "Escribe o pega al menos un biomark o anillo."; render(true); return; }
+  const result = await changeInterest(action, { entries });
+  if (result && !result.missing.length && !result.ambiguous.length) ui.entries = "";
+  render(true);
+}
+
+function setScope(value) { ui.scope = value; document.activeElement?.blur(); render(true); }
+function setFilterValue(name, value) {
+  ui.filters = { ...ui.filters, [name]: value };
+  if (name === "text") renderFilterResults(); else { document.activeElement?.blur(); render(true); }
+}
+function clearFilters() { ui.filters = { ...NO_FILTERS }; render(true); }
+
+function listStatusRows() {
+  const traps = data.overview?.traps || [];
+  const everywhere = registeredSubjects().filter((s) => s.all_traps).length;
+  const head = `<p class="small muted" style="margin:0 0 8px">${count(everywhere, "individuo marcado", "individuos marcados")} en todas las trampas, incluidas las que se conecten después. Cada trampa admite ${interestLimit()}.</p>`;
+  if (!traps.length) return `${head}<p class="muted">Ninguna trampa conectada todavía.</p>`;
+  return head + traps.map((t) => {
+    if (t.has_latch === false) return `<div class="line"><span class="strong">${escapeHtml(t.name)}</span><span class="muted">Solo lector</span></div>`;
+    const [list, css] = t.reachable ? listNote(t) : ["Sin conexión; la recibe al conectarse", "warn"];
+    return `<div class="line"><span><span class="strong">${escapeHtml(t.name)}</span> · ${t.wanted?.length ?? 0} de ${interestLimit()}</span><span class="${css}">${escapeHtml(list)}</span></div>`;
+  }).join("");
+}
+
+function filterOptions(values, selected, anyLabel, label) {
+  return [`<option value="">${anyLabel}</option>`].concat(values.map(([value, n]) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label(value))} (${n})</option>`)).join("");
+}
+
+function tally(values) {
+  const counts = new Map();
+  for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
+  return [...counts];
+}
+
+function renderFilterResults() {
+  const actions = $("filter-actions");
+  const target = $("subject-results");
+  if (!actions || !target) return;
+  const subjects = filteredSubjects();
+  const toAdd = subjects.filter((s) => !wantedInScope(s));
+  const toRemove = subjects.filter(removableInScope);
+  const fullest = toAdd.length ? fullestAfterAdding(toAdd) : null;
+  const over = fullest && fullest.count > interestLimit();
+  const where = fullest && (fullest.id === null ? "una trampa nueva" : trapName(fullest.id));
+  actions.innerHTML = `
+    <div class="strong">${count(subjects.length, "individuo coincide", "individuos coinciden")}</div>
+    <div class="row">
+      <button class="primary" ${toAdd.length && !over ? "" : "disabled"} onclick="markFiltered('add')">${toAdd.length || !subjects.length ? `Marcar ${toAdd.length} en ${escapeHtml(scopeName())}` : "Ya están todos marcados"}</button>
+      <button ${toRemove.length ? "" : "disabled"} onclick="markFiltered('remove')">Quitar ${toRemove.length} de ${escapeHtml(scopeName())}</button>
+      <button class="quiet" onclick="clearFilters()">Limpiar filtros</button>
+    </div>
+    ${over ? `<p class="warn small" style="margin:0">Así ${escapeHtml(where)} quedaría con ${fullest.count} de ${interestLimit()}. Afina los filtros o marca en una sola trampa.</p>` : ""}`;
+  const rows = subjects.slice(0, MAX_LISTED);
+  const more = subjects.length > rows.length
+    ? `<p class="small muted">Mostrando ${rows.length} de ${subjects.length}. Afina los filtros para ver el resto; los botones actúan sobre los ${subjects.length}.</p>`
     : "";
   target.innerHTML = rows.length ? more + rows.map((s) => {
     const [interest, css] = subjectInterest(s);
-    return `<div class="row" style="border-top:1px solid var(--soft);flex-wrap:nowrap">
-      <label class="check"><span class="hidden-file">Seleccionar ${escapeHtml(s.biomark)}</span><input type="checkbox" ${ui.picks.has(s.tag) ? "checked" : ""} onchange="togglePick('${s.tag}', this.checked)"></label>
-      <a href="#/individuo/${s.tag}" class="row between" style="flex:1 1 auto;min-width:0;min-height:52px;padding:8px 4px;color:inherit;text-decoration:none">
-        <span style="flex:2 1 220px"><span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span><br><span class="mono small muted">${escapeHtml(s.biomark)}</span></span>
-        <span style="flex:1 1 110px">${count(s.times_seen, "lectura", "lecturas")}</span>
-        <span class="strong ${css}" style="flex:1 1 170px">${escapeHtml(interest)}</span>
+    const days = s.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (s.capture_days.length > 3 ? ` y ${s.capture_days.length - 3} más` : "");
+    const buttons = [];
+    if (!wantedInScope(s)) buttons.push(`<button class="quiet" onclick="markOne('${s.tag}')">Marcar</button>`);
+    if (removableInScope(s)) buttons.push(`<button class="quiet" onclick="unmarkOne('${s.tag}')">Quitar</button>`);
+    return `<div class="row" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
+      <a href="#/individuo/${s.tag}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
+        <span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
+        <span class="mono small muted"> · ${escapeHtml(s.biomark)}${s.band_number ? ` · anillo ${escapeHtml(s.band_number)}` : ""}</span><br>
+        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
+        <span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
       </a>
-      ${s.all_traps || s.trap_ids.length
-        ? `<button class="quiet" onclick="setInterestEverywhere('${s.tag}', false)">Quitar</button>`
-        : `<button class="quiet" onclick="setInterestEverywhere('${s.tag}', true)">Marcar</button>`}</div>`;
-  }).join("") : '<p class="muted">Ningún individuo coincide. Importa el Excel para cargar la lista.</p>';
+      <div class="row" style="flex:0 0 auto">${buttons.join("")}</div></div>`;
+  }).join("") : '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la lista del CICG.</p>';
 }
 
 function renderIndividuos() {
-  const unknown = (data.specimens?.specimens || []).filter((s) => !s.registered);
+  const all = data.specimens?.specimens || [];
+  const unknown = all.filter((s) => !s.registered);
+  const registered = registeredSubjects();
+  const f = ui.filters;
+  const traps = data.overview?.traps || [];
+  if (ui.scope !== "all" && !trapById(ui.scope)) ui.scope = "all";
+  const scopes = [["all", "Todas las trampas"]].concat(traps.filter((t) => t.has_latch !== false).map((t) => [String(t.node_id), t.name]));
+  const species = tally(registered.map((s) => s.species || NO_SPECIES)).sort((a, b) => (a[0] === NO_SPECIES) - (b[0] === NO_SPECIES) || a[0].localeCompare(b[0]));
+  const days = tally(registered.flatMap((s) => s.capture_days)).sort((a, b) => b[0].localeCompare(a[0]));
   $("screen").innerHTML = `
     <div class="row between">
       <h1>Individuos</h1>
       <div class="row">
-        <label class="button" style="color:var(--ink);flex-direction:row;font-size:15px">Importar Excel<input class="hidden-file" type="file" accept=".xlsx,.xlsm,.csv" onchange="importExcel(this)"></label>
+        <label class="button" style="color:var(--ink);flex-direction:row;font-size:15px">Importar lista del CICG<input class="hidden-file" type="file" accept=".xlsx,.xlsm,.csv" onchange="importExcel(this)"></label>
         <a class="button" href="/api/export/reads.csv">Exportar lecturas</a>
       </div>
     </div>
-    <div class="card"><h2>Agregar individuo</h2>
-      <form onsubmit="addSubject(event)" class="row" style="align-items:flex-end">
+    <div class="card"><h2>Listas en las trampas</h2>${listStatusRows()}</div>
+    <div class="card stack">
+      <div class="row" style="align-items:flex-end">
+        <h2 style="flex:1 1 200px;margin:0">Marcar de interés</h2>
+        <label style="flex:1 1 240px">Dónde<select onchange="setScope(this.value)">${scopes.map(([value, label]) => `<option value="${value}" ${ui.scope === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+      </div>
+      <div class="step">
+        <label>Por biomark o anillo: escribe o pega uno o varios, separados por espacio, coma o línea
+          <textarea rows="2" oninput="ui.entries = this.value" placeholder="900_263007596629 C00103">${escapeHtml(ui.entries)}</textarea></label>
+        <div class="row">
+          <button class="primary" onclick="markEntries('add')">Marcar en ${escapeHtml(scopeName())}</button>
+          <button onclick="markEntries('remove')">Quitar de ${escapeHtml(scopeName())}</button>
+        </div>
+        <p class="small muted" style="margin:0">Un biomark que no está en la lista se registra al marcarlo.</p>
+      </div>
+      <div class="step" style="border-top:1px solid var(--soft);padding-top:12px">
+        <div class="strong">Por filtros</div>
+        <div class="row" style="align-items:flex-end">
+          <label style="flex:2 1 220px">Especie<select onchange="setFilterValue('species', this.value)">${filterOptions(species, f.species, "Todas las especies", (v) => (v === NO_SPECIES ? "Sin especie" : v))}</select></label>
+          <label style="flex:1 1 180px">Día de captura<select ${days.length ? "" : "disabled"} onchange="setFilterValue('day', this.value)">${days.length ? filterOptions(days, f.day, "Cualquier día", dayLabel) : '<option value="">Importa la lista con fechas</option>'}</select></label>
+          <label style="flex:1 1 150px">Estado<select onchange="setFilterValue('status', this.value)">
+            <option value="" ${f.status ? "" : "selected"}>Todos</option>
+            <option value="marked" ${f.status === "marked" ? "selected" : ""}>De interés</option>
+            <option value="unmarked" ${f.status === "unmarked" ? "selected" : ""}>Sin marcar</option></select></label>
+          <label style="flex:2 1 220px">Buscar biomark, anillo o especie<input value="${escapeHtml(f.text)}" oninput="setFilterValue('text', this.value)" placeholder="coruscans"></label>
+        </div>
+        <p class="small muted" style="margin:0">El día es el de marcaje o recaptura según la lista del CICG.</p>
+        <div id="filter-actions" class="stack" style="gap:8px"></div>
+      </div>
+    </div>
+    <div class="card" id="subject-results"></div>
+    <div class="card"><h2>Lecturas desconocidas</h2>
+      <p class="small muted" style="margin:0 0 8px">Tags que leyó una trampa y que no están en la lista del CICG. Casi siempre es una lectura errónea; si es un individuo real, márcalo o regístralo aquí.</p>
+      ${unknown.length ? unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
+        <span class="mono small" style="flex:1 1 180px">${escapeHtml(s.biomark)}</span>
+        <span class="muted">${count(s.times_seen, "lectura", "lecturas")}</span>
+        <div class="row"><button class="quiet" onclick="markOne('${s.tag}')">Marcar en ${escapeHtml(scopeName())}</button>
+        <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar sin marcar</button></div></div>`).join("") : '<p class="muted">Ninguna.</p>'}
+    </div>
+    <details class="card"><summary class="strong" style="cursor:pointer;min-height:28px">Agregar un individuo que no está en la lista</summary>
+      <form onsubmit="addSubject(event)" class="row" style="align-items:flex-end;margin-top:12px">
         <label style="flex:2 1 200px">Biomark (PIT)<input name="pit" required placeholder="900_263007596629"></label>
         <label style="flex:2 1 200px">Especie<input name="species" placeholder="Colibri coruscans"></label>
         <label style="flex:1 1 120px">Anillo<input name="band_number" placeholder="C00103"></label>
-        <label class="row" style="flex:1 1 200px;flex-direction:row;font-size:15px;color:var(--ink)"><input type="checkbox" name="of_interest" checked> De interés en todas las trampas</label>
+        <label class="row" style="flex:1 1 200px;flex-direction:row;font-size:15px;color:var(--ink)"><input type="checkbox" name="of_interest"> De interés en todas las trampas</label>
         <button class="primary">Agregar</button>
-      </form></div>
-    <div class="card"><h2>De interés ahora</h2>${interestNowRows()}</div>
-    <label>Buscar por biomark, especie o anillo<input value="${escapeHtml(ui.search)}" oninput="setSearch(this.value)" placeholder="coruscans"></label>
-    <div class="card row">
-      <span id="pick-count" class="strong" style="flex:1 1 180px">${ui.picks.size ? count(ui.picks.size, "seleccionado", "seleccionados") : "Selecciona varios para marcarlos de una vez"}</span>
-      <button class="primary" onclick="markPicked(true)">Marcar en todas las trampas</button>
-      <button onclick="markPicked(false)">Quitar marca</button>
-    </div>
-    <div class="card" id="subject-rows"></div>
-    <div class="card"><h2>Lecturas desconocidas</h2>
-      <p class="small muted" style="margin:0 0 8px">Tags que leyó una trampa y que no están en la lista. Lo más probable es una lectura errónea. Se conservan, pero no son sujetos ni se pueden marcar de interés.</p>
-      ${unknown.length ? unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
-        <span class="mono small">${escapeHtml(s.biomark)}</span>
-        <span class="muted">${count(s.times_seen, "lectura", "lecturas")}</span>
-        <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar como individuo</button></div>`).join("") : '<p class="muted">Ninguna.</p>'}
-    </div>`;
-  renderSubjectRows();
+      </form></details>`;
+  renderFilterResults();
 }
 
 function renderIndividuo(tag) {

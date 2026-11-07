@@ -302,7 +302,7 @@ def test_an_older_database_keeps_described_subjects_as_registered(tmp_path: Path
 def test_the_page_shows_biomark_and_never_loads_anything_external() -> None:
     html = (Path(app_module.__file__).parent / "static" / "index.html").read_text("utf-8")
     assert "Lectura desconocida" in html
-    assert "Importar Excel" in html
+    assert "Importar lista del CICG" in html
     assert "/api/export/reads.csv" in html
     assert "s.biomark" in html
     assert "://" not in html
@@ -452,3 +452,95 @@ def test_the_update_notice_and_button_go_through_the_checker(tmp_path: Path) -> 
     assert status["latest"] == "0.3.0"
     assert client.post("/api/update").json()["state"] == "done"
     assert [p.name for p in launched] == [name]
+
+
+def _change(client: TestClient, **body: object) -> dict[str, object]:
+    response = client.post("/api/specimens/interest/change", json=body)
+    assert response.status_code == 200, response.text
+    result: dict[str, object] = response.json()
+    return result
+
+
+def test_import_keeps_each_subjects_days_and_a_new_list_replaces_them(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    dated = f"PIT,Species,DateOfPIT\n{BIOMARK_A},X,Oct-14-2013\n{BIOMARK_A},X,Feb-9-2026\n"
+    assert _import(client, dated)["dated"] == 1
+    [row] = client.get("/api/specimens").json()["specimens"]
+    assert row["capture_days"] == ["2013-10-14", "2026-02-09"]
+    _import(client, f"PIT,Species,DateOfPIT\n{BIOMARK_A},X,Feb-10-2026\n")
+    [row] = client.get("/api/specimens").json()["specimens"]
+    assert row["capture_days"] == ["2026-02-10"]
+
+
+def test_typed_biomarks_and_bands_are_marked_and_the_rest_reported(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    result = _change(client, action="add", entries=["c1", "900_263002593695", "Z99", " "])
+    assert (result["changed"], result["missing"]) == (2, ["Z99"])
+    assert set(store.wanted_tags_for(1)) == {TAG_A, TAG_B}
+    assert _desired(client, 1) == {TAG_A, TAG_B}
+
+
+def test_a_typed_pit_nobody_registered_is_registered_and_marked(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    assert _change(client, action="add", entries=[BIOMARK_A])["created"] == [BIOMARK_A]
+    [row] = client.get("/api/specimens").json()["specimens"]
+    assert (row["registered"], row["all_traps"]) == (True, True)
+
+
+def test_removing_a_pit_nobody_registered_registers_nothing(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    assert _change(client, action="remove", entries=[BIOMARK_A])["missing"] == [BIOMARK_A]
+    assert client.get("/api/specimens").json()["specimens"] == []
+
+
+def test_adding_one_trap_keeps_the_others(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    _heartbeat(client, 2)
+    _change(client, action="add", node_id=1, tags=[HEX_A])
+    _change(client, action="add", node_id=2, tags=[HEX_A, HEX_B])
+    assert store.wanted_tags_for(1) == [TAG_A]
+    assert set(store.wanted_tags_for(2)) == {TAG_A, TAG_B}
+
+
+def test_removing_one_trap_from_a_subject_wanted_everywhere(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _import(client)
+    _heartbeat(client, 1)
+    _heartbeat(client, 2)
+    _change(client, action="add", tags=[HEX_A])
+    assert _change(client, action="remove", node_id=1, tags=[HEX_A])["changed"] == 1
+    assert store.wanted_tags_for(1) == []
+    assert store.wanted_tags_for(2) == [TAG_A]
+    assert _change(client, action="remove", node_id=1, tags=[HEX_A])["unchanged"] == 1
+
+
+def test_an_unknown_reading_can_be_marked_in_one_step(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    _read(store, MISREAD, int(datetime.now(UTC).timestamp()))
+    _change(client, action="add", tags=[HEX_MISREAD])
+    [row] = client.get("/api/specimens").json()["specimens"]
+    assert (row["registered"], row["all_traps"]) == (True, True)
+
+
+def test_a_band_two_subjects_share_is_not_guessed(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    _import(client, "PIT,BandNumber\n900_263007596629,C1\n900_263002593695,C1\n")
+    result = _change(client, action="add", entries=["C1"])
+    assert (result["changed"], result["ambiguous"]) == (0, ["C1"])
+
+
+def test_more_than_a_trap_holds_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    _heartbeat(client, 1)
+    limit = client.get("/api/specimens").json()["of_interest_limit"]
+    pits = [f"{0x03843D00000000 + i:014X}" for i in range(limit + 1)]
+    response = client.post(
+        "/api/specimens/interest/change", json={"action": "add", "entries": pits}
+    )
+    assert response.status_code == 422
+    assert "Trampa 0001" in response.json()["detail"]
+    assert client.get("/api/specimens").json()["specimens"] == []

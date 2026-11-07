@@ -3,13 +3,21 @@
 The real list has one row per capture event, so a tag can repeat; the newest
 non-empty value of each field wins, and a tag listed under two species is
 reported rather than silently resolved. The ``PIT`` column holds BioMark.
+
+Every row's date is kept, so a subject recaptured on three days has three:
+those are the days the operator filters by. ``DateOfPIT`` (``Feb-9-2026``) is
+read first and ``DateOfPIT_MM-DD-YYYY`` (``2/9/2026`` or ``02/09/26``) is the
+fallback; a two-digit year means 20YY.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date, datetime
 
 from openpyxl import load_workbook
 
@@ -25,12 +33,95 @@ _FIELD_COLUMNS = {
     "band_number": ("bandnumber", "band_number", "anillo"),
 }
 
+# Month names as the CICG writes them (English), plus Spanish for a list typed
+# here. Read by hand so the result never depends on the computer's locale.
+_MONTHS = {
+    name: number
+    for number, names in enumerate(
+        (
+            ("jan", "ene"),
+            ("feb",),
+            ("mar",),
+            ("apr", "abr"),
+            ("may",),
+            ("jun",),
+            ("jul",),
+            ("aug", "ago"),
+            ("sep", "set"),
+            ("oct",),
+            ("nov",),
+            ("dec", "dic"),
+        ),
+        start=1,
+    )
+    for name in names
+}
+_NAMED_MONTH = re.compile(r"([A-Za-z]{3})[A-Za-z]*[-/ ](\d{1,2})[-/ ](\d{2}|\d{4})")
+_SLASHED = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{2}|\d{4})")
+_ISO = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+
+
+def _year(text: str) -> int:
+    return 2000 + int(text) if len(text) == 2 else int(text)
+
+
+def _day(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _common_date(value: object) -> date | None:
+    """A spreadsheet date cell or an ISO date, whatever the column."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    match = _ISO.fullmatch(str(value).strip().split(" ")[0])
+    return _day(int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def _named_month_date(value: object) -> date | None:
+    found = _common_date(value)
+    if found is not None:
+        return found
+    match = _NAMED_MONTH.fullmatch(str(value).strip())
+    if match is None or match[1].lower() not in _MONTHS:
+        return None
+    return _day(_year(match[3]), _MONTHS[match[1].lower()], int(match[2]))
+
+
+def _slashed_date(day_first: bool) -> Callable[[object], date | None]:
+    def parse(value: object) -> date | None:
+        found = _common_date(value)
+        if found is not None:
+            return found
+        match = _SLASHED.fullmatch(str(value).strip())
+        if match is None:
+            return None
+        first, second = int(match[1]), int(match[2])
+        month, day = (second, first) if day_first else (first, second)
+        return _day(_year(match[3]), month, day)
+
+    return parse
+
+
+# In priority order: the first column with a readable date wins for a row.
+_DATE_COLUMNS: tuple[tuple[tuple[str, ...], Callable[[object], date | None]], ...] = (
+    (("dateofpit",), _named_month_date),
+    (("dateofpit_mm-dd-yyyy", "date"), _slashed_date(day_first=False)),
+    (("fecha", "fecha_captura", "fecha de captura"), _slashed_date(day_first=True)),
+)
+
 
 @dataclass
 class ImportedTable:
     specimens: dict[bytes, dict[str, str]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Every day each subject appears on in the list (marking and recaptures).
+    capture_days: dict[bytes, set[date]] = field(default_factory=dict)
 
 
 def _clean(value: object) -> str | None:
@@ -90,6 +181,11 @@ def read_specimens(filename: str, data: bytes) -> ImportedTable:
         table.errors.append("Falta la columna PIT.")
         return table
     columns = {name: _column_of(rows[0], aliases) for name, aliases in _FIELD_COLUMNS.items()}
+    date_columns = [
+        (column, parse)
+        for aliases, parse in _DATE_COLUMNS
+        if (column := _column_of(rows[0], aliases)) is not None
+    ]
 
     for line, row in enumerate(rows[1:], start=2):
         raw_tag = _clean(row[tag_column]) if tag_column < len(row) else None
@@ -113,4 +209,33 @@ def read_specimens(filename: str, data: bytes) -> ImportedTable:
                     f"Fila {line}: {raw_tag} aparece como {specimen[name]} y como {value}."
                 )
             specimen[name] = value
+        _read_date(table, tag, row, line, date_columns)
     return table
+
+
+def _read_date(
+    table: ImportedTable,
+    tag: bytes,
+    row: list[object],
+    line: int,
+    date_columns: list[tuple[int, Callable[[object], date | None]]],
+) -> None:
+    unreadable: str | None = None
+    for column, parse in date_columns:
+        if column >= len(row):
+            continue
+        raw = row[column]
+        if isinstance(raw, date):
+            value: object = raw
+        else:
+            text = _clean(raw)
+            if text is None:
+                continue
+            value = text
+        day = parse(value)
+        if day is not None:
+            table.capture_days.setdefault(tag, set()).add(day)
+            return
+        unreadable = unreadable or str(value)
+    if unreadable is not None:
+        table.warnings.append(f"Fila {line}: no se entiende la fecha ({unreadable}).")

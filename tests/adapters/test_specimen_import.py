@@ -1,4 +1,5 @@
 import io
+from datetime import date, datetime
 
 from openpyxl import Workbook
 
@@ -59,3 +60,45 @@ def test_a_file_without_pit_or_not_a_workbook_says_so() -> None:
 def test_semicolons_from_a_spanish_excel_work() -> None:
     table = read_specimens("lista.csv", b"PIT;Species\n900_263007596629;X\n")
     assert table.specimens[TAG] == {"species": "X"}
+
+
+DATED = "PIT,Species,DateOfPIT,DateOfPIT_MM-DD-YYYY\n"
+
+
+def test_each_row_keeps_its_day_so_recaptures_have_several() -> None:
+    data = (
+        f"{DATED}900_263007596629,X,Oct-14-2013,10/14/2013\n900_263007596629,X,Feb-9-26,02/09/26\n"
+    )
+    table = read_specimens("lista.csv", data.encode())
+    assert table.capture_days[TAG] == {date(2013, 10, 14), date(2026, 2, 9)}
+    assert table.warnings == []
+
+
+def test_the_month_day_year_column_is_the_fallback() -> None:
+    data = f"{DATED}900_263007596629,X,NA,6/29/17\n"
+    assert read_specimens("lista.csv", data.encode()).capture_days[TAG] == {date(2017, 6, 29)}
+
+
+def test_a_spanish_fecha_column_is_day_first() -> None:
+    data = "PIT,Fecha\n900_263007596629,9/2/2026\n900_263007596629,2026-03-20\n"
+    days = read_specimens("lista.csv", data.encode()).capture_days[TAG]
+    assert days == {date(2026, 2, 9), date(2026, 3, 20)}
+
+
+def test_an_unreadable_date_is_reported_and_the_row_still_loads() -> None:
+    data = f"{DATED}900_263007596629,X,ayer,13/45/2020\n"
+    table = read_specimens("lista.csv", data.encode())
+    assert TAG in table.specimens
+    assert TAG not in table.capture_days
+    assert len(table.warnings) == 1
+
+
+def test_an_excel_date_cell_is_read_as_a_date() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["PIT", "DateOfPIT"])
+    sheet.append(["900_263007596629", datetime(2026, 3, 19)])  # noqa: DTZ001 - Excel has no zone
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    table = read_specimens("lista.xlsx", buffer.getvalue())
+    assert table.capture_days[TAG] == {date(2026, 3, 19)}

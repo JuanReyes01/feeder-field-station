@@ -20,6 +20,13 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
 - Individuos: importar la lista del CICG (Excel o CSV), agregar a mano,
   marcar de interés en todas las trampas o en algunas. Los tags que no son de
   nadie quedan como "lectura desconocida".
+- Marcar de interés por filtros: especie, día de captura (marcaje o
+  recaptura, de la lista del CICG), estado o búsqueda; o pegando varios
+  biomark o anillos. Se marca en todas las trampas o en una, avisando antes si
+  una trampa pasaría de 81.
+- Cada individuo muestra si su trampa ya lo tiene, si se le está enviando o si
+  lo recibe al conectarse. Una lectura desconocida se marca de interés en un
+  paso.
 - Visitas agrupadas como en feeder-analysis (3 s sin leer cierran la visita)
   y exportación de lecturas y visitas a CSV.
 - Las trampas aparecen solas al prenderse, con el nombre que sale de su MAC.

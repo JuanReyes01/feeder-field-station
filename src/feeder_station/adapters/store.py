@@ -21,9 +21,9 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -81,7 +81,7 @@ def _boot_count_is_newer(candidate: int, stored: int) -> bool:
     return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,15 @@ CREATE TABLE IF NOT EXISTS specimen_trap_interest (
     tag     BLOB    NOT NULL,
     node_id INTEGER NOT NULL,
     PRIMARY KEY (tag, node_id)
+);
+
+-- SCHEMA_VERSION 6: the days a subject appears on in the CICG's list (its
+-- marking and every recapture), as ISO dates. Filled only by importing the
+-- list; the operator filters by them.
+CREATE TABLE IF NOT EXISTS specimen_capture_day (
+    tag BLOB NOT NULL,
+    day TEXT NOT NULL,
+    PRIMARY KEY (tag, day)
 );
 
 -- SCHEMA_VERSION 5: what the station knows about a trap that the trap cannot
@@ -378,6 +387,7 @@ class SpecimenRow:
     age: str | None = None
     registered: bool = False
     trap_ids: tuple[int, ...] = ()
+    capture_days: tuple[str, ...] = ()  # ISO dates from the CICG's list, oldest first
 
 
 @dataclass(frozen=True)
@@ -879,6 +889,11 @@ class Store:
             "SELECT tag, node_id FROM specimen_trap_interest ORDER BY node_id"
         ):
             trap_ids.setdefault(tag, []).append(node_id)
+        capture_days: dict[bytes, list[str]] = {}
+        for tag, day in self._conn.execute(
+            "SELECT tag, day FROM specimen_capture_day ORDER BY day"
+        ):
+            capture_days.setdefault(tag, []).append(day)
         return [
             SpecimenRow(
                 tag=tag,
@@ -892,6 +907,7 @@ class Store:
                 age=age,
                 registered=bool(registered),
                 trap_ids=tuple(trap_ids.get(tag, ())),
+                capture_days=tuple(capture_days.get(tag, ())),
             )
             for (
                 tag,
@@ -960,9 +976,15 @@ class Store:
             raise
         return found
 
-    def register_specimens(self, specimens: Mapping[bytes, Mapping[str, str]]) -> tuple[int, int]:
+    def register_specimens(
+        self,
+        specimens: Mapping[bytes, Mapping[str, str]],
+        capture_days: Mapping[bytes, Iterable[date]] | None = None,
+    ) -> tuple[int, int]:
         """Create or update registered subjects, never touching who is of
         interest: re-importing the list must not change what a trap hunts.
+        A subject's capture days are replaced by the ones given for it, so a
+        corrected date in the list does not leave the wrong one behind.
         Returns how many were created and how many updated."""
         conn = self._conn
         created = 0
@@ -982,6 +1004,14 @@ class Store:
                         conn.execute(
                             f"UPDATE specimen SET {key} = ? WHERE tag = ?", (fields[key], tag)
                         )
+            for tag, days in (capture_days or {}).items():
+                if tag not in specimens:
+                    continue
+                conn.execute("DELETE FROM specimen_capture_day WHERE tag = ?", (tag,))
+                conn.executemany(
+                    "INSERT OR IGNORE INTO specimen_capture_day (tag, day) VALUES (?, ?)",
+                    [(tag, day.isoformat()) for day in days],
+                )
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")

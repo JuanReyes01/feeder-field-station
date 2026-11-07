@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
@@ -143,6 +143,20 @@ class InterestRequest(BaseModel):
 
 class BulkInterestRequest(InterestRequest):
     tags: list[str]
+
+
+class InterestChangeRequest(BaseModel):
+    """Add or remove interest without touching where else a subject is wanted.
+
+    ``node_id`` None means every trap. ``tags`` are hex, as the page lists them;
+    ``entries`` are whatever the operator typed or pasted: a BioMark, a PIT in
+    hex or a band number. A valid PIT nobody registered is registered on add.
+    """
+
+    action: Literal["add", "remove"]
+    node_id: int | None = None
+    tags: list[str] = []
+    entries: list[str] = []
 
 
 class TrapProfileRequest(BaseModel):
@@ -306,6 +320,7 @@ def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
         "band_number": row.band_number,
         "of_interest": row.of_interest,
         "times_seen": row.times_seen,
+        "capture_days": list(row.capture_days),
         # station/live-reads-view precedent: an ISO timestamp, never a raw
         # epoch, is what every other operator-facing time on this page uses.
         "last_seen": (
@@ -371,6 +386,27 @@ def trap_code(node_id: int) -> str:
     MAC (firmware components/node_identity), so this is also what is written
     on the box."""
     return f"{node_id:04X}"
+
+
+def _changed_interest(
+    row: SpecimenRow | None,
+    action: str,
+    node_id: int | None,
+    known_traps: set[int],
+) -> InterestRequest:
+    """Where a subject is wanted after adding or removing one trap (or all)."""
+    all_traps = bool(row and row.of_interest)
+    node_ids = set(row.trap_ids) if row else set()
+    if action == "add":
+        if node_id is None or all_traps:
+            return InterestRequest(all_traps=True)
+        return InterestRequest(node_ids=sorted(node_ids | {node_id}))
+    if node_id is None:
+        return InterestRequest()
+    if all_traps:
+        # Wanted everywhere but this one: the traps known now keep it.
+        return InterestRequest(node_ids=sorted(known_traps - {node_id}))
+    return InterestRequest(node_ids=sorted(node_ids - {node_id}))
 
 
 def _trap_names(node_id: int, place: str | None) -> dict[str, Any]:
@@ -978,10 +1014,17 @@ def create_app(
         return bytes.fromhex(tag_hex)
 
     def _check_list_limit(store: Store, changes: Mapping[bytes, InterestRequest]) -> None:
-        """No trap may end up hunting more than one SET_TARGETS can carry."""
+        """No trap may end up hunting more than one SET_TARGETS can carry,
+        including one that connects later and gets only the "every trap" part.
+        A change may name a subject not registered yet; it counts too."""
         rows = store.specimens()
+        listed = {row.tag for row in rows}
+        new = [change for tag, change in changes.items() if tag not in listed]
         known_traps = {trap.node_id for trap in app.state.registry.traps()}
-        for node_id in known_traps | {n for c in changes.values() for n in c.node_ids}:
+        named = known_traps | {n for c in changes.values() for n in c.node_ids}
+        # None stands for a trap that connects later.
+        traps: list[int | None] = [*sorted(named), None]
+        for node_id in traps:
             count = 0
             for row in rows:
                 change = changes.get(row.tag)
@@ -989,10 +1032,15 @@ def create_app(
                     count += change.all_traps or node_id in change.node_ids
                 else:
                     count += row.of_interest or node_id in row.trap_ids
+            count += sum(1 for change in new if change.all_traps or node_id in change.node_ids)
             if count > _MAX_TARGET_TAGS:
+                which = "una trampa nueva" if node_id is None else f"la Trampa {trap_code(node_id)}"
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Una trampa admite hasta {_MAX_TARGET_TAGS} sujetos de interés.",
+                    detail=(
+                        f"Así {which} quedaría con {count} sujetos de interés; "
+                        f"una trampa admite hasta {_MAX_TARGET_TAGS}."
+                    ),
                 )
 
     @app.get("/api/overview")
@@ -1114,6 +1162,64 @@ def create_app(
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"updated": len(tags)}
 
+    @app.post("/api/specimens/interest/change")
+    def change_interest(body: InterestChangeRequest) -> dict[str, Any]:
+        """Mark or unmark many subjects for one trap or all, by tag or by
+        whatever the operator typed. Says what it could not find."""
+        store = _require_store()
+        rows = {row.tag: row for row in store.specimens()}
+        by_band: dict[str, list[bytes]] = {}
+        for listed in rows.values():
+            if listed.band_number:
+                by_band.setdefault(listed.band_number.strip().lower(), []).append(listed.tag)
+
+        tags: list[bytes] = [_tag_from_path(tag) for tag in body.tags]
+        missing: list[str] = []
+        ambiguous: list[str] = []
+        for entry in body.entries:
+            text = entry.strip()
+            if not text:
+                continue
+            tag = parse_tag(text)
+            if tag is not None and (tag in rows or body.action == "add"):
+                tags.append(tag)
+                continue
+            matches = by_band.get(text.lower(), [])
+            if len(matches) == 1:
+                tags.append(matches[0])
+            elif matches:
+                ambiguous.append(text)
+            else:
+                missing.append(text)
+
+        with app.state.registry_lock:
+            known_traps = {trap.node_id for trap in app.state.registry.traps()}
+            changes: dict[bytes, InterestRequest] = {}
+            unchanged = 0
+            for tag in dict.fromkeys(tags):
+                row = rows.get(tag)
+                change = _changed_interest(row, body.action, body.node_id, known_traps)
+                current = (bool(row and row.of_interest), sorted(row.trap_ids) if row else [])
+                if (change.all_traps, sorted(change.node_ids)) == current:
+                    unchanged += 1
+                    continue
+                changes[tag] = change
+            _check_list_limit(store, changes)
+            created = [tag for tag in changes if tag not in rows]
+            if created:
+                store.register_specimens({tag: {} for tag in created})
+            for tag, change in changes.items():
+                store.set_interest(tag, all_traps=change.all_traps, node_ids=change.node_ids)
+            _push_changed_targets(store, app.state.registry, app.state.clock)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {
+            "changed": len(changes),
+            "unchanged": unchanged,
+            "created": [to_biomark(tag) for tag in created],
+            "missing": missing,
+            "ambiguous": ambiguous,
+        }
+
     @app.post("/api/specimens/import")
     async def import_specimens(request: Request, filename: str = "lista.xlsx") -> dict[str, Any]:
         """The file arrives as the raw request body, so the station needs no
@@ -1123,11 +1229,14 @@ def create_app(
         if len(data) > _MAX_IMPORT_BYTES:
             raise HTTPException(status_code=413, detail="El archivo es demasiado grande.")
         table = await asyncio.to_thread(read_specimens, filename, data)
-        created, updated = await asyncio.to_thread(store.register_specimens, table.specimens)
+        created, updated = await asyncio.to_thread(
+            store.register_specimens, table.specimens, table.capture_days
+        )
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
             "created": created,
             "updated": updated,
+            "dated": len(table.capture_days),
             "errors": table.errors[:50],
             "error_count": len(table.errors),
             "warnings": table.warnings[:50],
