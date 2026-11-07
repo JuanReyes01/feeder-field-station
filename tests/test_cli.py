@@ -286,6 +286,7 @@ _TRAP_FIELD_TO_VIEW_KEYS: dict[str, tuple[str, ...]] = {
     "targets_reassembly": ("targets_fetch_pending",),
     "pending_targets_fetch": ("targets_fetch_pending",),
     "rearm_after_test_fire": ("test_fire_pending",),
+    "resolve_capture_sends_left": ("resolve_capture_pending",),
 }
 
 
@@ -315,6 +316,7 @@ _VIEW_KEYS = frozenset(
         "targets_match",
         "targets_fetch_pending",
         "test_fire_pending",
+        "resolve_capture_pending",
     }
 )
 

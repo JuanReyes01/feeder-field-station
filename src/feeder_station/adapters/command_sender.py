@@ -235,6 +235,33 @@ def _send_get_targets(
     return True
 
 
+def _send_resolve_capture(
+    trap: Trap,
+    *,
+    gateway: CommandGateway,
+    budget: TransmitBudget,
+) -> bool:
+    """One `RESOLVE_CAPTURE` frame (docs/protocol/messages.md): the operator
+    answered the capture, so the trap forgets the tag it last fired on.
+    Empty payload, no answer, so there is nothing to confirm -- the count
+    only goes down on a write that actually happened, the same rule
+    ``_send_get_targets`` follows for its own backoff.
+    """
+    if not budget.try_send():
+        return False
+
+    frame = Frame(
+        msg_type=payloads.RESOLVE_CAPTURE,
+        node_id=trap.node_id,
+        payload=payloads.encode_resolve_capture(),
+    )
+    if not gateway.write_frame(frames.encode(frame)):
+        return False
+
+    trap.resolve_capture_sends_left -= 1
+    return True
+
+
 def send_due_commands(
     registry: Registry,
     *,
@@ -302,6 +329,11 @@ def send_due_commands(
             fetch is not None
             and fetch.due_for_resend(now)
             and _send_get_targets(trap, fetch, gateway=gateway, now=now, budget=budget)
+        ):
+            sent = True
+
+        if trap.resolve_capture_sends_left > 0 and _send_resolve_capture(
+            trap, gateway=gateway, budget=budget
         ):
             sent = True
 

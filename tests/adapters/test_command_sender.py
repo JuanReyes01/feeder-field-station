@@ -551,6 +551,44 @@ def test_a_pending_targets_fetch_is_sent_as_an_empty_get_targets_frame() -> None
     assert registry.trap(7).pending_targets_fetch.attempts == 1  # type: ignore[union-attr]
 
 
+def test_an_answered_capture_sends_resolve_capture_twice_then_stops() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.trap(7).pending_targets_fetch = None  # only RESOLVE_CAPTURE is under test
+    registry.acknowledge(7, at=NOW)
+    gateway = _SpyGateway()
+    store = _FakeStore()
+
+    sent = [
+        send_due_commands(registry, store=store, gateway=gateway, now=NOW, budget=_AllowAllBudget())
+        for _ in range(3)
+    ]
+
+    assert sent == [[7], [7], []]
+    frames_out = [decode(raw) for raw in gateway.written]
+    assert [f.msg_type for f in frames_out] == [payloads.RESOLVE_CAPTURE] * 2
+    assert all(f.node_id == 7 and f.payload == b"" for f in frames_out)
+    assert registry.trap(7).resolve_capture_sends_left == 0
+
+
+def test_a_resolve_capture_the_gateway_refused_is_still_owed() -> None:
+    registry = Registry(silence_after=timedelta(minutes=15))
+    registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)
+    registry.trap(7).pending_targets_fetch = None
+    registry.acknowledge(7, at=NOW)
+
+    sent_to = send_due_commands(
+        registry,
+        store=_FakeStore(),
+        gateway=_SpyGateway(accept=False),
+        now=NOW,
+        budget=_AllowAllBudget(),
+    )
+
+    assert sent_to == []
+    assert registry.trap(7).resolve_capture_sends_left == 2
+
+
 def test_a_targets_fetch_not_yet_due_is_skipped() -> None:
     registry = Registry(silence_after=timedelta(minutes=15))
     registry.heartbeat(node_id=7, state=TrapState.ARMED, targets_version=3, at=NOW)

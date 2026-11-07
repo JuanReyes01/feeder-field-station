@@ -266,6 +266,17 @@ def test_a_capture_keeps_what_the_operator_found(tmp_path: Path) -> None:
     assert capture["biomark"] == BIOMARK_A
 
 
+def test_answering_a_capture_tells_the_trap_to_forget_the_last_tag(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    _heartbeat(client, 1)
+    for result in ("capturado", "sin_colibri"):
+        client.app.state.registry.trap(1).resolve_capture_sends_left = 0  # type: ignore[attr-defined]
+        client.post(f"/api/traps/1/acknowledge?result={result}")
+        [trap] = client.get("/api/traps").json()
+        assert trap["resolve_capture_pending"] is True
+        assert client.app.state.registry.trap(1).resolve_capture_sends_left == 2  # type: ignore[attr-defined]
+
+
 def test_the_log_speaks_spanish_and_skips_heartbeats(tmp_path: Path) -> None:
     client, store = _client(tmp_path)
     _import(client)

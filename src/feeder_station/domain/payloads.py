@@ -41,6 +41,7 @@ GET_STATE = 0x84
 TIME_SYNC = 0x85
 GET_BACKLOG = 0x86
 GET_TARGETS = 0x87
+RESOLVE_CAPTURE = 0x88
 
 TAG_BYTES = 7
 
@@ -318,6 +319,11 @@ def encode_get_state() -> bytes:
 
 def encode_get_targets() -> bytes:
     # GET_TARGETS has no payload; it is answered with TARGETS (messages.md).
+    return b""
+
+
+def encode_resolve_capture() -> bytes:
+    # RESOLVE_CAPTURE has no payload and no answer (messages.md).
     return b""
 
 

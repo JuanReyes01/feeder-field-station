@@ -23,6 +23,9 @@ from . import targets_reassembly
 from .commands import FAULT_CODE_REFUSES, RESEND_BACKOFF_S, Command, CommandKind, ReportedState
 from .targets_reassembly import ReassemblyState
 
+# How many times one operator answer to a capture sends RESOLVE_CAPTURE.
+RESOLVE_CAPTURE_SENDS = 2
+
 
 class TrapState(str, Enum):
     IDLE = "idle"
@@ -164,6 +167,13 @@ class Trap:
     # the released angle and back, without recording a capture. Set by the
     # test-fire route, cleared once the ARM is queued (app.py).
     rearm_after_test_fire: bool = False
+    # RESOLVE_CAPTURE (0x88) frames still to send: the operator answered the
+    # capture banner, so the trap forgets the tag it last fired on and that
+    # bird can fire it again on its next visit. Set by
+    # `Registry.acknowledge`, counted down by
+    # `adapters/command_sender.py::send_due_commands`. Nothing answers it, so
+    # it goes out RESOLVE_CAPTURE_SENDS times; a repeat is harmless.
+    resolve_capture_sends_left: int = 0
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
         if self.last_seen is None:
@@ -550,7 +560,9 @@ class Registry:
             trap.pending_command = None
 
     def acknowledge(self, node_id: int, at: datetime) -> None:
-        self._traps[node_id].capture = None
+        trap = self._traps[node_id]
+        trap.capture = None
+        trap.resolve_capture_sends_left = RESOLVE_CAPTURE_SENDS
 
     def cancel_command(self, node_id: int, at: datetime) -> None:
         """docs/pending.md, "There is no way to cancel a pending command":
@@ -640,6 +652,7 @@ class Registry:
                     "targets_fetch_pending": trap.pending_targets_fetch is not None,
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
                     "test_fire_pending": trap.rearm_after_test_fire,
+                    "resolve_capture_pending": trap.resolve_capture_sends_left > 0,
                     # station/remote-arm-restored: the honest caveat --
                     # `wall_reached()` is still a firmware placeholder
                     # (docs/pending.md), so `state == "armed"` only ever
