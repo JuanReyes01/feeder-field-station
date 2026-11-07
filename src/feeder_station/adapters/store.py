@@ -1067,6 +1067,21 @@ class Store:
             for node_id, name, has_latch, setup_done in rows
         }
 
+    def traps_paused(self) -> bool:
+        """Whether the operator deactivated every trap at once ("Desactivar
+        todas"). Kept here so it survives a restart of the station."""
+        row = self._conn.execute("SELECT value FROM meta WHERE key = 'traps_paused'").fetchone()
+        return row is not None and row[0] == "1"
+
+    def set_traps_paused(self, paused: bool) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES ('traps_paused', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            ("1" if paused else "0",),
+        )
+
     def update_trap_profile(self, node_id: int, fields: Mapping[str, object]) -> None:
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")

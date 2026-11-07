@@ -17,6 +17,7 @@ from feeder_station.adapters.store import Store
 from feeder_station.app import (
     create_app,
     finish_test_fires,
+    keep_traps_paused,
     reconcile_targets,
     renumber_unconfirmed_lists,
 )
@@ -719,3 +720,68 @@ def test_a_list_is_resent_at_least_every_30_s() -> None:
     later = at + timedelta(seconds=31)
     assert listed.due_for_resend(later)
     assert not arm.due_for_resend(later)
+
+
+def test_deactivating_all_disarms_every_trap_that_can_capture(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    for node_id in (1, 2, 3):
+        registry.heartbeat(node_id, TrapState.ARMED, at=at, targets_version=1)
+    client.patch("/api/traps/3/profile", json={"has_latch": False})  # reader only
+    assert client.post("/api/traps/pause").json()["node_ids"] == [1, 2]
+    pending = registry.trap(1).pending_command
+    assert pending is not None
+    assert pending.kind is CommandKind.DISARM
+    assert registry.trap(3).pending_command is None
+    assert client.get("/api/overview").json()["paused"] is True
+    # It is the station's own state: a restart keeps it.
+    assert TestClient(create_app(store=store)).get("/api/overview").json()["paused"] is True
+
+
+def test_a_trap_that_arms_during_the_pause_is_disarmed_again(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    client.post("/api/traps/pause")
+    registry.heartbeat(1, TrapState.IDLE, at=at, targets_version=1)  # confirmed released
+    assert keep_traps_paused(store, registry, StationClock(), at) == []
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)  # rebooted and armed itself
+    registry.heartbeat(2, TrapState.ARMED, at=at, targets_version=1)  # connected meanwhile
+    assert keep_traps_paused(store, registry, StationClock(), at) == [1, 2]
+
+
+def test_activating_all_arms_them_and_ends_the_pause(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    client.post("/api/traps/pause")
+    registry.heartbeat(1, TrapState.IDLE, at=at, targets_version=1)
+    assert client.post("/api/traps/resume").json() == {"paused": False, "node_ids": [1]}
+    pending = registry.trap(1).pending_command
+    assert pending is not None
+    assert pending.kind is CommandKind.ARM
+    assert keep_traps_paused(store, registry, StationClock(), at) == []
+    assert client.get("/api/overview").json()["paused"] is False
+
+
+def test_one_trap_cannot_be_armed_or_test_fired_while_all_are_paused(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    _registry(client).heartbeat(1, TrapState.ARMED, at=datetime.now(UTC), targets_version=1)
+    client.post("/api/traps/pause")
+    assert client.post("/api/traps/1/arm").status_code == 409
+    assert client.post("/api/traps/1/test-fire").status_code == 409
+
+
+def test_a_test_fire_in_progress_is_not_rearmed_after_a_pause(tmp_path: Path) -> None:
+    client, store = _client(tmp_path)
+    registry = _registry(client)
+    at = datetime.now(UTC)
+    registry.heartbeat(1, TrapState.ARMED, at=at, targets_version=1)
+    client.post("/api/traps/1/test-fire")
+    client.post("/api/traps/pause")
+    registry.heartbeat(1, TrapState.IDLE, at=at, targets_version=1)
+    assert finish_test_fires(store, registry, StationClock(), at) == []
+    assert registry.trap(1).rearm_after_test_fire is False

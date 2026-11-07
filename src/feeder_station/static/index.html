@@ -290,6 +290,11 @@ const jsonBody = (method, body) => ({
 });
 
 function arm(id) { return act(`/api/traps/${id}/arm`, { method: "POST" }); }
+function pauseTraps() { return act("/api/traps/pause", { method: "POST" }); }
+function resumeTraps() { return act("/api/traps/resume", { method: "POST" }); }
+function canCapture(t) { return t.has_latch !== false; }
+// Released and nothing left to send: the trap itself says it is deactivated.
+function confirmedPaused(t) { return t.state === "idle" && !t.pending_command; }
 function disarm(id) { return act(`/api/traps/${id}/disarm`, { method: "POST" }); }
 function testFire(id) { return act(`/api/traps/${id}/test-fire`, { method: "POST" }); }
 async function finishPrep(id) {
@@ -410,6 +415,15 @@ function renderBanners() {
   if (data.health?.clock_trust === "unset") {
     parts.push('<div class="banner banner-warn"><div><div class="title">Reloj de la estación sin confirmar</div>Las horas en esta pantalla pueden ser incorrectas.</div></div>');
   }
+  if (data.overview?.paused) {
+    const latched = traps.filter(canCapture);
+    const done = latched.filter(confirmedPaused).length;
+    const detail = latched.length
+      ? `${done} de ${latched.length} ya ${latched.length === 1 ? "confirmó" : "confirmaron"} que ${latched.length === 1 ? "está suelta" : "están sueltas"}.`
+      : "Ninguna trampa conectada.";
+    parts.push(`<div class="banner banner-warn"><div><div class="title">Trampas desactivadas: no van a capturar</div>${detail} Una que se conecte ahora también se desactiva.</div>
+      <button class="primary" onclick="resumeTraps()">Activar todas</button></div>`);
+  }
   const link = data.health?.link;
   if (link && link.connected === false) {
     parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div>${route().screen === "gateway" ? "" : '<a class="button" href="#/gateway">Elegir puerto</a>'}</div>`);
@@ -460,7 +474,8 @@ function renderInicio() {
     </tr>`;
   }).join("");
   $("screen").innerHTML = `
-    <h1>Inicio</h1>
+    <div class="row between"><h1>Inicio</h1>
+      ${o?.paused ? "" : '<button onclick="pauseTraps()">Desactivar todas las trampas</button>'}</div>
     <div class="grid">${stats.map(([label, value]) => `<div class="stat"><div class="small muted">${label}</div><div class="value">${value}</div></div>`).join("")}</div>
     <div class="card scroll"><h2>Trampas</h2>
       ${traps.length
@@ -587,10 +602,12 @@ function renderControl(t) {
         ${t.state_may_be_stale ? '<div class="warn strong">Puede no ser su último reporte.</div>' : ""}
       </div>
       <div class="row">
-        ${armed
-          ? `<button class="big" onclick="testFire(${t.node_id})">Disparar (prueba)</button>
+        ${data.overview?.paused
+          ? '<p class="warn strong" style="margin:0">Todas las trampas están desactivadas. Actívalas desde Inicio.</p>'
+          : armed
+            ? `<button class="big" onclick="testFire(${t.node_id})">Disparar (prueba)</button>
              <button class="big" onclick="disarm(${t.node_id})">Desarmar para mantenimiento</button>`
-          : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}
+            : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}
       </div>
       ${t.pending_command || t.test_fire_pending ? `<div class="banner banner-info"><div>${pending}: esperando confirmación de la trampa…</div><button onclick="cancelCommand(${t.node_id})">Cancelar</button></div>` : ""}
       <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un sujeto de su lista; el mismo tag no la vuelve a disparar hasta que respondas la captura (o 10 min). "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
@@ -1108,7 +1125,10 @@ function render(force) {
   const soundNote = !sound.on ? "Sonido de captura: apagado"
     : sound.ctx?.state === "running" ? "Sonido de captura: encendido" : "Sonido: haz clic en la página";
   $("nav-status").innerHTML = `<div><a href="#/gateway">${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</a></div><div>${count(online, "trampa en línea", "trampas en línea")}</div>
-    <div style="margin-top:10px"><a href="#" onclick="toggleCaptureSound(); return false">${soundNote}</a></div>`;
+    <div style="margin-top:10px"><a href="#" onclick="toggleCaptureSound(); return false">${soundNote}</a></div>
+    <div style="margin-top:10px">${data.overview?.paused
+      ? '<a href="#" onclick="resumeTraps(); return false">Trampas desactivadas: activar todas</a>'
+      : '<a href="#" onclick="pauseTraps(); return false">Desactivar todas las trampas</a>'}</div>`;
   if (!force && isEditing()) return;
   if (r.screen === "trampa") renderTrampa(r.id, r.tab);
   else if (r.screen === "individuos") renderIndividuos();

@@ -49,6 +49,10 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   menos cada 30 s.
 - Enviar una lista ya no cancela un Armar ni deja la trampa suelta después de
   "Disparar (prueba)": la lista espera y sale cuando la trampa confirma.
+- "Desactivar todas las trampas" (en Inicio y en el menú): desarma todas las
+  trampas con pestillo, que quedan sueltas aunque se reinicien, hasta "Activar
+  todas". Mientras tanto, una trampa que se conecte o se arme sola se desarma
+  también, y no se puede armar ni probar una sola.
 - Aviso de captura con sonido: una campana suena en la estación cada 6 s hasta
   que respondes la captura, con notificación del sistema y "¡Captura!" en el
   título de la pestaña. Se activa una vez con "Sonido de captura" en el menú

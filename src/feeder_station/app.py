@@ -51,7 +51,7 @@ from feeder_station.domain.events import (
 )
 from feeder_station.domain.payloads import TAG_BYTES, TAGS_PER_SET_TARGETS_FRAME
 from feeder_station.domain.tags import parse_tag, to_biomark
-from feeder_station.domain.traps import Registry, TrapState
+from feeder_station.domain.traps import Registry, Trap, TrapState
 from feeder_station.domain.visits import DEFAULT_GAP_SECONDS, Reading, Visit, group_visits
 
 # Deliberately one self-contained page: the station must work from a phone on
@@ -446,6 +446,8 @@ def finish_test_fires(
     """Second half of a test fire: once the trap reports it is no longer armed,
     send ARM. Caller holds ``registry_lock``."""
     armed: list[int] = []
+    if store is not None and store.traps_paused():
+        return armed
     for trap in registry.traps():
         pending = trap.pending_command
         # A list still in flight does not hold the trap released: the ARM
@@ -461,6 +463,50 @@ def finish_test_fires(
         registry.command_arm(trap.node_id, at=at)
         armed.append(trap.node_id)
     return armed
+
+
+def _traps_with_a_latch(store: Store, registry: Registry) -> list[Trap]:
+    """Every trap that can capture: all but those set up as reader only (a
+    trap not prepared yet may have a latch, so it counts)."""
+    profiles = store.trap_profiles()
+    return [
+        trap
+        for trap in registry.traps()
+        if (profile := profiles.get(trap.node_id)) is None or profile.has_latch is not False
+    ]
+
+
+def _pause_one(
+    store: Store | None, registry: Registry, clock: Clock, trap: Trap, at: datetime
+) -> None:
+    trap.rearm_after_test_fire = False
+    _record_operator_event(
+        store, clock, node_id=trap.node_id, msg_type=OPERATOR_DISARM, fields={"pause": True}
+    )
+    registry.command_disarm(trap.node_id, at=at)
+
+
+def keep_traps_paused(
+    store: Store | None, registry: Registry, clock: Clock, at: datetime
+) -> list[int]:
+    """While every trap is deactivated, disarm again any trap that connects,
+    comes back in range or arms itself (a trap re-arms on its own at boot and
+    after a release). Caller holds ``registry_lock``."""
+    disarmed: list[int] = []
+    if store is None or not store.traps_paused():
+        return disarmed
+    for trap in _traps_with_a_latch(store, registry):
+        if not trap.is_reachable(at):
+            continue
+        pending = trap.pending_command
+        if pending is not None and pending.kind is CommandKind.DISARM:
+            continue
+        arming = pending is not None and pending.kind is CommandKind.ARM
+        if trap.state is TrapState.IDLE and not arming:
+            continue
+        _pause_one(store, registry, clock, trap, at)
+        disarmed.append(trap.node_id)
+    return disarmed
 
 
 # Resends of one list version before giving it a new number. A trap that keeps
@@ -573,6 +619,7 @@ def _run_reconcile_loop(
                 pushed = reconcile_targets(store, registry, clock, now())
                 pushed += finish_test_fires(store, registry, clock, now())
                 pushed += renumber_unconfirmed_lists(store, registry, clock, now())
+                pushed += keep_traps_paused(store, registry, clock, now())
             if pushed:
                 publish({"type": "traps_changed"})
         except Exception:  # noqa: BLE001 - one bad pass must not end the loop for good
@@ -878,8 +925,50 @@ def create_app(
     # mechanism. That is a hardware gap this route cannot close; what it
     # does not do is overstate it -- see `static/index.html`'s own arm
     # caveat, rendered from `armed_via_remote_command_at` below.
+    def _refuse_while_paused() -> None:
+        store = app.state.store
+        if store is not None and store.traps_paused():
+            raise HTTPException(
+                status_code=409,
+                detail="Las trampas están desactivadas. Actívalas todas desde Inicio.",
+            )
+
+    @app.post("/api/traps/pause")
+    def pause_traps() -> dict[str, Any]:
+        """Deactivate every trap that can capture: each one is disarmed (it
+        stays released, even across a reboot) until "Activar todas". One that
+        connects meanwhile is disarmed too (``keep_traps_paused``)."""
+        store = _require_store()
+        with app.state.registry_lock:
+            store.set_traps_paused(True)
+            traps = _traps_with_a_latch(store, app.state.registry)
+            for trap in traps:
+                _pause_one(store, app.state.registry, app.state.clock, trap, now())
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"paused": True, "node_ids": [trap.node_id for trap in traps]}
+
+    @app.post("/api/traps/resume")
+    def resume_traps() -> dict[str, Any]:
+        """Arm again every trap that can capture."""
+        store = _require_store()
+        with app.state.registry_lock:
+            store.set_traps_paused(False)
+            traps = _traps_with_a_latch(store, app.state.registry)
+            for trap in traps:
+                _record_operator_event(
+                    store,
+                    app.state.clock,
+                    node_id=trap.node_id,
+                    msg_type=OPERATOR_ARM,
+                    fields={"pause": False},
+                )
+                app.state.registry.command_arm(trap.node_id, at=now())
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"paused": False, "node_ids": [trap.node_id for trap in traps]}
+
     @app.post("/api/traps/{node_id}/arm")
     def arm(node_id: int) -> dict[str, Any]:
+        _refuse_while_paused()
         with app.state.registry_lock:
             _record_operator_event(
                 app.state.store, app.state.clock, node_id=node_id, msg_type=OPERATOR_ARM
@@ -903,6 +992,7 @@ def create_app(
         """Release and re-arm, to check the latch: DISARM now, ARM once the
         trap reports it is released (``finish_test_fires``). No capture is
         recorded."""
+        _refuse_while_paused()
         with app.state.registry_lock:
             try:
                 trap = app.state.registry.trap(node_id)
@@ -1117,7 +1207,13 @@ def create_app(
         if store is None:
             for trap in traps:
                 trap.update(**_trap_names(trap["node_id"], None), has_latch=None, setup_done=False)
-            return {"traps": traps, "visits_today": 0, "subjects_today": 0, "captures_today": 0}
+            return {
+                "traps": traps,
+                "visits_today": 0,
+                "subjects_today": 0,
+                "captures_today": 0,
+                "paused": False,
+            }
 
         today = _start_of_today()
         visits = group_visits(_readings(store.reads_between(since_epoch=today)))
@@ -1173,6 +1269,7 @@ def create_app(
                 {v.tag for v in visits if (r := specimens.get(v.tag)) and r.registered}
             ),
             "captures_today": sum(1 for c in store.captures() if c.epoch >= today),
+            "paused": store.traps_paused(),
         }
 
     @app.patch("/api/traps/{node_id}/profile")

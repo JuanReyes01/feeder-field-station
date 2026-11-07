@@ -78,10 +78,14 @@ def describe(msg_type: int, fields: Mapping[str, object], who: str) -> LogEntry 
             "connections", f"La trampa se conectó (arranque {fields.get('boot_count')})"
         )
     if msg_type == OPERATOR_ARM:
+        if fields.get("pause") is False:
+            return LogEntry("commands", "Activar todas: armar enviado")
         return LogEntry("commands", "Armar: enviado")
     if msg_type == OPERATOR_DISARM:
         if fields.get("test_fire"):
             return LogEntry("commands", "Disparo de prueba: enviado")
+        if fields.get("pause"):
+            return LogEntry("commands", "Trampas desactivadas: desarmar enviado")
         return LogEntry("commands", "Desarmar para mantenimiento: enviado")
     if msg_type == OPERATOR_CANCEL_COMMAND:
         return LogEntry("commands", "Comando cancelado")
