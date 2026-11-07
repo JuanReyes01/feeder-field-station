@@ -3,6 +3,8 @@
 # to the GitHub release for that tag.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
+#
+# A tag with a hyphen (v0.2.0-rc1) makes a pre-release.
 name: Release
 
 on:
@@ -86,3 +88,5 @@ jobs:
         with:
           files: assets/*
           generate_release_notes: true
+          # v0.2.0-rc1 and the like: a pre-release, to try the build first.
+          prerelease: ${{ contains(github.ref_name, '-') }}
