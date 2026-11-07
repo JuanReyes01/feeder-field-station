@@ -9,26 +9,30 @@ somebody opening the interface hours after a capture still sees it (S3).
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
+import logging
 import re
 import threading
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
 from feeder_station.adapters.serial_gateway import LinkState
-from feeder_station.adapters.store import SpecimenRow, Store
+from feeder_station.adapters.specimen_import import read_specimens
+from feeder_station.adapters.store import SpecimenRow, Store, StoredEvent
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
 from feeder_station.config import StationConfig
-from feeder_station.domain import pacing
+from feeder_station.domain import event_log, pacing, payloads
 from feeder_station.domain.events import (
     OPERATOR_ARM,
     OPERATOR_CANCEL_COMMAND,
@@ -38,7 +42,9 @@ from feeder_station.domain.events import (
     StationEvent,
 )
 from feeder_station.domain.payloads import TAG_BYTES, TAGS_PER_SET_TARGETS_FRAME
-from feeder_station.domain.traps import Registry
+from feeder_station.domain.tags import parse_tag, to_biomark
+from feeder_station.domain.traps import Registry, TrapState
+from feeder_station.domain.visits import DEFAULT_GAP_SECONDS, Reading, Visit, group_visits
 
 # Deliberately one self-contained page: the station must work from a phone on
 # a local network with no internet, so nothing is fetched from a CDN (S8,
@@ -75,6 +81,9 @@ _MAX_TARGET_TAGS = int(pacing.DEFAULT_CAPACITY) * TAGS_PER_SET_TARGETS_FRAME
 # side slider, design.md 3.2's amendment) is a separate, smaller number
 # applied at render time, never sent here and never stored.
 _READS_VIEW_WINDOW = timedelta(minutes=30)
+_RECONCILE_INTERVAL_SECONDS = 5.0
+_MAX_IMPORT_BYTES = 20 * 1024 * 1024
+_LOG = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -120,6 +129,31 @@ class TargetsRequest(BaseModel):
         return tags
 
 
+class InterestRequest(BaseModel):
+    all_traps: bool = False
+    node_ids: list[int] = []
+
+
+class BulkInterestRequest(InterestRequest):
+    tags: list[str]
+
+
+class TrapProfileRequest(BaseModel):
+    name: str | None = None
+    has_latch: bool | None = None
+    setup_done: bool | None = None
+
+
+class NewSpecimenRequest(BaseModel):
+    pit: str
+    of_interest: bool = False
+    species: str | None = None
+    species_code: str | None = None
+    sex: str | None = None
+    age: str | None = None
+    band_number: str | None = None
+
+
 class SpecimenUpdateRequest(BaseModel):
     """station/specimen-roster (docs/pending.md, "The station has one kind
     of storage and needs two"): an edit to one roster row. Every field is
@@ -135,8 +169,12 @@ class SpecimenUpdateRequest(BaseModel):
     """
 
     species: str | None = None
+    species_code: str | None = None
+    sex: str | None = None
+    age: str | None = None
     band_number: str | None = None
     of_interest: bool | None = None
+    registered: bool | None = None
 
 
 class Broadcaster:
@@ -245,6 +283,13 @@ def _record_operator_event(
 def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
     return {
         "tag": row.tag.hex().upper(),
+        "biomark": to_biomark(row.tag),
+        "registered": row.registered,
+        "all_traps": row.of_interest,
+        "trap_ids": list(row.trap_ids),
+        "species_code": row.species_code,
+        "sex": row.sex,
+        "age": row.age,
         "species": row.species,
         "band_number": row.band_number,
         "of_interest": row.of_interest,
@@ -259,39 +304,162 @@ def _specimen_to_json(row: SpecimenRow) -> dict[str, Any]:
     }
 
 
-def _push_targets_to_every_known_trap(
-    store: Store, registry: Registry, clock: Clock, *, tags: Sequence[bytes]
+def _push_targets(
+    store: Store, registry: Registry, clock: Clock, *, node_id: int, tags: Sequence[bytes]
 ) -> None:
-    """messages.md's open question 2, answered 2026-09-26: target lists are
-    shared by the whole network, not typed per trap -- but R3's per-trap
-    version reconciliation is untouched ("the list is one, the confirmation
-    stays per trap"). Every trap the registry currently knows about gets its
-    own version bump and its own pending command: the exact same
-    ``_record_operator_event`` + ``Registry.command_set_targets`` pair
-    ``PUT /api/traps/{node_id}/targets`` already uses for one trap at a
-    time, called once per known trap here instead of a second, parallel
-    delivery path -- the existing editor, version reconciliation and resend
-    (``adapters/command_sender.py``) apply to this exactly as they did
-    before the roster existed.
+    """Ask one trap to hold this list, durably first. Caller holds ``registry_lock``."""
+    trap = registry.trap(node_id)
+    next_version = (trap.targets_version or 0) + 1
+    _record_operator_event(
+        store,
+        clock,
+        node_id=node_id,
+        msg_type=OPERATOR_SET_TARGETS,
+        fields={"targets_version": next_version, "tags": [tag.hex() for tag in tags]},
+    )
+    registry.command_set_targets(node_id, targets_version=next_version, at=now(), tags=tags)
 
-    Must be called with ``registry_lock`` already held by the caller, the
-    same discipline every other route in this module applies before
-    touching ``app.state.registry`` (design.md section 7's concurrency
-    table).
-    """
-    tag_hexes = [tag.hex() for tag in tags]
+
+def _push_changed_targets(store: Store, registry: Registry, clock: Clock) -> None:
+    """After an interest edit: send each trap its own list, only if it changed.
+    Caller holds ``registry_lock``."""
     for trap in registry.traps():
-        next_version = (trap.targets_version or 0) + 1
-        _record_operator_event(
-            store,
-            clock,
-            node_id=trap.node_id,
-            msg_type=OPERATOR_SET_TARGETS,
-            fields={"targets_version": next_version, "tags": tag_hexes},
-        )
-        registry.command_set_targets(
-            trap.node_id, targets_version=next_version, at=now(), tags=tags
-        )
+        wanted = store.wanted_tags_for(trap.node_id)
+        if set(trap.desired_tags or ()) != set(wanted):
+            _push_targets(store, registry, clock, node_id=trap.node_id, tags=wanted)
+
+
+def reconcile_targets(store: Store, registry: Registry, clock: Clock, at: datetime) -> list[int]:
+    """Lists are sent on their own: bring every reachable trap whose reported
+    list differs from what it should hunt back into line.
+
+    This is what handles a trap that joins for the first time, or one holding an
+    old list from an earlier test, with nobody having to notice. It only acts on
+    a report that is current, and never while a command is outstanding, so it
+    cannot loop: each push waits for its own confirmation and a fresh report
+    before this looks at that trap again. Caller holds ``registry_lock``.
+    """
+    pushed: list[int] = []
+    for trap in registry.traps():
+        if not trap.is_reachable(at) or trap.pending_command is not None:
+            continue
+        if trap.reported_tags is None or trap.pending_targets_fetch is not None:
+            continue
+        if trap.reported_targets_version != trap.targets_version:
+            continue
+        wanted = store.wanted_tags_for(trap.node_id)
+        if set(wanted) != set(trap.reported_tags):
+            _push_targets(store, registry, clock, node_id=trap.node_id, tags=wanted)
+            pushed.append(trap.node_id)
+    return pushed
+
+
+def trap_code(node_id: int) -> str:
+    """How a trap is named: its id in hex. A trap takes its id from its own
+    MAC (firmware components/node_identity), so this is also what is written
+    on the box."""
+    return f"{node_id:04X}"
+
+
+def _trap_names(node_id: int, place: str | None) -> dict[str, Any]:
+    code = trap_code(node_id)
+    return {
+        "code": code,
+        "place": place,
+        "name": f"Trampa {code}" + (f" · {place}" if place else ""),
+    }
+
+
+def finish_test_fires(
+    store: Store | None, registry: Registry, clock: Clock, at: datetime
+) -> list[int]:
+    """Second half of a test fire: once the trap reports it is no longer armed,
+    send ARM. Caller holds ``registry_lock``."""
+    armed: list[int] = []
+    for trap in registry.traps():
+        if not trap.rearm_after_test_fire or trap.pending_command is not None:
+            continue
+        if not trap.is_reachable(at) or trap.state is TrapState.ARMED:
+            continue
+        trap.rearm_after_test_fire = False
+        _record_operator_event(store, clock, node_id=trap.node_id, msg_type=OPERATOR_ARM)
+        registry.command_arm(trap.node_id, at=at)
+        armed.append(trap.node_id)
+    return armed
+
+
+def _reading_of(event: StoredEvent) -> Reading | None:
+    if event.tag is None:
+        return None
+    return Reading(
+        node_id=event.node_id,
+        tag=event.tag,
+        epoch=float(event.node_epoch) if event.node_epoch is not None else event.received_epoch,
+        clock_trusted=event.node_epoch is not None,
+    )
+
+
+def _readings(events: Iterable[StoredEvent]) -> list[Reading]:
+    return [reading for reading in map(_reading_of, events) if reading is not None]
+
+
+def _subject_fields(row: SpecimenRow | None) -> dict[str, Any]:
+    """How a tag reads to a person. A tag nobody registered is not a subject:
+    every marked bird is on the list, so it is most likely a misread."""
+    known = row is not None and row.registered
+    return {
+        "known": known,
+        "species": row.species if row is not None and known else None,
+        "label": (
+            (row.species or "Sin especie") if row is not None and known else "Lectura desconocida"
+        ),
+    }
+
+
+def _local_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=UTC).astimezone().isoformat(timespec="seconds")
+
+
+def _utc_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat(timespec="seconds")
+
+
+def _start_of_today() -> float:
+    return now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _csv_response(
+    filename: str, header: Sequence[str], rows: Iterable[Sequence[object]]
+) -> Response:
+    """UTF-8 with a BOM, so Excel shows the accents right on a double click."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(header)
+    writer.writerows(rows)
+    return Response(
+        content="\ufeff" + buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _run_reconcile_loop(
+    store: Store,
+    registry: Registry,
+    lock: threading.Lock,
+    clock: Clock,
+    stop: threading.Event,
+    publish: Any,
+) -> None:
+    while not stop.wait(_RECONCILE_INTERVAL_SECONDS):
+        try:
+            with lock:
+                pushed = reconcile_targets(store, registry, clock, now())
+                pushed += finish_test_fires(store, registry, clock, now())
+            if pushed:
+                publish({"type": "traps_changed"})
+        except Exception:  # noqa: BLE001 - one bad pass must not end the loop for good
+            _LOG.exception("could not reconcile target lists")
 
 
 def _worker_health(thread: threading.Thread | None, status: WorkerStatus | None) -> dict[str, Any]:
@@ -367,7 +535,20 @@ def create_app(
             app.state.gateway_status = gateway_status
             app.state.scheduler_thread = scheduler_thread
             app.state.scheduler_status = scheduler_status
-            threads = [gateway_thread, scheduler_thread]
+            reconcile_thread = threading.Thread(
+                target=_run_reconcile_loop,
+                args=(
+                    store,
+                    app.state.registry,
+                    app.state.registry_lock,
+                    resolved_clock,
+                    app.state.stop_event,
+                    app.state.broadcaster.publish,
+                ),
+                name="feeder-station-reconcile",
+                daemon=True,
+            )
+            threads = [gateway_thread, scheduler_thread, reconcile_thread]
             for thread in threads:
                 thread.start()
 
@@ -593,8 +774,30 @@ def create_app(
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {"node_id": node_id, "pending_command": "disarm"}
 
+    @app.post("/api/traps/{node_id}/test-fire")
+    def test_fire(node_id: int) -> dict[str, Any]:
+        """Release and re-arm, to check the latch: DISARM now, ARM once the
+        trap reports it is released (``finish_test_fires``). No capture is
+        recorded."""
+        with app.state.registry_lock:
+            try:
+                trap = app.state.registry.trap(node_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="unknown trap") from None
+            _record_operator_event(
+                app.state.store,
+                app.state.clock,
+                node_id=node_id,
+                msg_type=OPERATOR_DISARM,
+                fields={"test_fire": True},
+            )
+            app.state.registry.command_disarm(node_id, at=now())
+            trap.rearm_after_test_fire = True
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"node_id": node_id, "pending_command": "disarm"}
+
     @app.post("/api/traps/{node_id}/acknowledge")
-    def acknowledge(node_id: int) -> dict[str, Any]:
+    def acknowledge(node_id: int, result: str | None = None) -> dict[str, Any]:
         # event-store spec.md, "Capture persists until acknowledged":
         # acknowledgement MUST be a store write, not merely an in-memory
         # flag -- written before the registry changes (13.1/13.2).
@@ -604,6 +807,7 @@ def create_app(
                 app.state.clock,
                 node_id=node_id,
                 msg_type=OPERATOR_CAPTURE_ACKNOWLEDGED,
+                fields={"result": result} if result in ("capturado", "sin_colibri") else None,
             )
             app.state.registry.acknowledge(node_id, at=now())
         app.state.broadcaster.publish({"type": "traps_changed"})
@@ -689,7 +893,7 @@ def create_app(
         """station/specimen-roster: mark a specimen wanted (or not), or
         record its species/band number. Only an edit that actually touches
         ``of_interest`` recomputes and re-pushes the shared target list
-        (:func:`_push_targets_to_every_known_trap`) -- a species/band-number
+        (:func:`_push_changed_targets`) -- a species/band-number
         edit alone must never bump any trap's ``targets_version``.
 
         A specimen is never created here -- pending.md: "the roster grows
@@ -700,7 +904,8 @@ def create_app(
             raise HTTPException(status_code=503, detail="no store configured for this station")
         if not _TAG_HEX_PATTERN.fullmatch(tag_hex):
             raise HTTPException(
-                status_code=422, detail=f"tag must be {TAG_BYTES * 2} hex characters, got {tag_hex!r}"
+                status_code=422,
+                detail=f"tag must be {TAG_BYTES * 2} hex characters, got {tag_hex!r}",
             )
         tag = bytes.fromhex(tag_hex)
         updates = body.model_dump(exclude_unset=True)
@@ -734,17 +939,358 @@ def create_app(
             app.state.store.update_specimen(tag, updates)
 
             if "of_interest" in updates:
-                _push_targets_to_every_known_trap(
-                    app.state.store,
-                    app.state.registry,
-                    app.state.clock,
-                    tags=app.state.store.wanted_tags(),
-                )
+                _push_changed_targets(app.state.store, app.state.registry, app.state.clock)
 
             updated_row = next(row for row in app.state.store.specimens() if row.tag == tag)
 
         app.state.broadcaster.publish({"type": "traps_changed"})
         return _specimen_to_json(updated_row)
+
+    def _require_store() -> Store:
+        store = app.state.store
+        if store is None:
+            raise HTTPException(status_code=503, detail="no store configured for this station")
+        result: Store = store
+        return result
+
+    def _tag_from_path(tag_hex: str) -> bytes:
+        if not _TAG_HEX_PATTERN.fullmatch(tag_hex):
+            raise HTTPException(status_code=422, detail="tag must be 14 hex characters")
+        return bytes.fromhex(tag_hex)
+
+    def _check_list_limit(store: Store, changes: Mapping[bytes, InterestRequest]) -> None:
+        """No trap may end up hunting more than one SET_TARGETS can carry."""
+        rows = store.specimens()
+        known_traps = {trap.node_id for trap in app.state.registry.traps()}
+        for node_id in known_traps | {n for c in changes.values() for n in c.node_ids}:
+            count = 0
+            for row in rows:
+                change = changes.get(row.tag)
+                if change is not None:
+                    count += change.all_traps or node_id in change.node_ids
+                else:
+                    count += row.of_interest or node_id in row.trap_ids
+            if count > _MAX_TARGET_TAGS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Una trampa admite hasta {_MAX_TARGET_TAGS} sujetos de interés.",
+                )
+
+    @app.get("/api/overview")
+    def overview() -> dict[str, Any]:
+        """Everything the home page shows about every trap, in one read."""
+        with app.state.registry_lock:
+            traps: list[dict[str, Any]] = app.state.registry.view(now=now())
+        store = app.state.store
+        if store is None:
+            for trap in traps:
+                trap.update(**_trap_names(trap["node_id"], None), has_latch=None, setup_done=False)
+            return {"traps": traps, "visits_today": 0, "subjects_today": 0, "captures_today": 0}
+
+        today = _start_of_today()
+        visits = group_visits(_readings(store.reads_between(since_epoch=today)))
+        visits_by_node: dict[int, int] = {}
+        for visit in visits:
+            visits_by_node[visit.node_id] = visits_by_node.get(visit.node_id, 0) + 1
+        profiles = store.trap_profiles()
+        specimens = {row.tag: row for row in store.specimens()}
+
+        for trap in traps:
+            node_id = trap["node_id"]
+            profile = profiles.get(node_id)
+            heartbeat = store.latest(node_id, payloads.HEARTBEAT)
+            clock_epoch = heartbeat.fields.get("clock_epoch") if heartbeat else None
+            wanted = store.wanted_tags_for(node_id)
+            trap.update(
+                **_trap_names(node_id, profile.name if profile else None),
+                has_latch=profile.has_latch if profile else None,
+                setup_done=profile.setup_done if profile else False,
+                clock_epoch=clock_epoch,
+                clock_source=heartbeat.fields.get("clock_source") if heartbeat else None,
+                clock_offset_s=(
+                    clock_epoch - heartbeat.received_epoch
+                    if heartbeat and isinstance(clock_epoch, int) and clock_epoch > 0
+                    else None
+                ),
+                visits_today=visits_by_node.get(node_id, 0),
+                wanted=[
+                    {
+                        "tag": tag.hex().upper(),
+                        "biomark": to_biomark(tag),
+                        **_subject_fields(specimens.get(tag)),
+                    }
+                    for tag in wanted
+                ],
+                reported=(
+                    None
+                    if trap["reported_targets"] is None
+                    else [
+                        {
+                            "tag": tag,
+                            "biomark": to_biomark(bytes.fromhex(tag)),
+                            **_subject_fields(specimens.get(bytes.fromhex(tag))),
+                        }
+                        for tag in trap["reported_targets"]
+                    ]
+                ),
+            )
+        return {
+            "traps": traps,
+            "visits_today": len(visits),
+            "subjects_today": len(
+                {v.tag for v in visits if (r := specimens.get(v.tag)) and r.registered}
+            ),
+            "captures_today": sum(1 for c in store.captures() if c.epoch >= today),
+        }
+
+    @app.patch("/api/traps/{node_id}/profile")
+    def update_trap_profile(node_id: int, body: TrapProfileRequest) -> dict[str, Any]:
+        updates = body.model_dump(exclude_unset=True)
+        _require_store().update_trap_profile(node_id, updates)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"node_id": node_id, **updates}
+
+    @app.post("/api/specimens")
+    def add_specimen(body: NewSpecimenRequest) -> dict[str, Any]:
+        store = _require_store()
+        tag = parse_tag(body.pit)
+        if tag is None:
+            raise HTTPException(status_code=422, detail="El PIT no es válido.")
+        fields = {
+            key: value
+            for key, value in body.model_dump(exclude={"pit", "of_interest"}).items()
+            if value is not None
+        }
+        with app.state.registry_lock:
+            if body.of_interest:
+                _check_list_limit(store, {tag: InterestRequest(all_traps=True)})
+            store.register_specimens({tag: fields})
+            if body.of_interest:
+                store.set_interest(tag, all_traps=True, node_ids=[])
+                _push_changed_targets(store, app.state.registry, app.state.clock)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return _specimen_to_json(next(r for r in store.specimens() if r.tag == tag))
+
+    @app.put("/api/specimens/{tag_hex}/interest")
+    def set_interest(tag_hex: str, body: InterestRequest) -> dict[str, Any]:
+        store = _require_store()
+        tag = _tag_from_path(tag_hex)
+        with app.state.registry_lock:
+            _check_list_limit(store, {tag: body})
+            if not store.set_interest(tag, all_traps=body.all_traps, node_ids=body.node_ids):
+                raise HTTPException(status_code=404, detail="unknown specimen")
+            _push_changed_targets(store, app.state.registry, app.state.clock)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return _specimen_to_json(next(r for r in store.specimens() if r.tag == tag))
+
+    @app.post("/api/specimens/interest")
+    def set_interest_for_many(body: BulkInterestRequest) -> dict[str, Any]:
+        store = _require_store()
+        tags = [_tag_from_path(tag) for tag in body.tags]
+        with app.state.registry_lock:
+            _check_list_limit(store, {tag: body for tag in tags})
+            for tag in tags:
+                store.set_interest(tag, all_traps=body.all_traps, node_ids=body.node_ids)
+            _push_changed_targets(store, app.state.registry, app.state.clock)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {"updated": len(tags)}
+
+    @app.post("/api/specimens/import")
+    async def import_specimens(request: Request, filename: str = "lista.xlsx") -> dict[str, Any]:
+        """The file arrives as the raw request body, so the station needs no
+        multipart dependency for this one upload."""
+        store = _require_store()
+        data = await request.body()
+        if len(data) > _MAX_IMPORT_BYTES:
+            raise HTTPException(status_code=413, detail="El archivo es demasiado grande.")
+        table = await asyncio.to_thread(read_specimens, filename, data)
+        created, updated = await asyncio.to_thread(store.register_specimens, table.specimens)
+        app.state.broadcaster.publish({"type": "traps_changed"})
+        return {
+            "created": created,
+            "updated": updated,
+            "errors": table.errors[:50],
+            "error_count": len(table.errors),
+            "warnings": table.warnings[:50],
+            "warning_count": len(table.warnings),
+        }
+
+    def _visit_to_json(
+        visit: Visit, specimens: Mapping[bytes, SpecimenRow], at: float
+    ) -> dict[str, Any]:
+        return {
+            "node_id": visit.node_id,
+            "tag": visit.tag.hex().upper(),
+            "biomark": to_biomark(visit.tag),
+            **_subject_fields(specimens.get(visit.tag)),
+            "start_epoch": visit.start,
+            "duration_s": visit.duration,
+            "reads": visit.reads,
+            "clock_trusted": visit.clock_trusted,
+            "open": at - visit.end <= DEFAULT_GAP_SECONDS,
+        }
+
+    @app.get("/api/visits")
+    def visits(
+        node_id: int | None = None, tag: str | None = None, days: int = 1, limit: int = 300
+    ) -> dict[str, Any]:
+        store = app.state.store
+        if store is None:
+            return {"visits": [], "gap_seconds": DEFAULT_GAP_SECONDS}
+        since = _start_of_today() - (max(days, 1) - 1) * 86400
+        readings = _readings(store.reads_between(since_epoch=since))
+        specimens = {row.tag: row for row in store.specimens()}
+        grouped = group_visits(readings)
+        if node_id is not None:
+            grouped = [v for v in grouped if v.node_id == node_id]
+        if tag is not None:
+            wanted_tag = _tag_from_path(tag)
+            grouped = [v for v in grouped if v.tag == wanted_tag]
+        at = now().timestamp()
+        return {
+            "visits": [_visit_to_json(v, specimens, at) for v in grouped[:limit]],
+            "gap_seconds": DEFAULT_GAP_SECONDS,
+        }
+
+    @app.get("/api/captures")
+    def captures() -> dict[str, Any]:
+        store = app.state.store
+        if store is None:
+            return {"captures": []}
+        specimens = {row.tag: row for row in store.specimens()}
+        return {
+            "captures": [
+                {
+                    "node_id": row.node_id,
+                    "biomark": to_biomark(row.tag) if row.tag else None,
+                    **_subject_fields(specimens.get(row.tag) if row.tag else None),
+                    "epoch": row.epoch,
+                    "result": row.result,
+                }
+                for row in store.captures()
+            ]
+        }
+
+    @app.get("/api/log")
+    def log(kind: str = "all", node_id: int | None = None, limit: int = 100) -> dict[str, Any]:
+        store = app.state.store
+        if store is None:
+            return {"events": []}
+        if kind == "all":
+            msg_types = event_log.LOGGED_MSG_TYPES
+        elif kind in event_log.KIND_MSG_TYPES:
+            msg_types = event_log.KIND_MSG_TYPES[kind]
+        else:
+            raise HTTPException(status_code=422, detail=f"unknown kind {kind!r}")
+        specimens = {row.tag: row for row in store.specimens()}
+        rows: list[dict[str, Any]] = []
+        for event in store.log_events(msg_types, limit=min(limit, 500), node_id=node_id):
+            who = ""
+            if event.tag is not None:
+                subject = _subject_fields(specimens.get(event.tag))
+                name = subject["label"] if subject["known"] else "tag desconocido"
+                who = f"{name} ({to_biomark(event.tag)})"
+            entry = event_log.describe(event.msg_type, event.fields, who)
+            if entry is not None:
+                rows.append(
+                    {
+                        "seq": event.seq,
+                        "node_id": event.node_id,
+                        "kind": entry.kind,
+                        "text": entry.text,
+                        "epoch": event.received_epoch,
+                    }
+                )
+        return {"events": rows}
+
+    @app.get("/api/export/reads.csv")
+    def export_reads() -> Response:
+        store = _require_store()
+        specimens = {row.tag: row for row in store.specimens()}
+        places = {node_id: p.name or "" for node_id, p in store.trap_profiles().items()}
+
+        def rows() -> Iterable[Sequence[object]]:
+            for event in store.reads_between():
+                if event.tag is None:
+                    continue
+                row = specimens.get(event.tag)
+                known = row is not None and row.registered
+                epoch = event.node_epoch if event.node_epoch is not None else event.received_epoch
+                yield (
+                    _local_iso(epoch),
+                    _utc_iso(epoch),
+                    "si" if event.node_epoch is not None else "no",
+                    trap_code(event.node_id),
+                    places.get(event.node_id, ""),
+                    to_biomark(event.tag),
+                    event.tag.hex().upper(),
+                    "registrado" if known else "lectura desconocida",
+                    (row.species or "") if row and known else "",
+                    (row.species_code or "") if row and known else "",
+                    (row.sex or "") if row and known else "",
+                    (row.age or "") if row and known else "",
+                    (row.band_number or "") if row and known else "",
+                )
+
+        stamp = now().astimezone().strftime("%Y%m%d-%H%M")
+        return _csv_response(
+            f"lecturas-cicg-{stamp}.csv",
+            (
+                "fecha_hora_local",
+                "fecha_hora_utc",
+                "hora_confiable",
+                "trampa",
+                "lugar",
+                "biomark",
+                "tag_hex",
+                "clasificacion",
+                "especie",
+                "codigo_especie",
+                "sexo",
+                "edad",
+                "anillo",
+            ),
+            rows(),
+        )
+
+    @app.get("/api/export/visits.csv")
+    def export_visits() -> Response:
+        store = _require_store()
+        specimens = {row.tag: row for row in store.specimens()}
+        places = {node_id: p.name or "" for node_id, p in store.trap_profiles().items()}
+
+        def rows() -> Iterable[Sequence[object]]:
+            for visit in group_visits(_readings(store.reads_between())):
+                row = specimens.get(visit.tag)
+                known = row is not None and row.registered
+                yield (
+                    _local_iso(visit.start),
+                    round(visit.duration, 1),
+                    visit.reads,
+                    "si" if visit.clock_trusted else "no",
+                    trap_code(visit.node_id),
+                    places.get(visit.node_id, ""),
+                    to_biomark(visit.tag),
+                    "registrado" if known else "lectura desconocida",
+                    (row.species or "") if row and known else "",
+                )
+
+        stamp = now().astimezone().strftime("%Y%m%d-%H%M")
+        return _csv_response(
+            f"visitas-cicg-{stamp}.csv",
+            (
+                "inicio_local",
+                "duracion_s",
+                "lecturas",
+                "hora_confiable",
+                "trampa",
+                "lugar",
+                "biomark",
+                "clasificacion",
+                "especie",
+            ),
+            rows(),
+        )
 
     @app.post("/api/export")
     def export(body: ExportRequest) -> dict[str, Any]:

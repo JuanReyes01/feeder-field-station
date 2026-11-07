@@ -4,541 +4,825 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Estación CICG</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: light;
+    --ground: #F3F5F1; --surface: #FFFFFF; --ink: #17211D; --muted: #56635C; --line: #D8DED8;
+    --soft: #EDF0ED; --accent: #0A6657; --accent-soft: #DDEEEA; --accent-ink: #084F44;
+    --warn: #B4460B; --warn-soft: #FBE9DD; --warn-ink: #7E2F05; --info: #1F5FA8;
+    --info-soft: #E3ECF7; --info-ink: #143F70;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
   * { box-sizing: border-box; }
   body {
-    font-family: system-ui, sans-serif; margin: 0; padding: 0 .75rem 2rem;
-    background: #111; color: #eee; font-size: 16px; max-width: 100vw; overflow-x: hidden;
+    margin: 0; background: var(--ground); color: var(--ink); font-size: 15px; line-height: 1.45;
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  header { position: sticky; top: 0; z-index: 10; background: #111; padding-top: .5rem; }
-  h1 { font-size: 1.1rem; font-weight: 600; margin: .5rem 0; }
-  h2 { font-size: 1rem; font-weight: 600; margin: 1.5rem 0 .5rem; }
-
-  .banner { border-radius: 8px; padding: .75rem; margin: .5rem 0; font-size: .95rem; }
-  .banner-clock { background: #402a00; border: 1px solid #a86a00; color: #ffcf7a; }
-  .banner-capture { background: #3a0d0d; border: 2px solid #c93a3a; padding: 1rem; }
-  .banner-capture strong { font-size: 1.05rem; }
-  .banner-capture button {
-    font: inherit; min-height: 44px; min-width: 44px; padding: .6rem 1.1rem; border-radius: 6px;
-    border: 1px solid #c93a3a; background: #c93a3a; color: #fff; font-weight: 600; margin-top: .5rem;
+  .layout { display: flex; flex-wrap: wrap; min-height: 100vh; align-items: stretch; }
+  nav {
+    flex: 1 1 200px; background: var(--ink); color: #fff; padding: 20px 14px;
+    display: flex; flex-direction: column; gap: 6px;
   }
-
-  .trap { border: 1px solid #333; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
-  .trap.no-contact { border-color: #a86a00; }
-  .state { font-weight: 700; text-transform: uppercase; font-size: .8rem; letter-spacing: .05em; }
-  .no-contact-badge { color: #ffb648; font-weight: 700; margin: .3rem 0; }
-  /* WARNING 2 (verify-report-batch2c.md): bold, same weight as
-     .no-contact-badge, not the previous small italic -- doubt about a
-     trap's own state must read at a glance next to "SIN CONTACTO", not
-     as a footnote nobody notices. */
-  .stale-badge { color: #ffcf7a; font-weight: 700; margin: .3rem 0; }
-  /* station/remote-arm-restored: same bold weight as .no-contact-badge and
-     .stale-badge, not a footnote -- an armed trap nobody physically
-     verified must read at a glance, same discipline WARNING 2 already set
-     for .stale-badge. */
-  .arm-caveat { color: #ffcf7a; font-weight: 700; margin: .3rem 0; }
-  .pending { color: #7ec8ff; font-size: .85rem; }
-  .muted { color: #999; font-size: .85rem; }
-  .empty { color: #999; }
-
-  .actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
-  button {
-    font: inherit; min-height: 44px; padding: .6rem 1rem; border-radius: 6px;
-    border: 1px solid #555; background: #222; color: #eee;
+  nav .brand { font-size: 18px; font-weight: 600; padding: 0 10px 14px; }
+  nav a {
+    display: block; min-height: 44px; padding: 10px; border-radius: 6px; color: #fff;
+    text-decoration: none; font-weight: 500;
   }
-
-  .threshold-control { margin: .4rem 0; font-size: .85rem; }
-  .threshold-control input[type=range] { width: 100%; height: 2rem; margin-top: .3rem; }
-
-  .reads { margin-top: .5rem; }
-  .read-group {
-    padding: .3rem .5rem; margin: .25rem 0; border-radius: 6px; background: #1a1a1a;
-    font-size: .85rem; border-left: 3px solid transparent;
+  nav a.on { background: #fff; color: var(--ink); }
+  nav .status {
+    margin-top: 16px; padding: 12px 10px; border-top: 1px solid #3D4A43; font-size: 13px;
+    color: #E4EAE6;
   }
-  .read-group-live { border-left-color: #7ee787; }
-  .read-tag { font-family: monospace; }
-
-  details { margin-top: .6rem; }
-  summary { cursor: pointer; padding: .5rem 0; min-height: 44px; display: flex; align-items: center; }
-  textarea {
-    width: 100%; min-height: 6rem; font: inherit; font-size: 16px; background: #1a1a1a;
-    color: #eee; border: 1px solid #444; border-radius: 6px; padding: .5rem; margin-top: .4rem;
+  main {
+    flex: 999 1 560px; min-width: 0; padding: 24px; display: flex; flex-direction: column; gap: 16px;
   }
-  .field-error { color: #ff8a8a; font-size: .85rem; margin-top: .3rem; }
-  .field-ok { color: #7ee787; font-size: .85rem; margin-top: .3rem; }
-
-  /* station/specimen-roster: an operator manages the roster and marks who
-     is wanted, instead of typing hex strings into each trap
-     (docs/pending.md). */
-  .specimen { border: 1px solid #333; border-radius: 8px; padding: .75rem; margin: .5rem 0; }
-  .specimen input[type=text] {
-    width: 100%; font: inherit; font-size: 16px; background: #1a1a1a; color: #eee;
-    border: 1px solid #444; border-radius: 6px; padding: .5rem; margin: .3rem 0;
+  h1 { margin: 0; font-size: 26px; font-weight: 600; }
+  h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .ok { color: var(--accent); }
+  .warn { color: var(--warn); }
+  .info { color: var(--info); }
+  .italic { font-style: italic; }
+  .strong { font-weight: 600; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 20px; }
+  .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .stack > *, .grid-wide > * { min-width: 0; }
+  .narrow { max-width: 760px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .between { justify-content: space-between; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .grid-wide { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px; }
+  .stat .value { font-size: 28px; font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px; white-space: nowrap; }
+  td { padding: 10px 8px; border-top: 1px solid var(--soft); vertical-align: middle; }
+  button, .button {
+    display: inline-flex; align-items: center; justify-content: center; font: inherit;
+    min-height: 44px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--ink);
+    background: var(--surface); color: var(--ink); cursor: pointer; text-decoration: none;
   }
-  /* The label, not the bare checkbox, is the 44px touch target -- a
-     platform checkbox alone renders far smaller than that on most phones. */
-  .of-interest-toggle {
-    display: flex; align-items: center; gap: .5rem; min-height: 44px; cursor: pointer;
+  button:hover, .button:hover { filter: brightness(.95); }
+  button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.danger { background: var(--warn); border-color: var(--warn); color: #fff; font-weight: 600; }
+  button.quiet { background: transparent; border-color: #8A968F; min-height: 40px; }
+  button.selected { background: var(--ink); color: #fff; }
+  button.big { flex: 1 1 130px; min-height: 48px; font-size: 16px; }
+  .toggle {
+    width: 100%; justify-content: space-between; gap: 12px; text-align: left; min-height: 48px;
+    border-color: #8A968F; margin-bottom: 8px;
   }
-  .of-interest-toggle input[type=checkbox] { width: 1.5rem; height: 1.5rem; }
-  .roster-counter { margin: .3rem 0 .6rem; }
+  .toggle.on { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
+  .banner {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 16px; border-radius: 6px;
+  }
+  .banner .title { font-size: 18px; font-weight: 600; }
+  .banner-warn { background: var(--warn-soft); color: var(--warn-ink); }
+  .banner-info { background: var(--info-soft); color: var(--info-ink); }
+  .banner-ok { background: var(--accent-soft); color: var(--accent-ink); }
+  .state { font-size: 34px; font-weight: 600; line-height: 1.2; }
+  .line { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--soft); }
+  .line > :last-child { text-align: right; font-weight: 500; }
+  .event { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 0; border-top: 1px solid var(--soft); }
+  .event .time { flex: 0 0 74px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .event .kind { flex: 0 0 84px; font-size: 13px; font-weight: 600; }
+  .event .text { flex: 1 1 240px; }
+  .step { display: flex; flex-direction: column; gap: 8px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select {
+    min-height: 44px; padding: 8px 12px; border: 1px solid #8A968F; border-radius: 6px;
+    font: inherit; font-size: 16px; background: var(--surface); color: var(--ink);
+  }
+  input[type=checkbox] { width: 24px; height: 24px; min-height: 0; }
+  .check { flex-direction: row; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--soft); padding: 2px 6px; border-radius: 4px; }
+  .hidden-file { position: absolute; left: -9999px; }
 </style>
-<header>
-  <h1>Estación CICG</h1>
-  <div id="clock-banner"></div>
-  <div id="link-banner"></div>
-  <div id="capture-banner"></div>
-  <div id="threshold-control" class="threshold-control">
-    <label for="threshold-input">
-      Umbral "todavía aquí": <span id="threshold-value">60</span> s
-    </label>
-    <input type="range" id="threshold-input" min="10" max="600" step="10" value="60"
-      oninput="onThresholdChange(this.value)">
-  </div>
-</header>
-<div id="traps">Cargando…</div>
-<!-- Not a <details>: marking an animal is how an operator decides what every
-     trap hunts, so it cannot sit collapsed behind a disclosure triangle where
-     nobody finds it. Reported on the bench 2026-09-26: "no veo en la interfaz
-     como setear el target" -- the feature was built and invisible. -->
-<h2>Especímenes registrados</h2>
-<div id="roster-paused"></div>
-<div id="roster-msg"></div>
-<div id="specimens">Cargando…</div>
+<div class="layout">
+  <nav aria-label="Secciones">
+    <div class="brand">Estación CICG</div>
+    <a href="#/inicio" data-nav="inicio">Inicio</a>
+    <a href="#/individuos" data-nav="individuos">Individuos</a>
+    <a href="#/visitas" data-nav="visitas">Visitas</a>
+    <a href="#/capturas" data-nav="capturas">Capturas</a>
+    <a href="#/bitacora" data-nav="bitacora">Bitácora</a>
+    <div class="status" id="nav-status">Cargando…</div>
+  </nav>
+  <main>
+    <div id="banners" class="stack"></div>
+    <div id="screen" class="stack">Cargando…</div>
+  </main>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (c) => ({
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
 
-// docs/pending.md, "Operator-facing gaps": "armed/fired/idle in English on
-// a Spanish page" -- every wire-vocabulary word the operator reads must be
-// Spanish, like every other label. Falls back to the raw value for a state
-// this page does not know yet, rather than crashing on one docs/design.md
-// may add later.
-//
-// Position-model correction (docs/protocol/messages.md): a hobby servo
-// closes its own position loop inside its case -- three wires, nothing
-// comes back -- so the node cannot observe where its arm actually sits,
-// and neither can this page. "armada" read as "this trap is armed", a
-// fact nobody verified; it is really only the last position this trap was
-// told to hold. "en reposo" and "disparada" carry the identical gap --
-// idle is as unconfirmed as armed, and a capture is a real event but
-// whether the servo actually completed its sweep is exactly the open
-// question `armed_via_remote_command_at`'s own caveat already names below.
-// "en falla" is left alone: a fault is a condition the node actually
-// detected and reported, not a position it was told to hold.
-const STATE_ES = {
-  idle: "posición comandada: en reposo",
-  armed: "posición comandada: armada",
-  fired: "posición comandada: disparada",
-  fault: "en falla",
+const STATE_ES = { idle: "Suelta", armed: "Armada", fired: "Disparada", fault: "Con fallo" };
+const KIND_ES = {
+  reads: ["Lectura", "muted"], captures: ["Captura", "warn"], commands: ["Comando", "ok"],
+  faults: ["Fallo", "warn"], connections: ["Conexión", "info"],
 };
-function translateState(state) { return STATE_ES[state] || state; }
+const FILTERS = [
+  ["all", "Todo"], ["captures", "Capturas"], ["commands", "Comandos"], ["faults", "Fallos"],
+  ["connections", "Conexiones"], ["reads", "Lecturas"],
+];
+const PERIODS = [["1", "Hoy"], ["7", "Últimos 7 días"], ["36500", "Todo"]];
+const TRAP_TABS = {
+  prep: "Preparar", control: "Control", config: "Configuración", list: "Lista de interés",
+  visits: "Visitas", log: "Bitácora",
+};
 
-// docs/pending.md, "Operator-facing gaps": an ISO timestamp answers nothing
-// a live view's whole job ("is this happening now") needs -- "hace 3
-// minutos" does. `nowEpoch` is always a caller-supplied parameter, never
-// Date.now() read from inside here, so this stays a pure function whose
-// caller controls what "now" means (see groupReadsByTag's own docstring
-// for why that matters).
-function formatRelative(epochSeconds, nowEpoch) {
-  const diff = Math.max(0, Math.round(nowEpoch - epochSeconds));
-  if (diff < 10) return "hace instantes";
-  if (diff < 60) return `hace ${diff} segundos`;
-  const minutes = Math.round(diff / 60);
-  if (minutes < 60) return `hace ${minutes} ${minutes === 1 ? "minuto" : "minutos"}`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `hace ${hours} ${hours === 1 ? "hora" : "horas"}`;
-  const days = Math.round(hours / 24);
-  return `hace ${days} ${days === 1 ? "día" : "días"}`;
+const data = { overview: null, health: null, specimens: null };
+const ui = { filter: "all", period: "1", visitTrap: "", search: "", trapSearch: "", picks: new Set(), message: "" };
+
+// The real list has more than a thousand individuals: a screen shows what
+// matters and search reaches the rest.
+const MAX_LISTED = 100;
+const MAX_SEARCH_RESULTS = 20;
+
+function matchesSearch(s, text) {
+  const q = text.trim().toLowerCase();
+  return !q || [s.biomark, s.tag, s.species, s.band_number].some((v) => (v || "").toLowerCase().includes(q));
 }
 
-function epochOf(isoString) {
-  return Date.parse(isoString) / 1000;
-}
+// Lists load after the page paints. Showing the last answer for the same list
+// right away keeps a 5 s refresh from flickering through "Cargando…", and the
+// newest request wins, so a slow answer can't paint over another screen.
+const lastHtml = new Map();
+const newestLoad = new Map();
 
-// station/live-reads-view: groups one feeder's own reads by tag under a
-// "still here" gap -- a viewer control the operator adjusts with the
-// slider above, applied here, at render time, and nowhere else (design.md
-// 3.2's amendment: the gap that ends a visit is a biological parameter,
-// never something this station computes or caches; docs/pending.md: a
-// `visits` view "cannot disagree with its source, because there is no
-// second copy"). `reads` must already be scoped to one node_id before
-// this is ever called -- see renderTrap below -- a tag seen at two
-// feeders must never share a group, and this function has no node_id of
-// its own to enforce that with, only what its caller already filtered.
-function groupReadsByTag(reads, thresholdSeconds, nowEpoch) {
-  const byTag = new Map();
-  for (const r of reads) {
-    // A masked node_epoch (untrusted clock, phase 2) is never fabricated
-    // into a confident time -- received_epoch (the station's own clock,
-    // always present) is the honest fallback, flagged as estimated so the
-    // render can say so rather than imply certainty it does not have.
-    const estimated = r.node_epoch == null;
-    const epoch = estimated ? r.received_epoch : r.node_epoch;
-    const list = byTag.get(r.tag) || [];
-    list.push({ epoch, estimated });
-    byTag.set(r.tag, list);
+async function loadInto(targetId, url, toHtml) {
+  const key = `${targetId}:${url}`;
+  const target = $(targetId);
+  if (target && lastHtml.has(key)) {
+    target.classList.remove("muted");
+    target.innerHTML = lastHtml.get(key);
   }
-  const groups = [];
-  for (const [tag, entries] of byTag) {
-    entries.sort((a, b) => a.epoch - b.epoch);
-    let current = null;
-    for (const entry of entries) {
-      if (current && entry.epoch - current.lastEpoch <= thresholdSeconds) {
-        current.count += 1;
-        current.lastEpoch = entry.epoch;
-        current.lastEpochEstimated = entry.estimated;
-      } else {
-        current = {
-          tag, count: 1, firstEpoch: entry.epoch,
-          lastEpoch: entry.epoch, lastEpochEstimated: entry.estimated,
-        };
-        groups.push(current);
-      }
-    }
+  newestLoad.set(targetId, key);
+  let html;
+  try { html = toHtml(await api(url)); } catch (_) { return; }
+  lastHtml.set(key, html);
+  const current = $(targetId);
+  if (!current || newestLoad.get(targetId) !== key) return;
+  current.classList.remove("muted");
+  current.innerHTML = html;
+}
+
+function route() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  return { screen: parts[0] || "inicio", id: parts[1], tab: parts[2] };
+}
+
+function clockTime(epoch) {
+  if (epoch === null || epoch === undefined) return "—";
+  return new Date(epoch * 1000).toLocaleTimeString("es-CO", { hour12: false });
+}
+
+function dateTime(epoch) {
+  const when = new Date(epoch * 1000);
+  const sameDay = when.toDateString() === new Date().toDateString();
+  return sameDay ? clockTime(epoch) : `${when.toLocaleDateString("es-CO")} ${clockTime(epoch)}`;
+}
+
+function ago(iso) {
+  if (!iso) return "Nunca";
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - new Date(iso).getTime() / 1000));
+  if (seconds < 60) return `Hace ${seconds} s`;
+  if (seconds < 3600) return `Hace ${Math.round(seconds / 60)} min`;
+  if (seconds < 86400) return `Hace ${Math.round(seconds / 3600)} h`;
+  return `Hace ${Math.round(seconds / 86400)} d`;
+}
+
+function duration(seconds) {
+  if (seconds < 60) return `${Math.round(seconds)} s`;
+  return `${Math.floor(seconds / 60)} min ${Math.round(seconds % 60)} s`;
+}
+
+function trapById(id) {
+  return (data.overview?.traps || []).find((t) => String(t.node_id) === String(id));
+}
+
+function trapCode(id) { return Number(id).toString(16).toUpperCase().padStart(4, "0"); }
+
+function trapName(id) { return trapById(id)?.name || `Trampa ${trapCode(id)}`; }
+
+function isPrepared(t) { return t.setup_done; }
+
+function stateLabel(t) {
+  if (t.has_latch === false) return "Solo lector";
+  if (!t.state) return "Sin reporte";
+  return STATE_ES[t.state] || t.state;
+}
+
+function stateClass(t) {
+  if (t.state === "fired" || t.state === "fault" || !t.reachable) return "warn";
+  return t.state === "armed" ? "ok" : "";
+}
+
+function clockNote(t) {
+  if (!t.clock_epoch || t.clock_source === 0) return ["Sin hora", "warn"];
+  const offset = Math.round(t.clock_offset_s ?? 0);
+  if (Math.abs(offset) <= 5) return ["Sincronizada", "ok"];
+  return [`${offset > 0 ? "Adelantada" : "Atrasada"} ${Math.abs(offset)} s`, "warn"];
+}
+
+function listNote(t) {
+  if (t.pending_command === "set_targets") return ["Enviando a la trampa…", "info"];
+  if (t.targets_match === true) return ["Confirmada por la trampa", "ok"];
+  if (t.targets_match === false) return ["Distinta en la trampa; se corrige sola", "warn"];
+  return ["Sin confirmar todavía", "muted"];
+}
+
+function count(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let detail = "No se pudo completar.";
+    try {
+      const body = await response.json();
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch (_) { /* a body that is not JSON keeps the generic message */ }
+    throw new Error(detail);
   }
-  // Recomputed from nowEpoch on every call -- never cached -- so a group
-  // that stops updating stops reading "sigue aquí" the moment enough real
-  // time passes, even with no new data arriving (docs/pending.md's own
-  // characteristic defect: "state that was true once, presented as true
-  // now"). The periodic tick below (`rerender`) is what keeps calling this
-  // with a fresh nowEpoch between fetches.
-  for (const g of groups) {
-    g.stillGrowing = nowEpoch - g.lastEpoch <= thresholdSeconds;
+  return response.json();
+}
+
+async function act(path, options) {
+  try {
+    const result = await api(path, options);
+    ui.message = "";
+    await refresh(true);
+    return result;
+  } catch (error) {
+    ui.message = error.message;
+    render(true);
+    return null;
   }
-  groups.sort((a, b) => b.lastEpoch - a.lastEpoch);
-  return groups;
 }
 
-function renderReadGroup(g, nowEpoch) {
-  const count = g.count === 1 ? "1 lectura" : `${g.count} lecturas`;
-  const since = g.count > 1 ? ` · desde ${formatRelative(g.firstEpoch, nowEpoch)}` : "";
-  const status = g.stillGrowing
-    ? "sigue aquí"
-    : `última lectura ${formatRelative(g.lastEpoch, nowEpoch)}`;
-  const clockNote = g.lastEpochEstimated
-    ? ' <span class="muted">(reloj del nodo sin confirmar)</span>' : "";
-  return `<div class="read-group ${g.stillGrowing ? "read-group-live" : ""}">` +
-    `<span class="read-tag">${escapeHtml(g.tag)}</span> · ${count}${since} · ${status}${clockNote}` +
-    `</div>`;
+const jsonBody = (method, body) => ({
+  method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+});
+
+function arm(id) { return act(`/api/traps/${id}/arm`, { method: "POST" }); }
+function disarm(id) { return act(`/api/traps/${id}/disarm`, { method: "POST" }); }
+function testFire(id) { return act(`/api/traps/${id}/test-fire`, { method: "POST" }); }
+async function finishPrep(id) {
+  await act(`/api/traps/${id}/profile`, jsonBody("PATCH", { setup_done: true }));
+  location.hash = `#/trampa/${id}/control`;
+}
+function cancelCommand(id) { return act(`/api/traps/${id}/cancel`, { method: "POST" }); }
+function ack(id, result) { return act(`/api/traps/${id}/acknowledge?result=${result}`, { method: "POST" }); }
+
+async function setLatch(id, hasLatch) {
+  const profile = hasLatch ? { has_latch: true } : { has_latch: false, setup_done: true };
+  await act(`/api/traps/${id}/profile`, jsonBody("PATCH", profile));
+  if (!hasLatch) location.hash = `#/trampa/${id}/visits`;
 }
 
-function renderReadsSection(reads, nowEpoch) {
-  const groups = groupReadsByTag(reads, thresholdSeconds, nowEpoch);
-  return groups.length
-    ? groups.map((g) => renderReadGroup(g, nowEpoch)).join("")
-    : '<p class="muted">Sin lecturas recientes.</p>';
+async function saveTrapName(id) {
+  await act(`/api/traps/${id}/profile`, jsonBody("PATCH", { name: $("trap-name").value.trim() || null }));
+  document.activeElement?.blur();
 }
 
-// The operator's own "still here" slider -- never sent to the station, never
-// stored (design.md 3.2's amendment). Kept as an in-memory variable, not
-// localStorage: it is a per-session viewing choice, not a station setting.
-let thresholdSeconds = 60;
+function subjectByTag(tag) { return (data.specimens?.specimens || []).find((s) => s.tag === tag); }
 
-function onThresholdChange(value) {
-  thresholdSeconds = Number(value);
-  $("threshold-value").textContent = String(thresholdSeconds);
-  rerender();
+function isOfInterest(subject, nodeId) {
+  return subject.all_traps || subject.trap_ids.includes(Number(nodeId));
 }
 
-// The last data `refresh()` actually fetched -- `rerender()` reuses it so
-// the reads view (and Últ. contacto) can be recomputed against a fresh
-// `Date.now()` between fetches, without a new network round trip.
-let latestTraps = [];
-let latestReadsByNode = {};
-
-function rerender() {
-  renderTraps(latestTraps, latestReadsByNode, Date.now() / 1000);
+function toggleInterest(tag, nodeId) {
+  const subject = subjectByTag(tag);
+  const known = (data.overview?.traps || []).map((t) => t.node_id);
+  let ids = subject.all_traps ? known : subject.trap_ids.slice();
+  const id = Number(nodeId);
+  ids = ids.includes(id) ? ids.filter((n) => n !== id) : ids.concat(id);
+  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: false, node_ids: ids }));
 }
 
-const EMPTY_ROSTER = { specimens: [], of_interest_count: 0, of_interest_limit: 0 };
-
-async function refresh() {
-  const [traps, health, reads, roster] = await Promise.all([
-    fetch("/api/traps").then((r) => r.json()),
-    fetch("/health").then((r) => r.json()).catch(() => null),
-    fetch("/api/reads").then((r) => r.json()).catch(() => ({})),
-    fetch("/api/specimens").then((r) => r.json()).catch(() => EMPTY_ROSTER),
-  ]);
-  latestTraps = traps;
-  latestReadsByNode = reads;
-  renderClockBanner(health);
-  renderLinkBanner(health);
-  renderCaptureBanner(traps);
-  renderTraps(traps, reads, Date.now() / 1000);
-  renderRoster(roster);
+function toggleInterestEverywhere(tag) {
+  const subject = subjectByTag(tag);
+  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: !subject.all_traps, node_ids: [] }));
 }
 
-// S12: an unset clock is a banner, not a footnote -- every timestamp on this
-// page is suspect until this clears, so it renders above everything else,
-// pinned, for as long as /health says `unset`.
-function renderClockBanner(health) {
-  $("clock-banner").innerHTML = (health && health.clock_trust === "unset")
-    ? '<div class="banner banner-clock">⚠ Reloj de la estación sin confirmar. ' +
-      "Las horas en esta pantalla pueden ser incorrectas.</div>"
-    : "";
+async function markPicked(allTraps) {
+  const tags = [...ui.picks];
+  if (!tags.length) { ui.message = "Selecciona al menos un individuo."; render(true); return; }
+  ui.picks.clear();
+  await act("/api/specimens/interest", jsonBody("POST", { tags, all_traps: allTraps, node_ids: [] }));
 }
 
-// CRITICAL 5 (sdd-verify, field-station-p4): the station's own radio link
-// going down must be visible here, not inferred from every trap quietly
-// turning unreachable one by one -- design.md section 4, "the gateway
-// never pretends the link is up." `null` when no gateway is configured at
-// all, which is not a fault.
-function renderLinkBanner(health) {
-  const link = health && health.link;
-  $("link-banner").innerHTML = (link && link.connected === false)
-    ? '<div class="banner banner-clock">⚠ Enlace de radio de la estación caído.' +
-      (link.last_error ? ` (${escapeHtml(link.last_error)})` : "") +
-      "</div>"
-    : "";
+function togglePick(tag, checked) {
+  if (checked) ui.picks.add(tag); else ui.picks.delete(tag);
+  $("pick-count").textContent = ui.picks.size
+    ? count(ui.picks.size, "seleccionado", "seleccionados")
+    : "Selecciona varios para marcarlos de una vez";
 }
 
-// S3: an unacknowledged capture is the loudest thing on the page, pinned in
-// the header so it stays visible while scrolling the trap list below, and
-// offering exactly one action.
-function renderCaptureBanner(traps) {
-  const captured = traps.filter((t) => t.capture);
-  $("capture-banner").innerHTML = captured.map((t) => `
-    <div class="banner banner-capture">
-      <strong>Trampa ${t.node_id} capturó una marca</strong><br>
-      Marca ${escapeHtml(t.capture.tag)}<br>
-      <small>${escapeHtml(t.capture.at)}</small><br>
-      <button onclick="ack(${t.node_id})">Atendida</button>
-    </div>`).join("");
+function registerUnknown(tag) {
+  return act(`/api/specimens/${tag}`, jsonBody("PATCH", { registered: true }));
 }
 
-function renderTraps(traps, readsByNode, nowEpoch) {
-  $("traps").innerHTML = traps.length
-    ? traps.map((t) => renderTrap(t, readsByNode, nowEpoch)).join("")
-    : '<p class="empty">Ninguna trampa se ha reportado todavía.</p>';
+async function addSubject(event) {
+  event.preventDefault();
+  const form = event.target;
+  const value = (name) => form.elements[name].value.trim() || null;
+  const created = await act("/api/specimens", jsonBody("POST", {
+    pit: value("pit") || "", species: value("species"), band_number: value("band_number"),
+    of_interest: form.elements.of_interest.checked,
+  }));
+  if (created) form.reset();
 }
 
-// S4/S11: `reachable` is a fact separate from `state` -- a trap we cannot
-// reach is never shown as simply "armed"; the two facts stay visually
-// distinct here rather than merged into one reassuring line.
-function renderTrap(t, readsByNode, nowEpoch) {
-  const noContact = !t.reachable;
-  const battery = t.battery_mv != null ? `${t.battery_mv} mV` : "sin dato";
-  const version = t.targets_version != null ? t.targets_version : "—";
-  // docs/pending.md, "Operator-facing gaps": an ISO timestamp answers
-  // nothing a live view needs -- "hace 3 minutos" does.
-  const lastSeen = t.last_seen ? formatRelative(epochOf(t.last_seen), nowEpoch) : "nunca";
-  // WARNING J (sdd-verify field-station-p4): `state` is `null` exactly
-  // when this station has no readable report to show -- never render
-  // that as the English enum values around it would suggest by omission;
-  // say so, in Spanish, same as every other "no data" label on this page.
-  // docs/pending.md, "Operator-facing gaps": the reported value itself
-  // must also be Spanish, not the raw English wire word.
-  const state = t.state != null ? translateState(t.state) : "desconocido";
-  // WARNING 2 (sdd-verify field-station-p4 batch 2 close-out): a stale-
-  // flagged trap must not render byte-identical to a confident one --
-  // independent of `reachable` (`no-contact-badge` above), which after a
-  // restart comes from whichever row won the state race and can stay
-  // `true` even while that row's own freshness is in doubt.
-  // Record correction (Batch 2e, verify-report-batch2d.md Q7): this
-  // comment used to say "rendered as doubt (italic)", but `.stale-badge`
-  // has been `font-weight: 700` -- the same bold weight as
-  // `.no-contact-badge`, no italic -- since the very commit that added
-  // this comment. The CSS is what an operator needs: doubt about a
-  // trap's own state must read at a glance next to "SIN CONTACTO", not as
-  // a footnote nobody notices at a smaller, lighter weight. The comment
-  // was wrong, not the rule; this trap is still not silent, its
-  // last-known word just might not be its newest one.
-  // 13.11/13.12: what the trap is actually hunting -- the station's own
-  // desired list, not only its version number.
-  const targets = (t.targets && t.targets.length)
-    ? t.targets.map(escapeHtml).join(", ")
-    : "ninguno";
-  // station/live-reads-view: this feeder's own slice of the reads window,
-  // scoped by node_id *before* any grouping by tag happens -- a tag seen
-  // at two feeders must never be merged into one feeder's section.
-  const reads = readsByNode[t.node_id] || [];
-  return `
-    <div class="trap ${noContact ? "no-contact" : ""}">
-      <div class="state">Trampa ${t.node_id} · ${state}</div>
-      ${noContact ? '<p class="no-contact-badge">⚠ SIN CONTACTO — este estado puede estar desactualizado</p>' : ""}
-      ${t.state_may_be_stale ? '<p class="stale-badge">⚠ puede no ser el último reporte de esta trampa</p>' : ""}
-      ${t.state === "armed" && t.armed_via_remote_command_at ? '<p class="arm-caveat">⚠ Armada por comando remoto — nadie verificó que el mecanismo llegara al tope</p>' : ""}
-      <p class="muted">Batería: ${battery} · Lista de objetivos: v${version} · Últ. contacto: ${lastSeen}</p>
-      <p class="muted">Objetivos actuales: ${targets}</p>
-      <div class="reads">
-        <p class="muted">Lecturas recientes:</p>
-        ${renderReadsSection(reads, nowEpoch)}
-      </div>
-      ${t.pending_command ? `<p class="pending">${describePending(t)}</p>` : ""}
-      <div class="actions">
-        <button onclick="arm(${t.node_id})">Armar</button>
-        <button onclick="disarm(${t.node_id})">Desarmar</button>
-        ${t.pending_command ? `<button onclick="cancelCommand(${t.node_id})">Cancelar comando pendiente</button>` : ""}
-      </div>
-    </div>`;
+async function saveSubject(event, tag) {
+  event.preventDefault();
+  const form = event.target;
+  const value = (name) => form.elements[name].value.trim() || null;
+  const saved = await act(`/api/specimens/${tag}`, jsonBody("PATCH", {
+    species: value("species"), species_code: value("species_code"), sex: value("sex"),
+    age: value("age"), band_number: value("band_number"), registered: true,
+  }));
+  if (saved) { ui.message = "Guardado."; document.activeElement?.blur(); render(true); }
 }
 
-// station/remote-arm-restored: the "Armar" button was removed in `029b80c`
-// ("remove the remote arm affordance") because arming meant a person
-// walking to the trap and placing the cord by hand -- no downlink could
-// do that. The bench has since been rewired so one ESP32 is the whole
-// trap and the firmware runs the arming sweep itself on a remote `ARM`,
-// so the button (and the route it calls, app.py) is back. Nothing here
-// claims more than app.py's own route does: pressing it only sets a
-// pending command (S4) -- see describePending below for how "armed" stays
-// unconfirmed until the trap's own next HEARTBEAT says so, exactly like
-// every other command on this page.
-function describePending(t) {
-  if (t.pending_command === "set_targets") {
-    return `Lista de objetivos v${t.desired_targets_version} pendiente de confirmar`;
+async function importExcel(input) {
+  const file = input.files[0];
+  if (!file) return;
+  ui.message = `Importando ${file.name}…`;
+  render(true);
+  const result = await act(`/api/specimens/import?filename=${encodeURIComponent(file.name)}`, {
+    method: "POST", body: file,
+  });
+  input.value = "";
+  if (!result) return;
+  const parts = [`Importados: ${result.created} nuevos, ${result.updated} actualizados.`];
+  if (result.error_count) parts.push(`${count(result.error_count, "fila", "filas")} sin importar: ${result.errors.slice(0, 3).join(" ")}`);
+  if (result.warning_count) parts.push(`${count(result.warning_count, "aviso", "avisos")}: ${result.warnings.slice(0, 3).join(" ")}`);
+  ui.message = parts.join(" ");
+  render(true);
+}
+
+function setFilter(value) { ui.filter = value; render(true); }
+function setPeriod(value) { ui.period = value; document.activeElement?.blur(); render(true); }
+function setVisitTrap(value) { ui.visitTrap = value; document.activeElement?.blur(); render(true); }
+function setSearch(value) { ui.search = value; renderSubjectRows(); }
+
+function renderBanners() {
+  const traps = data.overview?.traps || [];
+  const parts = [];
+  if (data.health?.clock_trust === "unset") {
+    parts.push('<div class="banner banner-warn"><div><div class="title">Reloj de la estación sin confirmar</div>Las horas en esta pantalla pueden ser incorrectas.</div></div>');
   }
-  const verb = t.pending_command === "arm" ? "Armado" : "Desarmado";
-  return `${verb} pendiente de confirmar`;
+  const link = data.health?.link;
+  if (link && link.connected === false) {
+    parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div></div>`);
+  }
+  for (const t of traps.filter((x) => x.capture)) {
+    const subject = subjectByTag(t.capture.tag);
+    const label = subject?.registered ? (subject.species || "Sin especie") : "Lectura desconocida";
+    parts.push(`<div class="banner banner-warn">
+      <div><div class="title">${escapeHtml(t.name)} se soltó</div>
+      <span class="italic">${escapeHtml(label)}</span> · <span class="mono">${escapeHtml(subject?.biomark || t.capture.tag)}</span>. Revisa la red y di qué encontraste.</div>
+      <div class="row">
+        <button class="danger" onclick="ack(${t.node_id}, 'capturado')">Capturado</button>
+        <button onclick="ack(${t.node_id}, 'sin_colibri')">Sin colibrí</button>
+      </div></div>`);
+  }
+  for (const t of traps.filter((x) => !isPrepared(x) && x.has_latch === null)) {
+    parts.push(`<div class="banner banner-info">
+      <div><div class="title">${escapeHtml(t.name)} se conectó sola</div>Ya está registrando visitas. Falta prepararla para capturar.</div>
+      <a class="button primary" href="#/trampa/${t.node_id}/prep">Preparar ${escapeHtml(t.name)}</a></div>`);
+  }
+  if (ui.message) {
+    parts.push(`<div class="banner banner-info"><div>${escapeHtml(ui.message)}</div><button class="quiet" onclick="ui.message=''; render(true)">Cerrar</button></div>`);
+  }
+  $("banners").innerHTML = parts.join("");
 }
 
-async function arm(id) { await fetch(`/api/traps/${id}/arm`, { method: "POST" }); refresh(); }
-async function disarm(id) { await fetch(`/api/traps/${id}/disarm`, { method: "POST" }); refresh(); }
-async function ack(id) { await fetch(`/api/traps/${id}/acknowledge`, { method: "POST" }); refresh(); }
-async function cancelCommand(id) { await fetch(`/api/traps/${id}/cancel`, { method: "POST" }); refresh(); }
+function renderInicio() {
+  const o = data.overview;
+  const traps = o?.traps || [];
+  const online = traps.filter((t) => t.reachable).length;
+  const stats = [
+    ["Visitas hoy", o?.visits_today ?? 0], ["Individuos hoy", o?.subjects_today ?? 0],
+    ["Capturas hoy", o?.captures_today ?? 0], ["Trampas en línea", online],
+  ];
+  const rows = traps.map((t) => {
+    const [clock, clockClass] = clockNote(t);
+    const [list, listClass] = listNote(t);
+    const wanted = t.wanted?.length ?? 0;
+    return `<tr>
+      <td class="strong">${escapeHtml(t.name)}</td>
+      <td class="strong ${isPrepared(t) ? stateClass(t) : "info"}">${isPrepared(t) ? escapeHtml(stateLabel(t)) : "Falta preparar"}</td>
+      <td class="${t.reachable ? "" : "warn strong"}">${t.reachable ? "" : "Sin señal · "}${escapeHtml(ago(t.last_seen))}</td>
+      <td><span class="mono">${clockTime(t.clock_epoch)}</span><br><span class="${clockClass}">${clock}</span></td>
+      <td>${t.has_latch === false ? "No aplica" : `${count(wanted, "sujeto", "sujetos")}<br><span class="${listClass}">${list}</span>`}</td>
+      <td>${t.visits_today ?? 0}</td>
+      <td><a class="button" href="#/trampa/${t.node_id}">Abrir</a></td>
+    </tr>`;
+  }).join("");
+  $("screen").innerHTML = `
+    <h1>Inicio</h1>
+    <div class="grid">${stats.map(([label, value]) => `<div class="stat"><div class="small muted">${label}</div><div class="value">${value}</div></div>`).join("")}</div>
+    <div class="card scroll"><h2>Trampas</h2>
+      ${traps.length
+        ? `<table style="min-width:820px"><thead><tr><th>Trampa</th><th>Estado</th><th>Última señal</th><th>Hora en la trampa</th><th>Lista de interés</th><th>Visitas hoy</th><th><span class="hidden-file">Acción</span></th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="muted">Prende una trampa: aparece aquí sola.</p>'}
+    </div>
+    <div class="card"><div class="row between"><h2>Últimos eventos</h2><a class="button" href="#/bitacora">Ver bitácora</a></div><div id="log-rows" class="muted">Cargando…</div></div>`;
+  loadLog({ limit: 6, kind: "all" });
+}
 
-// station/specimen-roster: the study decides which animals are of interest,
-// not the feeder (messages.md's open question 2, answered 2026-09-26) -- an
-// operator manages this one roster and marks who is wanted; marking one
-// pushes the whole shared list to every trap the station knows about
-// (app.py::_push_targets_to_every_known_trap), never a list typed per trap.
-// The last roster the server sent, held so a rebuild deferred while the
-// operator was editing can still happen afterwards without another fetch.
-let latestRoster = EMPTY_ROSTER;
+function loadLog({ limit, kind, nodeId }) {
+  const query = new URLSearchParams({ limit, kind });
+  if (nodeId !== undefined) query.set("node_id", nodeId);
+  return loadInto("log-rows", `/api/log?${query}`, ({ events }) => (events.length ? events.map((e) => {
+    const [label, css] = KIND_ES[e.kind] || [e.kind, "muted"];
+    return `<div class="event"><span class="time">${escapeHtml(dateTime(e.epoch))}</span><span class="kind ${css}">${label}</span><span class="text">${escapeHtml(e.text)}</span>${nodeId === undefined ? `<span class="small muted">${escapeHtml(trapName(e.node_id))}</span>` : ""}</div>`;
+  }).join("") : '<p class="muted">Todavía no hay eventos.</p>'));
+}
 
-function renderRoster(roster, force) {
-  if (roster) latestRoster = roster;
-  if (!force && rosterIsBeingEdited()) {
-    // Never freeze silently: a list that has stopped updating while claiming
-    // to be live is this project's own recurring defect. Say so instead.
-    $("roster-paused").innerHTML =
-      '<p class="muted">Lista en pausa mientras editás. Dale Guardar para actualizarla.</p>';
+function trapTabs(t) {
+  const tabs = [];
+  if (!isPrepared(t)) tabs.push("prep");
+  if (t.has_latch !== false) tabs.push("control");
+  tabs.push("config");
+  if (t.has_latch !== false) tabs.push("list");
+  tabs.push("visits", "log");
+  return tabs;
+}
+
+function renderTrampa(id, requestedTab) {
+  const t = trapById(id);
+  if (!t) {
+    $("screen").innerHTML = `<h1>Trampa ${escapeHtml(trapCode(id))}</h1><div class="card muted">Esta trampa no se ha conectado.</div>`;
     return;
   }
-  $("roster-paused").innerHTML = "";
-  const rows = latestRoster.specimens || [];
-  const counter = `<p class="muted roster-counter">` +
-    `${latestRoster.of_interest_count} / ${latestRoster.of_interest_limit} marcadas de interés</p>`;
-  const body = rows.length
-    ? rows.map(renderSpecimen).join("")
-    : '<p class="empty">Ningún espécimen conocido todavía.</p>';
-  $("specimens").innerHTML = counter + body;
+  const tabs = trapTabs(t);
+  const tab = tabs.includes(requestedTab) ? requestedTab : tabs[0];
+  const tabButtons = tabs.map((name) => `<a class="button ${name === tab ? "selected-link" : ""}" style="${name === tab ? "background:var(--ink);color:#fff" : ""}" href="#/trampa/${t.node_id}/${name}">${TRAP_TABS[name]}</a>`).join("");
+  const body = {
+    prep: renderPrep, control: renderControl, config: renderConfig, list: renderList,
+    visits: renderTrapVisits, log: renderTrapLog,
+  }[tab](t);
+  $("screen").innerHTML = `
+    <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/inicio">Volver a inicio</a></div>
+    <div class="row between" style="align-items:flex-end">
+      <div><h1>${escapeHtml(t.name)}</h1>
+      <div class="small muted">${escapeHtml(stateLabel(t))} · Última señal: ${escapeHtml(ago(t.last_seen).toLowerCase())} · ${t.has_latch === null ? "Sin definir" : t.has_latch ? "Con pestillo" : "Solo lector"}</div></div>
+      <div class="row">${tabButtons}</div>
+    </div>
+    ${body}`;
+  if (tab === "visits") loadVisits({ nodeId: t.node_id, days: 1 });
+  if (tab === "log") loadLog({ limit: 100, kind: "all", nodeId: t.node_id });
+  if (tab === "control") loadLog({ limit: 6, kind: "commands", nodeId: t.node_id });
 }
 
-// The `of_interest` this specimen last reported from the server, keyed by
-// tag -- `saveSpecimen` compares the checkbox against this before deciding
-// whether `of_interest` belongs in the PATCH body at all. Without this, a
-// species/band-only save would resend the checkbox's current value every
-// time regardless of whether it actually changed, and the route treats any
-// *presence* of the key as "recompute and broadcast" (app.py:
-// `if "of_interest" in updates`) -- so an untouched checkbox would still
-// re-push SET_TARGETS to every trap for an edit that was never about
-// targets at all.
-// Widened from `of_interest` alone to every editable field, because the same
-// map now answers a second question: whether the operator has unsaved work in
-// this section. See `rosterIsBeingEdited()`.
-const serverState = {};
-
-function rosterIsBeingEdited() {
-  const container = $("specimens");
-  if (!container) return false;
-  // Typing right now. `refresh()` fires on every SSE notify -- once per READS
-  // batch -- so while a tag is being passed this container would otherwise be
-  // rebuilt every few seconds, destroying whatever is half-typed in it.
-  // Reported on the bench 2026-09-26: "desaparecen las letras cuando intento
-  // registrarlo".
-  if (container.contains(document.activeElement)) return true;
-  // Focus left the field but the edit was never saved. Rebuilding here would
-  // silently discard it, which is worse than a stale list.
-  return Object.keys(serverState).some((tag) => {
-    const known = serverState[tag];
-    const species = $(`species-${tag}`);
-    const band = $(`band-${tag}`);
-    const interest = $(`interest-${tag}`);
-    if (!species || !band || !interest) return false;
-    return species.value.trim() !== (known.species || "")
-      || band.value.trim() !== (known.band_number || "")
-      || interest.checked !== known.of_interest;
-  });
+function subjectToggles(t) {
+  return `<label>Buscar individuo para agregar<input value="${escapeHtml(ui.trapSearch)}" oninput="setTrapSearch(this.value, ${t.node_id})" placeholder="biomark, especie o anillo"></label>
+    <div id="trap-subject-rows" style="margin-top:12px">${trapSubjectRows(t)}</div>`;
 }
 
-function renderSpecimen(s) {
-  serverState[s.tag] = {
-    species: s.species,
-    band_number: s.band_number,
-    of_interest: s.of_interest,
-  };
-  const lastSeen = s.last_seen
-    ? formatRelative(epochOf(s.last_seen), Date.now() / 1000)
-    : "nunca";
-  const timesSeen = s.times_seen === 1 ? "1 lectura" : `${s.times_seen} lecturas`;
-  return `
-    <div class="specimen">
-      <div class="state">Marca ${escapeHtml(s.tag)}</div>
-      <p class="muted">${timesSeen} · últ. vez: ${lastSeen}</p>
-      <input type="text" id="species-${s.tag}" placeholder="Especie"
-        value="${escapeHtml(s.species || "")}">
-      <input type="text" id="band-${s.tag}" placeholder="Número de anillo"
-        value="${escapeHtml(s.band_number || "")}">
-      <label class="of-interest-toggle" for="interest-${s.tag}">
-        <input type="checkbox" id="interest-${s.tag}" ${s.of_interest ? "checked" : ""}>
-        De interés — las trampas lo capturan
-      </label>
-      <div class="actions">
-        <button onclick="saveSpecimen('${s.tag}')">Guardar</button>
+function subjectButton(s, t) {
+  const on = isOfInterest(s, t.node_id);
+  return `<button class="toggle ${on ? "on" : ""}" onclick="toggleInterest('${s.tag}', ${t.node_id})">
+    <span><span class="italic">${escapeHtml(s.species || "Sin especie")}</span> · <span class="mono small">${escapeHtml(s.biomark)}</span></span>
+    <span>${on ? (s.all_traps ? "De interés en todas" : "De interés") : "No"}</span></button>`;
+}
+
+function trapSubjectRows(t) {
+  const subjects = (data.specimens?.specimens || []).filter((s) => s.registered);
+  if (!subjects.length) return '<p class="muted">Todavía no hay individuos. <a href="#/individuos">Importa el Excel</a>.</p>';
+  const marked = subjects.filter((s) => isOfInterest(s, t.node_id));
+  const others = ui.trapSearch.trim()
+    ? subjects.filter((s) => !isOfInterest(s, t.node_id) && matchesSearch(s, ui.trapSearch))
+    : [];
+  const shown = others.slice(0, MAX_SEARCH_RESULTS);
+  return [
+    marked.length ? marked.map((s) => subjectButton(s, t)).join("") : '<p class="muted">Ningún individuo marcado en esta trampa.</p>',
+    shown.map((s) => subjectButton(s, t)).join(""),
+    others.length > shown.length ? `<p class="small muted">Mostrando ${shown.length} de ${others.length}. Afina la búsqueda.</p>` : "",
+  ].join("");
+}
+
+function setTrapSearch(value, nodeId) {
+  ui.trapSearch = value;
+  const t = trapById(nodeId);
+  if (t && $("trap-subject-rows")) $("trap-subject-rows").innerHTML = trapSubjectRows(t);
+}
+
+function renderPrep(t) {
+  const [clock, clockClass] = clockNote(t);
+  const latch = t.has_latch === true;
+  return `<div class="stack narrow">
+    <div class="card step"><div class="strong">1. Conexión y hora</div>
+      <div class="ok">Conectada sola al prenderla.</div>
+      <div>Hora en la trampa: <span class="mono">${clockTime(t.clock_epoch)}</span> · <span class="${clockClass}">${clock}</span></div></div>
+    <div class="card step"><div class="strong">2. ¿Tiene pestillo?</div>
+      <div class="row">
+        <button class="big ${latch ? "selected" : ""}" onclick="setLatch(${t.node_id}, true)">Con pestillo</button>
+        <button class="big" onclick="setLatch(${t.node_id}, false)">Solo lector</button>
+      </div></div>
+    ${latch ? `
+    <div class="card step"><div class="strong">3. Calibrar el pestillo</div>
+      <p style="margin:0">Por ahora se hace por USB, una vez por trampa, y al cambiar el servo:</p>
+      <code>pio run -e calibrate -t upload -t monitor</code>
+      <p class="small muted" style="margin:0">Los ángulos quedan guardados en la trampa. Si no está calibrada, rechaza armar y el fallo sale en la bitácora.</p></div>
+    <div class="card step"><div class="strong">4. Escoger a quién capturar</div><div>${subjectToggles(t)}</div></div>
+    <div class="card step"><div class="strong">5. Armado</div>
+      <div>La trampa se arma sola. Estado ahora: <span class="strong ${stateClass(t)}">${escapeHtml(stateLabel(t))}</span></div>
+      ${t.state === "armed" ? "" : `<p class="small muted" style="margin:0">Si no llega a "Armada" en unos segundos, revisa la bitácora.</p><div><button onclick="arm(${t.node_id})">Armar</button></div>`}
+      <div><button class="primary" onclick="finishPrep(${t.node_id})">Terminar preparación</button></div></div>` : ""}
+  </div>`;
+}
+
+function renderControl(t) {
+  const pending = t.test_fire_pending
+    ? "Disparo de prueba"
+    : { arm: "Armar", disarm: "Desarmar", set_targets: "Enviar lista" }[t.pending_command];
+  const armed = t.state === "armed";
+  return `<div class="grid-wide">
+    <div class="card stack">
+      <div><div class="small strong muted">Estado confirmado por la trampa</div>
+        <div class="state ${stateClass(t)}">${escapeHtml(stateLabel(t))}</div>
+        ${t.reachable ? "" : `<div class="warn strong">Sin señal: este es su último reporte.</div>`}
+        ${t.state_may_be_stale ? '<div class="warn strong">Puede no ser su último reporte.</div>' : ""}
       </div>
-      <div id="specimen-msg-${s.tag}"></div>
+      <div class="row">
+        ${armed
+          ? `<button class="big" onclick="testFire(${t.node_id})">Disparar (prueba)</button>
+             <button class="big" onclick="disarm(${t.node_id})">Desarmar para mantenimiento</button>`
+          : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}
+      </div>
+      ${t.pending_command || t.test_fire_pending ? `<div class="banner banner-info"><div>${pending}: esperando confirmación de la trampa…</div><button onclick="cancelCommand(${t.node_id})">Cancelar</button></div>` : ""}
+      <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un sujeto de su lista; el mismo tag no la vuelve a disparar en 10 min. "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
+    </div>
+    <div class="card"><h2>Últimos comandos</h2><div id="log-rows" class="muted">Cargando…</div></div>
+  </div>`;
+}
+
+function renderConfig(t) {
+  const [clock, clockClass] = clockNote(t);
+  const [list, listClass] = listNote(t);
+  const lines = [
+    ["Tipo", t.has_latch === null ? "Sin definir" : t.has_latch ? "Con pestillo" : "Solo lector", ""],
+    ["Identificador", `${t.code} (sale de su MAC)`, ""],
+    ["Última señal", ago(t.last_seen), t.reachable ? "" : "warn"],
+    ["Hora en la trampa", clockTime(t.clock_epoch), ""],
+    ["Estado de la hora", clock, clockClass],
+    ["Lista de interés", `Versión ${t.targets_version ?? "—"}, ${count(t.reported?.length ?? 0, "tag", "tags")}`, ""],
+    ["Estado de la lista", list, listClass],
+    ["Calibración del pestillo", "Guardada en la trampa, por USB", ""],
+    ["Batería", t.battery_mv ? `${t.battery_mv} mV` : "Sin lectura en esta versión", ""],
+  ];
+  return `<div class="card narrow">
+    <form onsubmit="event.preventDefault(); saveTrapName(${t.node_id})" class="row" style="align-items:flex-end;margin-bottom:12px">
+      <label style="flex:1 1 240px">Lugar (opcional)<input id="trap-name" value="${escapeHtml(t.place || "")}" placeholder="Comedero del jardín"></label>
+      <button>Guardar</button>
+    </form>
+    ${lines.map(([k, v, css]) => `<div class="line"><span class="muted">${k}</span><span class="${css}">${escapeHtml(v)}</span></div>`).join("")}
+  </div>`;
+}
+
+function renderList(t) {
+  const [list] = listNote(t);
+  const css = t.targets_match === true && t.pending_command !== "set_targets" ? "banner-ok"
+    : t.targets_match === false ? "banner-warn" : "banner-info";
+  const reported = t.reported === null || t.reported === undefined
+    ? '<p class="muted">La trampa todavía no ha reportado su lista.</p>'
+    : t.reported.length
+      ? t.reported.map((r) => `<div class="line"><span class="mono small">${escapeHtml(r.biomark)}</span><span class="${r.known ? "italic" : "warn"}">${escapeHtml(r.label)}</span></div>`).join("")
+      : '<p class="muted">La lista de la trampa está vacía.</p>';
+  return `<div class="card stack narrow">
+    <div class="banner ${css}"><div class="strong">${list}</div></div>
+    <div><h2>Sujetos de interés para esta trampa</h2>${subjectToggles(t)}</div>
+    <div><h2>Lista que tiene la trampa ahora</h2>${reported}</div>
+  </div>`;
+}
+
+function renderTrapVisits() {
+  return `<div class="card scroll" id="visit-rows"><p class="muted">Cargando…</p></div>`;
+}
+
+function renderTrapLog() {
+  return `<div class="card" id="log-rows"><p class="muted">Cargando…</p></div>`;
+}
+
+function loadVisits({ nodeId, tag, days }) {
+  const query = new URLSearchParams({ days });
+  if (nodeId !== undefined && nodeId !== "") query.set("node_id", nodeId);
+  if (tag) query.set("tag", tag);
+  return loadInto("visit-rows", `/api/visits?${query}`, ({ visits }) => (visits.length ? `<table style="min-width:680px"><thead><tr><th>Inicio</th><th>Trampa</th><th>Especie</th><th>Biomark</th><th>Duración</th><th>Lecturas</th><th>Hora</th></tr></thead><tbody>
+    ${visits.map((v) => `<tr>
+      <td class="mono">${escapeHtml(dateTime(v.start_epoch))}</td>
+      <td>${escapeHtml(trapName(v.node_id))}</td>
+      <td class="${v.known ? "italic" : "warn"}">${escapeHtml(v.label)}</td>
+      <td class="mono">${escapeHtml(v.biomark)}</td>
+      <td>${v.open ? '<span class="ok strong">En curso</span>' : escapeHtml(duration(v.duration_s))}</td>
+      <td>${v.reads}</td>
+      <td class="${v.clock_trusted ? "" : "warn"}">${v.clock_trusted ? "Confiable" : "Dudosa"}</td>
+    </tr>`).join("")}</tbody></table>` : '<p class="muted">Sin visitas en este periodo.</p>'));
+}
+
+function setInterestEverywhere(tag, on) {
+  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: on, node_ids: [] }));
+}
+
+function interestNowRows() {
+  const marked = (data.specimens?.specimens || []).filter((s) => s.registered && (s.all_traps || s.trap_ids.length));
+  if (!marked.length) return '<p class="muted">Nadie marcado. Agrega un individuo arriba o usa "Marcar" en la lista.</p>';
+  return marked.map((s) => {
+    const [where] = subjectInterest(s);
+    return `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
+      <a href="#/individuo/${s.tag}" style="flex:1 1 220px;color:inherit"><span class="italic">${escapeHtml(s.species || "Sin especie")}</span> · <span class="mono small">${escapeHtml(s.biomark)}</span></a>
+      <span class="ok small strong">${escapeHtml(where)}</span>
+      <button class="quiet" onclick="setInterestEverywhere('${s.tag}', false)">Quitar</button></div>`;
+  }).join("");
+}
+
+function subjectInterest(s) {
+  if (s.all_traps) return ["De interés en todas", "ok"];
+  if (s.trap_ids.length) return [`De interés en ${s.trap_ids.map(trapName).join(" y ")}`, "ok"];
+  return ["Sin marcar", "muted"];
+}
+
+function renderSubjectRows() {
+  const target = $("subject-rows");
+  if (!target) return;
+  const matching = (data.specimens?.specimens || [])
+    .filter((s) => s.registered && matchesSearch(s, ui.search));
+  const rows = matching.slice(0, MAX_LISTED);
+  const more = matching.length > rows.length
+    ? `<p class="small muted">Mostrando ${rows.length} de ${matching.length}. Usa la búsqueda para encontrar el resto.</p>`
+    : "";
+  target.innerHTML = rows.length ? more + rows.map((s) => {
+    const [interest, css] = subjectInterest(s);
+    return `<div class="row" style="border-top:1px solid var(--soft);flex-wrap:nowrap">
+      <label class="check"><span class="hidden-file">Seleccionar ${escapeHtml(s.biomark)}</span><input type="checkbox" ${ui.picks.has(s.tag) ? "checked" : ""} onchange="togglePick('${s.tag}', this.checked)"></label>
+      <a href="#/individuo/${s.tag}" class="row between" style="flex:1 1 auto;min-width:0;min-height:52px;padding:8px 4px;color:inherit;text-decoration:none">
+        <span style="flex:2 1 220px"><span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span><br><span class="mono small muted">${escapeHtml(s.biomark)}</span></span>
+        <span style="flex:1 1 110px">${count(s.times_seen, "lectura", "lecturas")}</span>
+        <span class="strong ${css}" style="flex:1 1 170px">${escapeHtml(interest)}</span>
+      </a>
+      ${s.all_traps || s.trap_ids.length
+        ? `<button class="quiet" onclick="setInterestEverywhere('${s.tag}', false)">Quitar</button>`
+        : `<button class="quiet" onclick="setInterestEverywhere('${s.tag}', true)">Marcar</button>`}</div>`;
+  }).join("") : '<p class="muted">Ningún individuo coincide. Importa el Excel para cargar la lista.</p>';
+}
+
+function renderIndividuos() {
+  const unknown = (data.specimens?.specimens || []).filter((s) => !s.registered);
+  $("screen").innerHTML = `
+    <div class="row between">
+      <h1>Individuos</h1>
+      <div class="row">
+        <label class="button" style="color:var(--ink);flex-direction:row;font-size:15px">Importar Excel<input class="hidden-file" type="file" accept=".xlsx,.xlsm,.csv" onchange="importExcel(this)"></label>
+        <a class="button" href="/api/export/reads.csv">Exportar lecturas</a>
+      </div>
+    </div>
+    <div class="card"><h2>Agregar individuo</h2>
+      <form onsubmit="addSubject(event)" class="row" style="align-items:flex-end">
+        <label style="flex:2 1 200px">Biomark (PIT)<input name="pit" required placeholder="900_263007596629"></label>
+        <label style="flex:2 1 200px">Especie<input name="species" placeholder="Colibri coruscans"></label>
+        <label style="flex:1 1 120px">Anillo<input name="band_number" placeholder="C00103"></label>
+        <label class="row" style="flex:1 1 200px;flex-direction:row;font-size:15px;color:var(--ink)"><input type="checkbox" name="of_interest" checked> De interés en todas las trampas</label>
+        <button class="primary">Agregar</button>
+      </form></div>
+    <div class="card"><h2>De interés ahora</h2>${interestNowRows()}</div>
+    <label>Buscar por biomark, especie o anillo<input value="${escapeHtml(ui.search)}" oninput="setSearch(this.value)" placeholder="coruscans"></label>
+    <div class="card row">
+      <span id="pick-count" class="strong" style="flex:1 1 180px">${ui.picks.size ? count(ui.picks.size, "seleccionado", "seleccionados") : "Selecciona varios para marcarlos de una vez"}</span>
+      <button class="primary" onclick="markPicked(true)">Marcar en todas las trampas</button>
+      <button onclick="markPicked(false)">Quitar marca</button>
+    </div>
+    <div class="card" id="subject-rows"></div>
+    <div class="card"><h2>Lecturas desconocidas</h2>
+      <p class="small muted" style="margin:0 0 8px">Tags que leyó una trampa y que no están en la lista. Lo más probable es una lectura errónea. Se conservan, pero no son sujetos ni se pueden marcar de interés.</p>
+      ${unknown.length ? unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
+        <span class="mono small">${escapeHtml(s.biomark)}</span>
+        <span class="muted">${count(s.times_seen, "lectura", "lecturas")}</span>
+        <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar como individuo</button></div>`).join("") : '<p class="muted">Ninguna.</p>'}
     </div>`;
+  renderSubjectRows();
 }
 
-async function saveSpecimen(tagHex) {
-  const msg = $("roster-msg");
-  const species = $(`species-${tagHex}`).value.trim();
-  const bandNumber = $(`band-${tagHex}`).value.trim();
-  const ofInterest = $(`interest-${tagHex}`).checked;
-  const body = { species: species || null, band_number: bandNumber || null };
-  // Only a checkbox the operator actually touched belongs in this request --
-  // see `serverState`'s own comment for why including it unconditionally
-  // would re-broadcast SET_TARGETS on every species/band-only save.
-  if (ofInterest !== serverState[tagHex].of_interest) {
-    body.of_interest = ofInterest;
+function renderIndividuo(tag) {
+  const s = subjectByTag(tag);
+  if (!s) {
+    $("screen").innerHTML = '<div class="card muted">Ese individuo no existe.</div>';
+    return;
   }
-  const response = await fetch(`/api/specimens/${tagHex}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  const traps = data.overview?.traps || [];
+  const field = (name, label, value) => `<label style="flex:1 1 180px">${label}<input name="${name}" value="${escapeHtml(value)}"></label>`;
+  $("screen").innerHTML = `
+    <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/individuos">Volver a individuos</a></div>
+    <div><h1 class="${s.registered ? "italic" : "warn"}">${escapeHtml(s.registered ? (s.species || "Sin especie") : "Lectura desconocida")}</h1>
+      <div class="mono muted">${escapeHtml(s.biomark)}</div></div>
+    <div class="grid-wide">
+      <div class="card"><h2>De interés en</h2>
+        <button class="toggle ${s.all_traps ? "on" : ""}" onclick="toggleInterestEverywhere('${s.tag}')"><span class="strong">Todas las trampas</span><span>${s.all_traps ? "De interés" : "No"}</span></button>
+        ${traps.map((t) => { const on = isOfInterest(s, t.node_id); return `<button class="toggle ${on ? "on" : ""}" onclick="toggleInterest('${s.tag}', ${t.node_id})"><span class="strong">${escapeHtml(t.name)}</span><span>${on ? "De interés" : "No"}</span></button>`; }).join("")}
+        <p class="small muted" style="margin:4px 0 0">"Todas" incluye las trampas que se conecten después. La lista se envía sola.</p>
+      </div>
+      <div class="card"><h2>Datos del CICG</h2>
+        <form onsubmit="saveSubject(event, '${s.tag}')" class="row" style="align-items:flex-end">
+          ${field("species", "Especie", s.species)}
+          ${field("species_code", "Código", s.species_code)}
+          ${field("sex", "Sexo", s.sex)}
+          ${field("age", "Edad", s.age)}
+          ${field("band_number", "Anillo", s.band_number)}
+          <button>Guardar</button>
+        </form></div>
+    </div>
+    <div class="card scroll"><h2>Visitas</h2><div id="visit-rows"><p class="muted">Cargando…</p></div></div>`;
+  loadVisits({ tag: s.tag, days: 36500 });
+}
+
+function renderVisitas() {
+  const traps = data.overview?.traps || [];
+  $("screen").innerHTML = `
+    <div class="row between"><h1>Visitas</h1>
+      <div class="row"><a class="button" href="/api/export/visits.csv">Exportar visitas</a><a class="button primary" href="/api/export/reads.csv">Exportar lecturas</a></div></div>
+    <div class="row">
+      <label style="flex:1 1 180px">Trampa<select onchange="setVisitTrap(this.value)"><option value="">Todas</option>${traps.map((t) => `<option value="${t.node_id}" ${String(t.node_id) === ui.visitTrap ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}</select></label>
+      <label style="flex:1 1 180px">Periodo<select onchange="setPeriod(this.value)">${PERIODS.map(([v, l]) => `<option value="${v}" ${v === ui.period ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    </div>
+    <div class="card scroll" id="visit-rows"><p class="muted">Cargando…</p></div>
+    <p class="small muted" style="margin:0">Una visita termina tras 3 s sin leer el tag, igual que en el análisis.</p>`;
+  loadVisits({ nodeId: ui.visitTrap, days: ui.period });
+}
+
+function renderCapturas() {
+  $("screen").innerHTML = '<h1>Capturas</h1><div class="card scroll" id="capture-rows"><p class="muted">Cargando…</p></div>';
+  const result = { capturado: ["Capturado", "ok"], sin_colibri: ["Sin colibrí", "warn"] };
+  return loadInto("capture-rows", "/api/captures", ({ captures }) => (captures.length ? `<table style="min-width:600px"><thead><tr><th>Hora</th><th>Trampa</th><th>Sujeto</th><th>Biomark</th><th>Resultado</th></tr></thead><tbody>
+    ${captures.map((c) => { const [text, css] = result[c.result] || ["Por confirmar", "warn"]; return `<tr>
+      <td class="mono">${escapeHtml(dateTime(c.epoch))}</td><td>${escapeHtml(trapName(c.node_id))}</td>
+      <td class="${c.known ? "italic" : "warn"}">${escapeHtml(c.label)}</td><td class="mono">${escapeHtml(c.biomark)}</td>
+      <td class="strong ${css}">${text}</td></tr>`; }).join("")}</tbody></table>` : '<p class="muted">Todavía no hay capturas.</p>'));
+}
+
+function renderBitacora() {
+  $("screen").innerHTML = `
+    <div class="row between"><h1>Bitácora</h1>
+      <div class="row">${FILTERS.map(([v, l]) => `<button class="${v === ui.filter ? "selected" : ""}" onclick="setFilter('${v}')">${l}</button>`).join("")}</div></div>
+    <div class="card" id="log-rows"><p class="muted">Cargando…</p></div>`;
+  loadLog({ limit: 200, kind: ui.filter });
+}
+
+function isEditing() {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.tagName === "INPUT") return !["checkbox", "file"].includes(el.type);
+  return el.tagName === "SELECT" || el.tagName === "TEXTAREA";
+}
+
+// An operator's half-typed value must survive a refresh: while a field has
+// focus, new data waits. Everything else repaints, including the banners.
+function render(force) {
+  renderBanners();
+  const r = route();
+  document.querySelectorAll("nav a").forEach((a) => {
+    const name = a.dataset.nav;
+    const on = name === r.screen || (r.screen === "trampa" && name === "inicio")
+      || (r.screen === "individuo" && name === "individuos");
+    a.classList.toggle("on", on);
   });
-  if (response.ok) {
-    msg.innerHTML = '<p class="field-ok">Guardado. Esperando confirmación de las trampas.</p>';
-    // The edit is no longer unsaved, so the deferred rebuild may proceed.
-    // Blur first: focus still inside the section would keep it paused.
-    serverState[tagHex] = {
-      species: species || null,
-      band_number: bandNumber || null,
-      of_interest: ofInterest,
-    };
-    if (document.activeElement && document.activeElement.blur) {
-      document.activeElement.blur();
-    }
-    refresh();
-  } else {
-    msg.innerHTML = '<p class="field-error">No se pudo guardar: puede que ya haya demasiadas ' +
-      "marcas de interés a la vez.</p>";
-  }
+  const online = (data.overview?.traps || []).filter((t) => t.reachable).length;
+  const link = data.health?.link;
+  $("nav-status").innerHTML = `<div>${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</div><div>${count(online, "trampa en línea", "trampas en línea")}</div>`;
+  if (!force && isEditing()) return;
+  if (r.screen === "trampa") renderTrampa(r.id, r.tab);
+  else if (r.screen === "individuos") renderIndividuos();
+  else if (r.screen === "individuo") renderIndividuo(r.id);
+  else if (r.screen === "visitas") renderVisitas();
+  else if (r.screen === "capturas") renderCapturas();
+  else if (r.screen === "bitacora") renderBitacora();
+  else renderInicio();
 }
 
-new EventSource("/api/events").onmessage = refresh;
-refresh();
-setInterval(refresh, 30000);
-// station/live-reads-view: no new fetch -- recomputes Últ. contacto and
-// every read group's relative time and "sigue aquí"/stale distinction
-// against a fresh Date.now(), so both keep advancing between the 30s
-// fetches and the operator's own SSE-triggered refreshes.
-setInterval(rerender, 5000);
+async function refresh(force) {
+  const [overview, health, specimens] = await Promise.all([
+    fetch("/api/overview").then((r) => r.json()).catch(() => data.overview),
+    fetch("/health").then((r) => r.json()).catch(() => data.health),
+    fetch("/api/specimens").then((r) => r.json()).catch(() => data.specimens),
+  ]);
+  Object.assign(data, { overview, health, specimens });
+  render(force === true);
+}
+
+window.addEventListener("hashchange", () => { ui.message = ""; render(true); });
+new EventSource("/api/events").onmessage = () => refresh();
+refresh(true);
+setInterval(refresh, 5000);
 </script>
 </html>

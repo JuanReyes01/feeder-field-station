@@ -22,7 +22,7 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -81,7 +81,7 @@ def _boot_count_is_newer(candidate: int, stored: int) -> bool:
     return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,25 @@ CREATE TABLE IF NOT EXISTS specimen (
     species     TEXT,
     band_number TEXT,
     of_interest INTEGER NOT NULL DEFAULT 0
+);
+
+-- SCHEMA_VERSION 5: a subject can be of interest in every trap
+-- (`specimen.of_interest`, which also covers traps connected later) or in
+-- specific ones (this table). What a trap hunts is the union of the two.
+CREATE TABLE IF NOT EXISTS specimen_trap_interest (
+    tag     BLOB    NOT NULL,
+    node_id INTEGER NOT NULL,
+    PRIMARY KEY (tag, node_id)
+);
+
+-- SCHEMA_VERSION 5: what the station knows about a trap that the trap cannot
+-- say itself. Traps join on their own; this row appears only once an operator
+-- has said something about one.
+CREATE TABLE IF NOT EXISTS trap_profile (
+    node_id    INTEGER PRIMARY KEY,
+    name       TEXT,
+    has_latch  INTEGER,
+    setup_done INTEGER NOT NULL DEFAULT 0
 );
 
 -- "Analysis shapes should be views, not tables" (pending.md): `times_seen`/
@@ -269,6 +288,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     if previous_version < 4:
         conn.execute("ALTER TABLE node_cursor ADD COLUMN reported_targets_version INTEGER")
         conn.execute("ALTER TABLE node_cursor ADD COLUMN reported_tags TEXT")
+    if previous_version < 5:
+        # A tag is only a known subject once someone says so. Every tagged bird
+        # is on the CICG's list, so a read of a tag nobody registered is
+        # recorded but shown as an unknown reading. Anything an operator already
+        # described or marked before this version counts as registered.
+        conn.execute("ALTER TABLE specimen ADD COLUMN species_code TEXT")
+        conn.execute("ALTER TABLE specimen ADD COLUMN sex TEXT")
+        conn.execute("ALTER TABLE specimen ADD COLUMN age TEXT")
+        conn.execute("ALTER TABLE specimen ADD COLUMN registered INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "UPDATE specimen SET registered = 1 "
+            "WHERE species IS NOT NULL OR band_number IS NOT NULL OR of_interest = 1"
+        )
 
     conn.execute(
         """
@@ -341,6 +373,29 @@ class SpecimenRow:
     of_interest: bool
     times_seen: int
     last_seen_epoch: float | None
+    species_code: str | None = None
+    sex: str | None = None
+    age: str | None = None
+    registered: bool = False
+    trap_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class CaptureRow:
+    """One trap release and what the operator found, if they have said."""
+
+    node_id: int
+    tag: bytes | None
+    epoch: float
+    result: str | None
+
+
+@dataclass(frozen=True)
+class TrapProfile:
+    node_id: int
+    name: str | None = None
+    has_latch: bool | None = None
+    setup_done: bool = False
 
 
 # The only fields an operator may edit on a specimen (pending.md: "keep the
@@ -349,7 +404,16 @@ class SpecimenRow:
 # `Store.update_specimen` builds its `UPDATE ... SET` clause from this tuple
 # alone, so an unexpected key in `fields` is silently not applied rather
 # than becoming a column name.
-_SPECIMEN_EDITABLE_FIELDS = ("species", "band_number", "of_interest")
+_SPECIMEN_EDITABLE_FIELDS = (
+    "species",
+    "species_code",
+    "sex",
+    "age",
+    "band_number",
+    "of_interest",
+    "registered",
+)
+_SPECIMEN_DESCRIBING_FIELDS = ("species", "species_code", "sex", "age", "band_number")
 
 
 @dataclass(frozen=True)
@@ -803,12 +867,18 @@ class Store:
         rows = self._conn.execute(
             """
             SELECT s.tag, s.species, s.band_number, s.of_interest,
-                   COALESCE(a.times_seen, 0), a.last_seen_epoch
+                   COALESCE(a.times_seen, 0), a.last_seen_epoch,
+                   s.species_code, s.sex, s.age, s.registered
               FROM specimen s
               LEFT JOIN specimen_activity a ON a.tag = s.tag
              ORDER BY s.tag
             """
         ).fetchall()
+        trap_ids: dict[bytes, list[int]] = {}
+        for tag, node_id in self._conn.execute(
+            "SELECT tag, node_id FROM specimen_trap_interest ORDER BY node_id"
+        ):
+            trap_ids.setdefault(tag, []).append(node_id)
         return [
             SpecimenRow(
                 tag=tag,
@@ -817,8 +887,24 @@ class Store:
                 of_interest=bool(of_interest),
                 times_seen=times_seen,
                 last_seen_epoch=last_seen_epoch,
+                species_code=species_code,
+                sex=sex,
+                age=age,
+                registered=bool(registered),
+                trap_ids=tuple(trap_ids.get(tag, ())),
             )
-            for tag, species, band_number, of_interest, times_seen, last_seen_epoch in rows
+            for (
+                tag,
+                species,
+                band_number,
+                of_interest,
+                times_seen,
+                last_seen_epoch,
+                species_code,
+                sex,
+                age,
+                registered,
+            ) in rows
         ]
 
     def wanted_tags(self) -> list[bytes]:
@@ -832,6 +918,169 @@ class Store:
             "SELECT tag FROM specimen WHERE of_interest = 1 ORDER BY tag"
         ).fetchall()
         return [row[0] for row in rows]
+
+    def wanted_tags_for(self, node_id: int) -> list[bytes]:
+        """What this trap should hunt: subjects of interest in every trap, plus
+        those marked for it alone. Tag order, so two calls cannot disagree."""
+        rows = self._conn.execute(
+            """
+            SELECT tag FROM specimen WHERE of_interest = 1
+            UNION
+            SELECT tag FROM specimen_trap_interest WHERE node_id = ?
+            ORDER BY tag
+            """,
+            (node_id,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def set_interest(self, tag: bytes, *, all_traps: bool, node_ids: Sequence[int]) -> bool:
+        """Replace where a subject is of interest. Marking one registers it."""
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE specimen SET of_interest = ?,
+                       registered = CASE WHEN ? THEN 1 ELSE registered END
+                 WHERE tag = ?
+                """,
+                (1 if all_traps else 0, 1 if all_traps or node_ids else 0, tag),
+            )
+            found = cursor.rowcount > 0
+            if found:
+                conn.execute("DELETE FROM specimen_trap_interest WHERE tag = ?", (tag,))
+                if not all_traps:
+                    conn.executemany(
+                        "INSERT INTO specimen_trap_interest (tag, node_id) VALUES (?, ?)",
+                        [(tag, node_id) for node_id in sorted(set(node_ids))],
+                    )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        return found
+
+    def register_specimens(self, specimens: Mapping[bytes, Mapping[str, str]]) -> tuple[int, int]:
+        """Create or update registered subjects, never touching who is of
+        interest: re-importing the list must not change what a trap hunts.
+        Returns how many were created and how many updated."""
+        conn = self._conn
+        created = 0
+        updated = 0
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for tag, fields in specimens.items():
+                exists = conn.execute("SELECT 1 FROM specimen WHERE tag = ?", (tag,)).fetchone()
+                if exists is None:
+                    conn.execute("INSERT INTO specimen (tag, registered) VALUES (?, 1)", (tag,))
+                    created += 1
+                else:
+                    conn.execute("UPDATE specimen SET registered = 1 WHERE tag = ?", (tag,))
+                    updated += 1
+                for key in _SPECIMEN_DESCRIBING_FIELDS:
+                    if key in fields:
+                        conn.execute(
+                            f"UPDATE specimen SET {key} = ? WHERE tag = ?", (fields[key], tag)
+                        )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        return created, updated
+
+    def trap_profiles(self) -> dict[int, TrapProfile]:
+        rows = self._conn.execute(
+            "SELECT node_id, name, has_latch, setup_done FROM trap_profile"
+        ).fetchall()
+        return {
+            node_id: TrapProfile(
+                node_id=node_id,
+                name=name,
+                has_latch=None if has_latch is None else bool(has_latch),
+                setup_done=bool(setup_done),
+            )
+            for node_id, name, has_latch, setup_done in rows
+        }
+
+    def update_trap_profile(self, node_id: int, fields: Mapping[str, object]) -> None:
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("INSERT OR IGNORE INTO trap_profile (node_id) VALUES (?)", (node_id,))
+            for key in ("name", "has_latch", "setup_done"):
+                if key in fields:
+                    conn.execute(
+                        f"UPDATE trap_profile SET {key} = ? WHERE node_id = ?",
+                        (fields[key], node_id),
+                    )
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+    def reads_between(
+        self, *, since_epoch: float = 0.0, until_epoch: float | None = None
+    ) -> list[StoredEvent]:
+        """READS rows received in a window, oldest first, for visits and exports."""
+        rows = self._conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS} FROM event
+             WHERE msg_type = ? AND received_epoch >= ? AND received_epoch < ?
+             ORDER BY seq ASC
+            """,
+            (
+                payloads.READS,
+                since_epoch,
+                until_epoch if until_epoch is not None else float("inf"),
+            ),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def log_events(
+        self, msg_types: Sequence[int], *, limit: int, node_id: int | None = None
+    ) -> list[StoredEvent]:
+        """The newest events of these types, newest first."""
+        marks = ",".join("?" for _ in msg_types)
+        node_clause = "" if node_id is None else "AND node_id = ?"
+        node_args = () if node_id is None else (node_id,)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS} FROM event
+             WHERE msg_type IN ({marks}) {node_clause}
+             ORDER BY seq DESC LIMIT ?
+            """,
+            (*msg_types, *node_args, limit),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def captures(self) -> list[CaptureRow]:
+        """Every release, newest first, each with the result the operator gave."""
+        rows: list[CaptureRow] = []
+        unanswered: dict[int, int] = {}
+        for event in self.log_events(
+            (payloads.CAPTURED, OPERATOR_CAPTURE_ACKNOWLEDGED), limit=10_000
+        )[::-1]:
+            if event.msg_type == payloads.CAPTURED:
+                unanswered[event.node_id] = len(rows)
+                rows.append(
+                    CaptureRow(
+                        node_id=event.node_id,
+                        tag=event.tag,
+                        epoch=(
+                            event.node_epoch
+                            if event.node_epoch is not None
+                            else event.received_epoch
+                        ),
+                        result=None,
+                    )
+                )
+            elif event.node_id in unanswered:
+                index = unanswered.pop(event.node_id)
+                result = event.fields.get("result")
+                rows[index] = replace(
+                    rows[index], result=result if isinstance(result, str) else "capturado"
+                )
+        return rows[::-1]
 
     def update_specimen(self, tag: bytes, fields: Mapping[str, object]) -> bool:
         """Apply only the keys actually present in ``fields`` -- never a
@@ -849,15 +1098,20 @@ class Store:
             if key not in fields:
                 continue
             value = fields[key]
-            if key == "of_interest":
+            if key in ("of_interest", "registered"):
                 value = 1 if value else 0
             assignments.append(f"{key} = ?")
             values.append(value)
 
+        # Describing or marking a subject is saying it is a real one.
+        if "registered" not in fields and (
+            fields.get("of_interest") or any(fields.get(key) for key in _SPECIMEN_DESCRIBING_FIELDS)
+        ):
+            assignments.append("registered = ?")
+            values.append(1)
+
         if not assignments:
-            row = self._conn.execute(
-                "SELECT 1 FROM specimen WHERE tag = ?", (tag,)
-            ).fetchone()
+            row = self._conn.execute("SELECT 1 FROM specimen WHERE tag = ?", (tag,)).fetchone()
             return row is not None
 
         values.append(tag)

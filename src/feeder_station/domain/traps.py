@@ -160,6 +160,10 @@ class Trap:
     # `Registry._note_targets_mismatch` alone -- see `PendingTargetsFetch`'s
     # own docstring for why this cannot share `pending_command`'s slot.
     pending_targets_fetch: PendingTargetsFetch | None = None
+    # A test fire from the station is DISARM followed by ARM: the trap goes to
+    # the released angle and back, without recording a capture. Set by the
+    # test-fire route, cleared once the ARM is queued (app.py).
+    rearm_after_test_fire: bool = False
 
     def is_reachable(self, now: datetime, silence_after: timedelta | None = None) -> bool:
         if self.last_seen is None:
@@ -635,6 +639,7 @@ class Registry:
                     # `reported_targets` might still be stale or absent.
                     "targets_fetch_pending": trap.pending_targets_fetch is not None,
                     "last_seen": trap.last_seen.isoformat() if trap.last_seen else None,
+                    "test_fire_pending": trap.rearm_after_test_fire,
                     # station/remote-arm-restored: the honest caveat --
                     # `wall_reached()` is still a firmware placeholder
                     # (docs/pending.md), so `state == "armed"` only ever

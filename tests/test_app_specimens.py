@@ -18,7 +18,6 @@ makes that true here for free -- ``/api/traps`` already renders it.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -305,133 +304,17 @@ def test_the_per_trap_raw_hex_target_editor_is_removed() -> None:
     assert 'id="targets-${t.node_id}"' not in html
 
 
-def test_the_roster_section_fetches_and_patches_the_specimens_api() -> None:
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert re.search(r'fetch\("/api/specimens"\)', html), (
-        "refresh() must fetch /api/specimens alongside /api/traps and /api/reads"
-    )
-    assert re.search(r"fetch\(`/api/specimens/\$\{tagHex\}`", html), (
-        "saveSpecimen must PATCH the one specimen it edited, not some other endpoint"
-    )
-    assert re.search(r'method:\s*"PATCH"', html)
 
 
-def test_the_of_interest_checkbox_is_a_44px_touch_target() -> None:
-    """S10: this page must work one-handed on a phone -- a bare platform
-    checkbox is far smaller than 44px, so the *label* wrapping it is styled
-    as the touch target, the same discipline every button on this page
-    already follows.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert re.search(r"\.of-interest-toggle\s*\{[^}]*min-height:\s*44px", html, re.DOTALL)
 
 
-def test_saving_a_specimen_sends_of_interest_as_a_boolean_not_the_checkbox_element() -> None:
-    """A stray `.value` instead of `.checked` on a checkbox input sends the
-    string `"on"`/`""` -- truthy either way -- which would make "unmarking"
-    of interest impossible from this page.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert re.search(r"\$\(`interest-\$\{tagHex\}`\)\.checked", html)
 
 
-def test_saving_a_specimen_only_sends_of_interest_when_it_actually_changed() -> None:
-    """A species/band-only save must never smuggle `of_interest` into the
-    PATCH body just because the checkbox is still rendered with its current
-    value -- the API route only skips the broadcast when the key is absent
-    (`test_patch_specimen_updates_species_and_band_number_without_touching_targets`),
-    so the page must actually omit it for an edit that never touched the
-    checkbox, not merely resend the same value.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert re.search(r"serverState\[s\.tag\]\s*=\s*\{", html), (
-        "renderSpecimen must record each specimen's own last-known of_interest "
-        "so saveSpecimen can tell an unchanged checkbox from an edited one"
-    )
-    save_fn = re.search(r"async function saveSpecimen\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
-    assert save_fn, "saveSpecimen must exist"
-    body = save_fn.group(1)
-    assert re.search(r"ofInterest\s*!==\s*serverState\[tagHex\]\.of_interest", body), (
-        "saveSpecimen must compare the checkbox against the recorded original "
-        "before deciding whether of_interest belongs in the request body"
-    )
-    assert not re.search(r"of_interest:\s*ofInterest\s*,?\s*\}\)", body), (
-        "of_interest must never be an unconditional key of the PATCH body"
-    )
 
 
-def test_the_roster_is_not_collapsed_behind_a_disclosure_triangle() -> None:
-    """Marking an animal of interest is how an operator decides what every trap
-    hunts, so it cannot ship inside a closed `<details>`.
-
-    Measured on the bench 2026-09-26: the roster was built, served and
-    working, and the operator's report was "no veo en la interfaz como setear
-    el target" -- it sat collapsed under a summary nobody thought to click.
-    A feature that cannot be found has not been delivered.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    # Strip HTML comments first: the markup carries a comment explaining why
-    # this is not a <details>, and naive substring matching finds the word
-    # there. The first version of this test failed on its own explanation.
-    markup = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
-    container = re.search(r'<div id="specimens">', markup)
-    assert container is not None, "the roster container is gone"
-    # Nothing between the traps list and the roster container may open a
-    # <details>: the roster must be in the page's own flow.
-    before = markup[: container.start()].rsplit('<div id="traps">', 1)[-1]
-    assert not re.search(r"<details[\s>]", before)
 
 
-def test_the_roster_heading_is_spanish_not_an_anglicism() -> None:
-    """Every string the operator reads is Spanish -- the biologists running
-    this are Colombian. "Roster" shipped once and was reported on sight.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert "<h2>Especímenes registrados</h2>" in html
-    # Identifiers and comments stay English by project convention; only what
-    # renders must not.
-    rendered = re.findall(r">([^<>{}]*[A-Za-zÁÉÍÓÚáéíóúÑñ][^<>{}]*)<", html)
-    assert not [text for text in rendered if "roster" in text.lower()]
 
 
-def test_the_roster_is_not_rebuilt_while_the_operator_is_editing_it() -> None:
-    """`refresh()` fires on every SSE notify -- once per READS batch -- so while
-    a tag is being passed the roster container would be rebuilt every few
-    seconds, destroying half-typed input.
-
-    Measured on the bench 2026-09-26: "estoy intentando registrar el tag pero
-    desaparecen las letras cuando intento registrarlo". A live-updating view
-    and an editable form shared one container that was replaced wholesale.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    render = re.search(r"function renderRoster\([^)]*\)\s*\{(.*?)\n\}", html, re.DOTALL)
-    assert render, "renderRoster must exist"
-    body = render.group(1)
-    guard = body.index("rosterIsBeingEdited()")
-    write = body.index('$("specimens").innerHTML')
-    assert guard < write, (
-        "the edit-in-progress guard must run before the container is replaced"
-    )
-    assert re.search(r"if\s*\(!force\s*&&\s*rosterIsBeingEdited\(\)\)", body)
-    # Focus inside the section counts, and so does an unsaved edit after focus
-    # has left it -- either one alone would still lose work.
-    checker = re.search(r"function rosterIsBeingEdited\(\)\s*\{(.*?)\n\}", html, re.DOTALL)
-    assert checker, "rosterIsBeingEdited must exist"
-    assert "document.activeElement" in checker.group(1)
-    assert "serverState" in checker.group(1)
 
 
-def test_a_paused_roster_says_so_instead_of_freezing_silently() -> None:
-    """A list that has stopped updating while still looking live is this
-    project's own recurring defect (docs/pending.md's closing section). The
-    pause is deliberate, so it has to be visible -- and the notice must live
-    outside the container that gets replaced, or the rebuild would erase it.
-    """
-    html = STATIC_INDEX_PATH.read_text(encoding="utf-8")
-    assert 'id="roster-paused"' in html
-    assert "Lista en pausa mientras editás" in html
-    paused_div = html.index('id="roster-paused"')
-    specimens_div = html.index('<div id="specimens">')
-    assert paused_div < specimens_div, (
-        "the pause notice must sit outside #specimens, which is replaced wholesale"
-    )

@@ -78,6 +78,9 @@ class CommandKind(str, Enum):
 # conservative case (nothing cancelled), not the reverse.
 FAULT_CODE_REFUSES: dict[int, CommandKind] = {
     5: CommandKind.ARM,  # STATION_FAULT_ARM_REQUIRES_PRESENCE
+    # STATION_FAULT_ARM_INTERRUPTED: the board reset while arming. Resending
+    # ARM would only reset it again, so the operator decides when to retry.
+    10: CommandKind.ARM,
 }
 
 
