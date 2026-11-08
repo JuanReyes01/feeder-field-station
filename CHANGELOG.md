@@ -80,5 +80,33 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   horas, método, quién lo marcó y lo midió, muestra y fotos.
 - La importación de la base del CICG guarda ahora todas las columnas de cada
   captura. Hay que volver a importar el Excel una vez para traer las medidas.
+- Un individuo es su código CICG: los tags que ha llevado (el que lleva y los
+  que perdió) cuentan como un solo individuo. Individuos muestra una fila por
+  colibrí y cuenta colibríes; los filtros de proyecto, localidad y fechas miran
+  todas sus capturas, con cualquier tag. Su página se abre por código
+  (`#/individuo/CICG_184`) y marcarlo de interés siempre marca el tag que lleva
+  ahora. Visitas, Capturas, Bitácora y el aviso de captura lo nombran por su
+  código; una lectura de un tag perdido dice "tag perdido de CICG_…".
+- Las exportaciones de lecturas y visitas traen `codigo_cicg` y `tag_en_uso`.
+- La importación avisa cuando un código tiene dos tags en uso a la vez; la
+  estación los marca los dos.
+- Página Estación (abajo en el menú): gateway, sonido de captura y
+  notificaciones, datos (importar la base del CICG, exportar, respaldo
+  completo), reloj y qué hacer si no está confirmado, versión con "Buscar
+  actualizaciones", y el umbral de las medidas.
+- El menú lleva arriba el control de las trampas: "Desactivar todas" actúa al
+  instante y "Activar todas" pregunta antes. El sonido de captura es un
+  interruptor y el estado de la gateway y de las trampas se ve abajo.
+- Botones con una sola regla: botón para hacer algo, enlace para ir a otra
+  página; un solo botón verde por pantalla; rojo solo para soltar una trampa o
+  quitar individuos. Pestañas en cada trampa, selector de periodo y de eventos,
+  ruta "Inicio › Trampa" en vez de "Volver a…". El resultado de cada acción
+  aparece abajo de la pantalla, y marcar o quitar se puede deshacer.
+- La configuración de una trampa deja cambiar su tipo (con pestillo o solo
+  lector) y volver a prepararla. La lista de interés de una trampa muestra cada
+  colibrí una vez, con su estado, "Quitar" y un buscador para agregar.
+- En el celular el menú es una barra compacta arriba, y el nombre de cada trampa
+  en Inicio abre su página.
+- Sexo y edad de la base del CICG se muestran en español.
 - En Windows, la estación comprueba su reloj contra un servidor de hora antes
   de pasárselo a las trampas.

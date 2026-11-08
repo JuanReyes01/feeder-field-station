@@ -48,7 +48,7 @@ from typing import NamedTuple
 from openpyxl import load_workbook
 
 from feeder_station.domain.measures import CAPTURE_FIELDS, CaptureField
-from feeder_station.domain.tags import parse_tag
+from feeder_station.domain.tags import parse_tag, to_biomark
 
 _NULL_TOKENS = {"", "null", "none", "na", "n/a", "-", "_", "no info"}
 _UNKNOWN = "unknown"
@@ -429,6 +429,14 @@ def read_specimens(filename: str, data: bytes) -> ImportedTable:
         table.replaced = _written_as_lost(table, mentions) | _replaced_by_a_newer_tag(
             table, tags_by_code
         )
+        for code, tags in sorted(tags_by_code.items()):
+            in_use = sorted(tag for tag in tags if tag not in table.replaced)
+            if len(in_use) > 1:
+                table.warnings.append(
+                    f"{code} tiene {len(in_use)} tags en uso a la vez "
+                    f"({', '.join(to_biomark(tag) for tag in in_use)}): revisa la base. "
+                    "La estación los marca todos."
+                )
     return table
 
 

@@ -1150,6 +1150,27 @@ class Store:
             ("1" if paused else "0",),
         )
 
+    def record_import(self, summary: Mapping[str, object]) -> None:
+        """What the last list import brought, for the Estación page."""
+        self._conn.execute(
+            """
+            INSERT INTO meta (key, value) VALUES ('last_import', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (json.dumps(dict(summary), ensure_ascii=False),),
+        )
+
+    def last_import(self) -> dict[str, object] | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = 'last_import'").fetchone()
+        if row is None:
+            return None
+        loaded = json.loads(row[0])
+        return loaded if isinstance(loaded, dict) else None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
     def update_trap_profile(self, node_id: int, fields: Mapping[str, object]) -> None:
         conn = self._conn
         conn.execute("BEGIN IMMEDIATE")

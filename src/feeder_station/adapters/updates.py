@@ -244,6 +244,13 @@ class UpdateChecker:
                 "message": self._message,
             }
 
+    def check_now(self) -> dict[str, Any]:
+        """The "Buscar actualizaciones" button: ask GitHub now, not tomorrow."""
+        with self._lock:
+            self._next_check = 0.0
+        self._check_if_due()
+        return self.status()
+
     def _check_if_due(self) -> None:
         with self._lock:
             if self._checking or self._monotonic() < self._next_check:

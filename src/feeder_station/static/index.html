@@ -19,21 +19,38 @@
     font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   .layout { display: flex; flex-wrap: wrap; min-height: 100vh; align-items: stretch; }
-  nav {
+  /* The menu stays in view: the trap switch and the station's state are always at hand. */
+  .layout > nav {
     flex: 1 1 200px; background: var(--ink); color: #fff; padding: 20px 14px;
     display: flex; flex-direction: column; gap: 6px;
+    position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-y: auto;
   }
-  nav .brand { font-size: 18px; font-weight: 600; padding: 0 10px 14px; }
-  nav a {
+  .layout > nav .version { display: block; font-size: 12px; font-weight: 400; color: #B9C4BE; margin-top: 2px; }
+  .layout > nav .brand { font-size: 18px; font-weight: 600; padding: 0 10px 14px; }
+  .layout > nav a {
     display: block; min-height: 44px; padding: 10px; border-radius: 6px; color: #fff;
     text-decoration: none; font-weight: 500;
   }
-  nav a.on { background: #fff; color: var(--ink); }
-  nav .status a { display: inline; min-height: 0; padding: 0; color: inherit; text-decoration: underline; font-weight: 400; }
-  nav .status {
-    margin-top: 16px; padding: 12px 10px; border-top: 1px solid #3D4A43; font-size: 13px;
-    color: #E4EAE6;
+  .layout > nav a.on { background: #fff; color: var(--ink); }
+  .layout > nav .status a { display: inline; min-height: 0; padding: 0; color: inherit; text-decoration: underline; font-weight: 400; }
+  .layout > nav .status {
+    margin-top: auto; padding: 12px 10px 4px; border-top: 1px solid #3D4A43; font-size: 13px;
+    color: #E4EAE6; display: flex; flex-direction: column; gap: 8px;
   }
+  .layout > nav .settings-link { border-top: 0; }
+  .trap-switch {
+    display: flex; flex-direction: column; gap: 6px; padding: 10px; margin: 0 0 10px;
+    border: 1px solid #3D4A43; border-radius: 8px;
+  }
+  .trap-switch .ts-state { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+  .trap-switch .ts-note, .layout > nav .ts-note { font-size: 12px; color: #B9C4BE; }
+  .trap-switch button { width: 100%; min-height: 40px; }
+  .layout > nav .danger-outline { background: transparent; color: #FFB596; border-color: #FFB596; }
+  .indicator { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; display: inline-block; }
+  .dot-ok { background: #3FBF8F; }
+  .dot-warn { background: #F08A52; }
+  .dot-off { background: #7C8A83; }
   main {
     flex: 999 1 560px; min-width: 0; padding: 24px; display: flex; flex-direction: column; gap: 16px;
   }
@@ -111,6 +128,51 @@
   .check { flex-direction: row; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
   code { font-family: var(--mono); font-size: 13px; background: var(--soft); padding: 2px 6px; border-radius: 4px; }
   .hidden-file { position: absolute; left: -9999px; }
+  /* A secondary action that lets go of something: releases a trap or takes individuals off. */
+  button.danger-outline { background: var(--surface); color: var(--warn); border-color: var(--warn); }
+  /* Tabs move between a trap's sections; they are links, drawn as tabs. */
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+  .tab {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 8px 14px; color: var(--muted);
+    text-decoration: none; font-weight: 500; border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  /* One choice among a few: a period, a kind of event, a trap's type. */
+  .segmented { display: inline-flex; flex-wrap: wrap; border: 1px solid #8A968F; border-radius: 6px; overflow: hidden; }
+  .segmented button { border: 0; border-radius: 0; border-right: 1px solid #8A968F; min-height: 42px; background: var(--surface); }
+  .segmented button:last-child { border-right: 0; }
+  .segmented button[aria-pressed="true"] { background: var(--ink); color: #fff; font-weight: 600; }
+  .crumbs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 14px; color: var(--muted); }
+  .crumbs a { color: var(--accent-ink); }
+  main a:not(.button):not(.bar-row):not(.tab) { color: var(--accent-ink); }
+  .file-button { color: var(--ink); flex-direction: row; font-size: 15px; }
+  /* On or off, said and shown the same way everywhere. */
+  .switch {
+    display: inline-flex; align-items: center; gap: 10px; border: 0; background: transparent; color: inherit;
+    padding: 4px 0; min-height: 36px; justify-content: flex-start; font-size: inherit; text-align: left;
+  }
+  .switch-track { width: 38px; height: 22px; border-radius: 11px; background: #7C8A83; position: relative; flex: 0 0 auto; transition: background .15s; }
+  .switch-thumb { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch[aria-checked="true"] .switch-track { background: #2E9E78; }
+  .switch[aria-checked="true"] .switch-thumb { left: 19px; }
+  .switch-light { font-size: 15px; color: var(--ink); }
+  .switch-light .switch-track { background: #B9C2BD; }
+  .switch-light[aria-checked="true"] .switch-track { background: var(--accent); }
+  .toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 20;
+    width: min(640px, calc(100vw - 32px)); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    padding: 12px 14px; border-radius: 8px; background: var(--ink); color: #fff; box-shadow: 0 6px 24px rgba(0,0,0,.25);
+  }
+  .toast[hidden] { display: none; }
+  .toast .toast-text { flex: 1 1 260px; }
+  .toast button { min-height: 38px; background: transparent; color: #fff; border-color: #8FA59A; }
+  .toast-error { background: var(--warn-ink); }
+  dialog {
+    border: 0; border-radius: 10px; padding: 20px; width: min(460px, calc(100vw - 32px));
+    color: var(--ink); background: var(--surface); box-shadow: 0 12px 40px rgba(0,0,0,.3);
+  }
+  dialog::backdrop { background: rgba(23,33,29,.45); }
   /* Charts, drawn by hand: the station works offline, with no library to load. */
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; align-items: start; }
   .charts.two { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
@@ -154,22 +216,41 @@
   .capture-body h3 { margin: 10px 0 2px; font-size: 14px; font-weight: 600; grid-column: 1 / -1; }
   .section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
   .section-head h2 { margin: 0; }
+  @media (max-width: 720px) {
+    /* On a phone the menu is a compact bar on top, not a column before the content. */
+    .layout > nav {
+      position: static; height: auto; flex: 1 1 100%; flex-direction: row; flex-wrap: wrap;
+      align-items: center; gap: 6px; padding: 12px 16px;
+    }
+    .layout > nav .brand { flex: 1 1 100%; padding: 0 0 4px; }
+    .layout > nav .version { display: inline; margin-left: 6px; }
+    .layout > nav a { min-height: 40px; padding: 8px 12px; border: 1px solid #3D4A43; }
+    .trap-switch { flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; align-items: center; margin: 0 0 4px; }
+    .trap-switch .ts-state { flex: 1 1 auto; }
+    .trap-switch button { width: auto; flex: 0 0 auto; }
+    .layout > nav .status { flex: 1 1 100%; margin-top: 4px; padding: 8px 0 0; flex-direction: row; flex-wrap: wrap; gap: 4px 16px; }
+    main { padding: 16px; }
+  }
 </style>
 <div class="layout">
   <nav aria-label="Secciones">
-    <div class="brand">Estación CICG</div>
+    <div class="brand">Estación CICG <span class="version" id="nav-version"></span></div>
+    <div class="trap-switch" id="trap-switch"></div>
     <a href="#/inicio" data-nav="inicio">Inicio</a>
     <a href="#/individuos" data-nav="individuos">Individuos</a>
     <a href="#/visitas" data-nav="visitas">Visitas</a>
     <a href="#/capturas" data-nav="capturas">Capturas</a>
     <a href="#/bitacora" data-nav="bitacora">Bitácora</a>
     <div class="status" id="nav-status">Cargando…</div>
+    <a href="#/estacion" data-nav="estacion" class="settings-link">Estación</a>
   </nav>
   <main>
     <div id="banners" class="stack"></div>
     <div id="screen" class="stack">Cargando…</div>
   </main>
 </div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<dialog id="confirm" aria-label="Confirmar"></dialog>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -194,9 +275,9 @@ const TRAP_TABS = {
   visits: "Visitas", log: "Bitácora",
 };
 
-const data = { overview: null, health: null, specimens: null, gateway: null, update: null };
+const data = { overview: null, health: null, specimens: null, gateway: null, update: null, station: null };
 const ui = {
-  filter: "all", period: "1", visitTrap: "", trapSearch: "", message: "", updateHidden: false,
+  filter: "all", period: "1", visitTrap: "", trapSearch: "", updateHidden: false,
   filters: { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" }, scope: "all", entries: "",
   // Details only when asked for: lists, tables and each capture stay closed.
   showList: false, showUnknown: false, showAdd: false, showVisits: false, showBirdVisits: false,
@@ -322,17 +403,215 @@ async function api(path, options) {
   return response.json();
 }
 
-async function act(path, options) {
+// --- Feedback where the operator is looking ----------------------------------
+// The result of an action shows at the bottom of the screen, wherever the page
+// was scrolled, with "Deshacer" when it can be undone. Errors stay until closed.
+const toastState = { timer: null, undo: null };
+
+function toast(text, { undo = null, error = false } = {}) {
+  const box = $("toast");
+  clearTimeout(toastState.timer);
+  toastState.undo = undo;
+  box.className = `toast${error ? " toast-error" : ""}`;
+  box.setAttribute("role", error ? "alert" : "status");
+  box.innerHTML = `<span class="toast-text">${escapeHtml(text)}</span>
+    ${undo ? '<button onclick="undoLast()">Deshacer</button>' : ""}
+    <button class="quiet" onclick="hideToast()">Cerrar</button>`;
+  box.hidden = false;
+  if (!error) toastState.timer = setTimeout(hideToast, undo ? 12000 : 6000);
+}
+
+function hideToast() { $("toast").hidden = true; toastState.undo = null; }
+
+async function undoLast() {
+  const undo = toastState.undo;
+  hideToast();
+  if (undo) await undo();
+}
+
+// A question before what cannot be taken back with "Deshacer".
+function confirmAction({ title, text, ok, danger = false }) {
+  const dialog = $("confirm");
+  dialog.innerHTML = `<form method="dialog" class="stack" style="gap:12px">
+    <h2 style="margin:0">${escapeHtml(title)}</h2>
+    <p style="margin:0">${escapeHtml(text)}</p>
+    <div class="row" style="justify-content:flex-end"><button value="no">Cancelar</button>
+      <button value="yes" class="${danger ? "danger" : "primary"}">${escapeHtml(ok)}</button></div></form>`;
+  dialog.returnValue = "";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "yes"), { once: true });
+    dialog.showModal();
+  });
+}
+
+// `done`: what to tell the operator when it worked (text, or made from the answer).
+async function act(path, options, done) {
   try {
     const result = await api(path, options);
-    ui.message = "";
+    if (done) toast(typeof done === "function" ? done(result) : done);
     await refresh(true);
     return result;
   } catch (error) {
-    ui.message = error.message;
+    toast(error.message, { error: true });
     render(true);
     return null;
   }
+}
+
+// The CICG's database is written in English; the page speaks Spanish. Only
+// what is shown changes: filters and the data keep the database's words.
+const VALUE_ES = {
+  male: "Macho", female: "Hembra", "fem-like-male": "Macho con plumaje de hembra",
+  unknown: "Desconocido", adult: "Adulto", juvenile: "Juvenil", immature: "Inmaduro",
+};
+
+function es(value) { return value ? (VALUE_ES[String(value).trim().toLowerCase()] || value) : value; }
+
+// --- Individuals: a bird is its CICG code ----------------------------------
+// The station keeps tags, and a bird may have worn several: a tag can fall
+// off. What the operator sees and counts is the bird; what a trap hunts is the
+// tag it wears now ("en uso").
+let birdIndex = { source: null, list: [], byKey: new Map(), byTag: new Map(), byCode: new Map() };
+
+function birdKey(s) {
+  const code = (s.cicg_id || "").trim().toLowerCase();
+  return s.registered && code ? `cicg:${code}` : `tag:${s.tag}`;
+}
+
+function makeBird(key, rows) {
+  const last = (s) => s.capture_days.at(-1) || "";
+  const inUse = rows.filter((s) => !s.replaced);
+  const main = (inUse.length ? inUse : rows).slice()
+    .sort((a, b) => last(b).localeCompare(last(a)) || a.tag.localeCompare(b.tag))[0];
+  const captures = rows.flatMap((s) => s.captures.map((c) => ({ ...c, tag: s.tag, biomark: s.biomark })))
+    .sort((a, b) => a.day.localeCompare(b.day));
+  return {
+    key, rows, inUse, main, lost: rows.filter((s) => s.replaced),
+    code: main.cicg_id || null, name: main.cicg_id || main.biomark,
+    species: main.species, sex: main.sex, age: main.age, band_number: main.band_number,
+    tag: main.tag, biomark: main.biomark, captures,
+    capture_days: [...new Set(captures.map((c) => c.day))].sort(),
+    times_seen: rows.reduce((n, s) => n + s.times_seen, 0),
+  };
+}
+
+function birds() {
+  if (birdIndex.source === data.specimens) return birdIndex.list;
+  const groups = new Map();
+  for (const s of registeredSubjects()) {
+    const key = birdKey(s);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  const list = [...groups].map(([key, rows]) => makeBird(key, rows));
+  const byTag = new Map();
+  const byCode = new Map();
+  for (const b of list) {
+    for (const s of b.rows) byTag.set(s.tag, b);
+    if (b.code) byCode.set(b.code.trim().toLowerCase(), b);
+  }
+  birdIndex = { source: data.specimens, list, byKey: new Map(list.map((b) => [b.key, b])), byTag, byCode };
+  return list;
+}
+
+function birdByKey(key) { birds(); return birdIndex.byKey.get(key) || null; }
+function birdByTag(tag) { birds(); return birdIndex.byTag.get(tag) || null; }
+
+// A CICG code, a tag in hex or a BioMark: the bird it belongs to.
+function birdOf(id) {
+  birds();
+  const text = String(id || "").trim();
+  return birdIndex.byCode.get(text.toLowerCase()) || birdIndex.byTag.get(text.toUpperCase())
+    || birdIndex.list.find((b) => b.rows.some((s) => s.biomark === text)) || null;
+}
+
+function birdHref(b) { return `#/individuo/${encodeURIComponent(b.code || b.tag)}`; }
+
+// A tag as the API describes it (known, label, cicg_id, lost_tag), in words.
+function tagName(fields) {
+  if (!fields?.known) return "Lectura desconocida";
+  return `${fields.cicg_id ? `${fields.cicg_id} · ` : ""}${fields.label}`;
+}
+
+function lostChip(fields) { return fields?.lost_tag ? ' <span class="chip warn">tag perdido</span>' : ""; }
+
+function anyMark(s) { return s.all_traps || s.trap_ids.length > 0; }
+// null is "todas las trampas".
+function markedIn(s, nodeId) { return nodeId === null ? s.all_traps : isOfInterest(s, nodeId); }
+// The bird is wanted in a trap when every tag it wears is.
+function birdWanted(b, nodeId) { return b.inUse.length > 0 && b.inUse.every((s) => markedIn(s, nodeId)); }
+function birdMarked(b) { return b.rows.some(anyMark); }
+function lostStillMarked(b) { return b.lost.filter(anyMark); }
+
+function scopeLabel(nodeId) { return nodeId === null ? "todas las trampas" : trapName(nodeId); }
+
+function changeSummary(result, action, nodeId) {
+  const n = result.changed;
+  const verb = action === "add" ? (n === 1 ? "Marcado" : "Marcados") : (n === 1 ? "Quitado" : "Quitados");
+  const parts = [n ? `${verb} ${count(n, "tag", "tags")} en ${scopeLabel(nodeId)}.` : "Nada cambió."];
+  if (result.unchanged) parts.push(`${result.unchanged} ya ${result.unchanged === 1 ? "estaba" : "estaban"} así.`);
+  if (result.created.length) parts.push(`Registrados como nuevos: ${result.created.join(", ")}.`);
+  if (result.missing.length) parts.push(`No encontrados: ${result.missing.join(", ")}.`);
+  if (result.ambiguous.length) parts.push(`Anillo de varios individuos, usa el código CICG: ${result.ambiguous.join(", ")}.`);
+  return parts.join(" ");
+}
+
+// Every change of interest can be undone: each tag goes back to where it was.
+async function changeInterest(action, body) {
+  const nodeId = body.node_id !== undefined ? body.node_id : scopeId();
+  const before = new Map((data.specimens?.specimens || []).map((s) => [s.tag, { all_traps: s.all_traps, node_ids: s.trap_ids.slice() }]));
+  const result = await act("/api/specimens/interest/change", jsonBody("POST", { action, ...body, node_id: nodeId }));
+  if (!result) return null;
+  const changed = result.changed_tags || [];
+  toast(changeSummary(result, action, nodeId), { undo: changed.length ? () => restoreInterest(changed, before) : null });
+  return result;
+}
+
+async function restoreInterest(tags, before) {
+  const groups = new Map();
+  for (const tag of tags) {
+    const was = before.get(tag) || { all_traps: false, node_ids: [] };
+    const key = JSON.stringify(was);
+    if (!groups.has(key)) groups.set(key, { ...was, tags: [] });
+    groups.get(key).tags.push(tag);
+  }
+  for (const group of groups.values()) {
+    if (!(await act("/api/specimens/interest", jsonBody("POST", group)))) return;
+  }
+  toast("Deshecho: las trampas vuelven a como estaban.");
+}
+
+// A bird on or off a trap (or all of them), from its page or a trap's list.
+function toggleBird(key, nodeId) {
+  const b = birdByKey(key);
+  if (!b) return null;
+  const node = nodeId === null ? null : Number(nodeId);
+  if (birdWanted(b, node)) {
+    return changeInterest("remove", { node_id: node, tags: b.rows.filter((s) => markedIn(s, node)).map((s) => s.tag) });
+  }
+  return changeInterest("add", { node_id: node, tags: b.inUse.map((s) => s.tag) });
+}
+
+function unmarkLost(key) {
+  const b = birdByKey(key);
+  return b ? changeInterest("remove", { node_id: null, tags: lostStillMarked(b).map((s) => s.tag) }) : null;
+}
+
+// A tag that is no bird yet (an unknown reading).
+function markTag(tag) { return changeInterest("add", { tags: [tag] }); }
+
+function pauseTraps() {
+  return act("/api/traps/pause", { method: "POST" }, "Trampas desactivadas: se están soltando.");
+}
+
+async function confirmResume() {
+  const latched = (data.overview?.traps || []).filter(canCapture).length;
+  const ok = await confirmAction({
+    title: "¿Activar todas las trampas?",
+    text: `Se ${latched === 1 ? "arma 1 trampa con pestillo" : `arman ${latched} trampas con pestillo`} y vuelven a capturar a los individuos de interés. Una que se conecte después también se arma.`,
+    ok: "Activar todas",
+  });
+  if (ok) await act("/api/traps/resume", { method: "POST" }, "Trampas activadas: se están armando.");
 }
 
 const jsonBody = (method, body) => ({
@@ -340,8 +619,6 @@ const jsonBody = (method, body) => ({
 });
 
 function arm(id) { return act(`/api/traps/${id}/arm`, { method: "POST" }); }
-function pauseTraps() { return act("/api/traps/pause", { method: "POST" }); }
-function resumeTraps() { return act("/api/traps/resume", { method: "POST" }); }
 function canCapture(t) { return t.has_latch !== false; }
 // Released and nothing left to send: the trap itself says it is deactivated.
 function confirmedPaused(t) { return t.state === "idle" && !t.pending_command; }
@@ -371,19 +648,7 @@ function isOfInterest(subject, nodeId) {
   return subject.all_traps || subject.trap_ids.includes(Number(nodeId));
 }
 
-function toggleInterest(tag, nodeId) {
-  const subject = subjectByTag(tag);
-  const known = (data.overview?.traps || []).map((t) => t.node_id);
-  let ids = subject.all_traps ? known : subject.trap_ids.slice();
-  const id = Number(nodeId);
-  ids = ids.includes(id) ? ids.filter((n) => n !== id) : ids.concat(id);
-  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: false, node_ids: ids }));
-}
 
-function toggleInterestEverywhere(tag) {
-  const subject = subjectByTag(tag);
-  return act(`/api/specimens/${tag}/interest`, jsonBody("PUT", { all_traps: !subject.all_traps, node_ids: [] }));
-}
 
 function registerUnknown(tag) {
   return act(`/api/specimens/${tag}`, jsonBody("PATCH", { registered: true }));
@@ -408,26 +673,24 @@ async function saveSubject(event, tag) {
     species: value("species"), species_code: value("species_code"), sex: value("sex"),
     age: value("age"), band_number: value("band_number"), cicg_id: value("cicg_id"), registered: true,
   }));
-  if (saved) { ui.message = "Guardado."; document.activeElement?.blur(); render(true); }
+  if (saved) { toast("Guardado."); ui.editBird = false; document.activeElement?.blur(); render(true); }
 }
 
 async function importExcel(input) {
   const file = input.files[0];
   if (!file) return;
-  ui.message = `Importando ${file.name}…`;
-  render(true);
+  toast(`Importando ${file.name}…`);
   const result = await act(`/api/specimens/import?filename=${encodeURIComponent(file.name)}`, {
     method: "POST", body: file,
   });
   input.value = "";
   if (!result) return;
-  const parts = [`${result.sheet ? `Hoja "${result.sheet}": ` : ""}${result.created} nuevos, ${result.updated} actualizados, ${result.dated} con fecha de captura.`];
-  if (result.replaced) parts.push(`${count(result.replaced, "tag reemplazado", "tags reemplazados")} (el colibrí ya lleva otro).`);
+  const parts = [`${result.sheet ? `Hoja "${result.sheet}": ` : ""}${count(result.created + result.updated, "tag", "tags")} (${result.created} nuevos), ${result.dated} con fecha de captura.`];
+  if (result.replaced) parts.push(`${count(result.replaced, "tag perdido", "tags perdidos")} (el colibrí ya lleva otro).`);
   if (result.without_tag) parts.push(`${count(result.without_tag, "fila sin PIT se omitió", "filas sin PIT se omitieron")}: sin tag no hay lectura.`);
   if (result.error_count) parts.push(`${count(result.error_count, "fila", "filas")} sin importar: ${result.errors.slice(0, 3).join(" ")}`);
   if (result.warning_count) parts.push(`${count(result.warning_count, "aviso", "avisos")}: ${result.warnings.slice(0, 3).join(" ")}`);
-  ui.message = parts.join(" ");
-  render(true);
+  toast(parts.join(" "), { error: Boolean(result.error_count) });
 }
 
 function setFilter(value) { ui.filter = value; render(true); }
@@ -462,8 +725,9 @@ function renderBanners() {
   const parts = [];
   const update = updateBanner();
   if (update) parts.push(update);
+  const onStation = route().screen === "estacion";
   if (data.health?.clock_trust === "unset") {
-    parts.push('<div class="banner banner-warn"><div><div class="title">Reloj de la estación sin confirmar</div>Las horas en esta pantalla pueden ser incorrectas.</div></div>');
+    parts.push(`<div class="banner banner-warn"><div><div class="title">Reloj de la estación sin confirmar</div>Las horas en esta pantalla pueden ser incorrectas y la estación no le pasa la hora a las trampas.</div>${onStation ? "" : '<a class="button" href="#/estacion">Qué hacer</a>'}</div>`);
   }
   if (data.overview?.paused) {
     const latched = traps.filter(canCapture);
@@ -472,20 +736,21 @@ function renderBanners() {
       ? `${done} de ${latched.length} ya ${latched.length === 1 ? "confirmó" : "confirmaron"} que ${latched.length === 1 ? "está suelta" : "están sueltas"}.`
       : "Ninguna trampa conectada.";
     parts.push(`<div class="banner banner-warn"><div><div class="title">Trampas desactivadas: no van a capturar</div>${detail} Una que se conecte ahora también se desactiva.</div>
-      <button class="primary" onclick="resumeTraps()">Activar todas</button></div>`);
+      <button class="primary" onclick="confirmResume()">Activar todas</button></div>`);
   }
   const link = data.health?.link;
   if (link && link.connected === false) {
-    parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div>${route().screen === "gateway" ? "" : '<a class="button" href="#/gateway">Elegir puerto</a>'}</div>`);
+    parts.push(`<div class="banner banner-warn"><div><div class="title">Enlace de radio caído</div>La gateway no responde.${link.last_error ? ` (${escapeHtml(link.last_error)})` : ""}</div>${onStation ? "" : '<a class="button" href="#/estacion">Elegir puerto</a>'}</div>`);
   }
   for (const t of traps.filter((x) => x.capture)) {
     const subject = subjectByTag(t.capture.tag);
-    const label = subject?.registered ? (subject.species || "Sin especie") : "Lectura desconocida";
+    const b = subject?.registered ? birdByTag(subject.tag) : null;
+    const name = b ? `${b.code ? `${b.code} · ` : ""}${b.species || "Sin especie"}` : "Lectura desconocida";
     parts.push(`<div class="banner banner-warn">
       <div><div class="title">${escapeHtml(t.name)} se soltó</div>
-      <span class="italic">${escapeHtml(label)}</span> · <span class="mono">${escapeHtml(subject?.biomark || t.capture.tag)}</span>. Revisa la red y di qué encontraste.</div>
+      <span class="strong">${escapeHtml(name)}</span> · <span class="mono">${escapeHtml(subject?.biomark || t.capture.tag)}</span>. Revisa la red y di qué encontraste.</div>
       <div class="row">
-        <button class="danger" onclick="ack(${t.node_id}, 'capturado')">Capturado</button>
+        <button class="primary" onclick="ack(${t.node_id}, 'capturado')">Capturado</button>
         <button onclick="ack(${t.node_id}, 'sin_colibri')">Sin colibrí</button>
         ${sound.on ? "" : '<button class="quiet" onclick="toggleCaptureSound()">Activar sonido</button>'}
       </div></div>`);
@@ -494,9 +759,6 @@ function renderBanners() {
     parts.push(`<div class="banner banner-info">
       <div><div class="title">${escapeHtml(t.name)} se conectó sola</div>Ya está registrando visitas. Falta prepararla para capturar.</div>
       <a class="button primary" href="#/trampa/${t.node_id}/prep">Preparar ${escapeHtml(t.name)}</a></div>`);
-  }
-  if (ui.message) {
-    parts.push(`<div class="banner banner-info"><div>${escapeHtml(ui.message)}</div><button class="quiet" onclick="ui.message=''; render(true)">Cerrar</button></div>`);
   }
   $("banners").innerHTML = parts.join("");
 }
@@ -507,34 +769,33 @@ function renderInicio() {
   const online = traps.filter((t) => t.reachable).length;
   const stats = [
     ["Visitas hoy", o?.visits_today ?? 0], ["Individuos hoy", o?.subjects_today ?? 0],
-    ["Capturas hoy", o?.captures_today ?? 0], ["Trampas en línea", online],
+    ["Capturas hoy", o?.captures_today ?? 0], ["Trampas en línea", `${online} de ${traps.length}`],
   ];
   const rows = traps.map((t) => {
     const [clock, clockClass] = clockNote(t);
     const [list, listClass] = listNote(t);
     const wanted = t.wanted?.length ?? 0;
     return `<tr>
-      <td class="strong">${escapeHtml(t.name)}</td>
+      <td><a class="strong" href="#/trampa/${t.node_id}">${escapeHtml(t.name)}</a></td>
       <td class="strong ${isPrepared(t) ? stateClass(t) : "info"}">${isPrepared(t) ? escapeHtml(stateLabel(t)) : "Falta preparar"}</td>
       <td class="${t.reachable ? "" : "warn strong"}">${t.reachable ? "" : "Sin señal · "}${escapeHtml(ago(t.last_seen))}</td>
       <td><span class="mono">${clockTime(t.clock_epoch)}</span><br><span class="${clockClass}">${clock}</span></td>
-      <td>${t.has_latch === false ? "No aplica" : `${count(wanted, "sujeto", "sujetos")}<br><span class="${listClass}">${list}</span>`}</td>
+      <td>${t.has_latch === false ? "No aplica" : `${wanted} de ${interestLimit()}<br><span class="${listClass}">${list}</span>`}</td>
       <td>${t.visits_today ?? 0}</td>
-      <td><a class="button" href="#/trampa/${t.node_id}">Abrir</a></td>
     </tr>`;
   }).join("");
   $("screen").innerHTML = `
-    <div class="row between"><h1>Inicio</h1>
-      ${o?.paused ? "" : '<button onclick="pauseTraps()">Desactivar todas las trampas</button>'}</div>
+    <h1>Inicio</h1>
     <div class="grid">${stats.map(([label, value]) => `<div class="stat"><div class="small muted">${label}</div><div class="value">${value}</div></div>`).join("")}</div>
     <div class="card scroll"><h2>Trampas</h2>
       ${traps.length
-        ? `<table style="min-width:820px"><thead><tr><th>Trampa</th><th>Estado</th><th>Última señal</th><th>Hora en la trampa</th><th>Lista de interés</th><th>Visitas hoy</th><th><span class="hidden-file">Acción</span></th></tr></thead><tbody>${rows}</tbody></table>`
+        ? `<table style="min-width:720px"><thead><tr><th>Trampa</th><th>Estado</th><th>Última señal</th><th>Hora en la trampa</th><th>Lista de interés</th><th>Visitas hoy</th></tr></thead><tbody>${rows}</tbody></table>`
         : '<p class="muted">Prende una trampa: aparece aquí sola.</p>'}
     </div>
-    <div class="card"><div class="row between"><h2>Últimos eventos</h2><a class="button" href="#/bitacora">Ver bitácora</a></div><div id="log-rows" class="muted">Cargando…</div></div>`;
+    <div class="card"><div class="section-head"><h2>Últimos eventos</h2><a href="#/bitacora">Ver bitácora</a></div><div id="log-rows" class="muted">Cargando…</div></div>`;
   loadLog({ limit: 6, kind: "all" });
 }
+
 
 function loadLog({ limit, kind, nodeId }) {
   const query = new URLSearchParams({ limit, kind });
@@ -558,60 +819,104 @@ function trapTabs(t) {
 function renderTrampa(id, requestedTab) {
   const t = trapById(id);
   if (!t) {
-    $("screen").innerHTML = `<h1>Trampa ${escapeHtml(trapCode(id))}</h1><div class="card muted">Esta trampa no se ha conectado.</div>`;
+    $("screen").innerHTML = `<nav class="crumbs" aria-label="Ruta"><a href="#/inicio">Inicio</a><span aria-hidden="true">›</span><span>Trampa ${escapeHtml(trapCode(id))}</span></nav>
+      <div class="card muted">Esta trampa no se ha conectado.</div>`;
     return;
   }
   const tabs = trapTabs(t);
   const tab = tabs.includes(requestedTab) ? requestedTab : tabs[0];
-  const tabButtons = tabs.map((name) => `<a class="button ${name === tab ? "selected-link" : ""}" style="${name === tab ? "background:var(--ink);color:#fff" : ""}" href="#/trampa/${t.node_id}/${name}">${TRAP_TABS[name]}</a>`).join("");
+  const tabLinks = tabs.map((name) => `<a role="tab" class="tab ${name === tab ? "on" : ""}" aria-selected="${name === tab}" href="#/trampa/${t.node_id}/${name}">${TRAP_TABS[name]}</a>`).join("");
   const body = {
     prep: renderPrep, control: renderControl, config: renderConfig, list: renderList,
     visits: renderTrapVisits, log: renderTrapLog,
   }[tab](t);
   $("screen").innerHTML = `
-    <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/inicio">Volver a inicio</a></div>
-    <div class="row between" style="align-items:flex-end">
-      <div><h1>${escapeHtml(t.name)}</h1>
+    <nav class="crumbs" aria-label="Ruta"><a href="#/inicio">Inicio</a><span aria-hidden="true">›</span><span>${escapeHtml(t.name)}</span></nav>
+    <div><h1>${escapeHtml(t.name)}</h1>
       <div class="small muted">${escapeHtml(stateLabel(t))} · Última señal: ${escapeHtml(ago(t.last_seen).toLowerCase())} · ${t.has_latch === null ? "Sin definir" : t.has_latch ? "Con pestillo" : "Solo lector"}</div></div>
-      <div class="row">${tabButtons}</div>
-    </div>
+    <div class="tabs" role="tablist">${tabLinks}</div>
     ${body}`;
   if (tab === "visits") loadVisits({ nodeId: t.node_id, days: 1 });
   if (tab === "log") loadLog({ limit: 100, kind: "all", nodeId: t.node_id });
   if (tab === "control") loadLog({ limit: 6, kind: "commands", nodeId: t.node_id });
 }
 
-function subjectToggles(t) {
-  return `<label>Buscar individuo para agregar<input value="${escapeHtml(ui.trapSearch)}" oninput="setTrapSearch(this.value, ${t.node_id})" placeholder="biomark, especie o anillo"></label>
-    <div id="trap-subject-rows" style="margin-top:12px">${trapSubjectRows(t)}</div>`;
+// One list per trap: who the station wants there and what the trap has, by bird.
+function trapBirds(t) {
+  birds();
+  const wanted = new Set((t.wanted || []).map((w) => w.tag));
+  const reported = new Set((t.reported || []).map((r) => r.tag));
+  const entries = new Map();
+  for (const tag of new Set([...wanted, ...reported])) {
+    const b = birdByTag(tag);
+    const key = b ? b.key : `tag:${tag}`;
+    if (!entries.has(key)) entries.set(key, { b, tag, tags: [] });
+    entries.get(key).tags.push(tag);
+  }
+  return [...entries.values()].map((e) => {
+    const isWanted = e.tags.some((tag) => wanted.has(tag));
+    const inTrap = e.tags.filter((tag) => wanted.has(tag)).every((tag) => reported.has(tag));
+    let status;
+    if (isWanted && inTrap) status = ["En la trampa", "ok"];
+    else if (isWanted) status = t.reachable ? ["Enviando…", "info"] : ["La recibe al conectarse", "warn"];
+    else status = t.reachable ? ["Saliendo…", "info"] : ["La quita al conectarse", "warn"];
+    const lost = e.b ? e.b.lost.some((s) => e.tags.includes(s.tag)) : false;
+    return { ...e, isWanted, status, lost, removeTags: e.tags.filter((tag) => wanted.has(tag)) };
+  }).sort((x, y) => (x.b?.name || x.tag).localeCompare(y.b?.name || y.tag));
 }
 
-function subjectButton(s, t) {
-  const on = isOfInterest(s, t.node_id);
-  return `<button class="toggle ${on ? "on" : ""}" onclick="toggleInterest('${s.tag}', ${t.node_id})">
-    <span><span class="italic">${escapeHtml(s.species || "Sin especie")}</span> · <span class="mono small">${escapeHtml(s.biomark)}</span></span>
-    <span>${on ? (s.all_traps ? "De interés en todas" : "De interés") : "No"}</span></button>`;
+function removeFromTrap(nodeId, tags) {
+  return changeInterest("remove", { node_id: Number(nodeId), tags: tags.split(",") });
 }
 
-function trapSubjectRows(t) {
-  const subjects = (data.specimens?.specimens || []).filter((s) => s.registered);
-  if (!subjects.length) return '<p class="muted">Todavía no hay individuos. <a href="#/individuos">Importa el Excel</a>.</p>';
-  const marked = subjects.filter((s) => isOfInterest(s, t.node_id));
-  const others = ui.trapSearch.trim()
-    ? subjects.filter((s) => !isOfInterest(s, t.node_id) && matchesSearch(s, ui.trapSearch))
-    : [];
-  const shown = others.slice(0, MAX_SEARCH_RESULTS);
-  return [
-    marked.length ? marked.map((s) => subjectButton(s, t)).join("") : '<p class="muted">Ningún individuo marcado en esta trampa.</p>',
-    shown.map((s) => subjectButton(s, t)).join(""),
-    others.length > shown.length ? `<p class="small muted">Mostrando ${shown.length} de ${others.length}. Afina la búsqueda.</p>` : "",
-  ].join("");
+function addToTrap(nodeId, key) {
+  const b = birdByKey(key);
+  return b ? changeInterest("add", { node_id: Number(nodeId), tags: b.inUse.map((s) => s.tag) }) : null;
+}
+
+function trapListRows(t) {
+  const rows = trapBirds(t);
+  if (!rows.length) return '<p class="muted" style="margin:0">Ningún individuo en esta trampa.</p>';
+  return rows.map((e) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
+    <span style="flex:1 1 auto;min-width:0">${e.b ? `<a href="${birdHref(e.b)}"><span class="strong">${escapeHtml(e.b.code || e.b.biomark)}</span></a> · <span class="italic">${escapeHtml(e.b.species || "Sin especie")}</span>` : '<span class="warn">Lectura desconocida</span>'}
+      <span class="mono small muted"> · ${escapeHtml(e.tags.map((tag) => subjectByTag(tag)?.biomark || tag).join(", "))}</span>${e.lost ? ' <span class="chip warn">tag perdido</span>' : ""}</span>
+    <span class="small ${e.status[1]}" style="flex:0 0 auto">${e.status[0]}</span>
+    ${e.isWanted ? `<button class="quiet" style="flex:0 0 auto" onclick="removeFromTrap(${t.node_id}, '${e.removeTags.join(",")}')">Quitar</button>` : ""}
+  </div>`).join("");
+}
+
+function trapSearchRows(t) {
+  const q = ui.trapSearch.trim();
+  if (!q) return "";
+  const found = birds().filter((b) => b.inUse.length && !birdWanted(b, t.node_id) && matchesBird(b, q));
+  const shown = found.slice(0, MAX_SEARCH_RESULTS);
+  if (!shown.length) return '<p class="small muted" style="margin:8px 0 0">Ningún individuo sin marcar coincide.</p>';
+  return shown.map((b) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
+    <span><span class="strong">${escapeHtml(b.code || b.biomark)}</span> · <span class="italic">${escapeHtml(b.species || "Sin especie")}</span><span class="mono small muted"> · ${escapeHtml(b.inUse.map((s) => s.biomark).join(", "))}</span></span>
+    <button class="quiet" onclick="addToTrap(${t.node_id}, '${b.key}')">Agregar</button></div>`).join("")
+    + (found.length > shown.length ? `<p class="small muted">Mostrando ${shown.length} de ${found.length}. Afina la búsqueda.</p>` : "");
 }
 
 function setTrapSearch(value, nodeId) {
   ui.trapSearch = value;
   const t = trapById(nodeId);
-  if (t && $("trap-subject-rows")) $("trap-subject-rows").innerHTML = trapSubjectRows(t);
+  if (t && $("trap-search-rows")) $("trap-search-rows").innerHTML = trapSearchRows(t);
+}
+
+function chooseInIndividuos(nodeId) {
+  ui.scope = String(nodeId);
+  location.hash = "#/individuos";
+}
+
+function trapListEditor(t) {
+  return `<div class="stack" style="gap:8px">
+    <div class="row">
+      <label style="flex:1 1 260px">Agregar un individuo<input value="${escapeHtml(ui.trapSearch)}" oninput="setTrapSearch(this.value, ${t.node_id})" placeholder="código CICG, biomark, especie o anillo"></label>
+      <button style="align-self:flex-end" onclick="chooseInIndividuos(${t.node_id})">Elegir con filtros</button>
+    </div>
+    <div id="trap-search-rows">${trapSearchRows(t)}</div>
+    <div>${trapListRows(t)}</div>
+  </div>`;
 }
 
 function renderPrep(t) {
@@ -622,16 +927,16 @@ function renderPrep(t) {
       <div class="ok">Conectada sola al prenderla.</div>
       <div>Hora en la trampa: <span class="mono">${clockTime(t.clock_epoch)}</span> · <span class="${clockClass}">${clock}</span></div></div>
     <div class="card step"><div class="strong">2. ¿Tiene pestillo?</div>
-      <div class="row">
-        <button class="big ${latch ? "selected" : ""}" onclick="setLatch(${t.node_id}, true)">Con pestillo</button>
-        <button class="big" onclick="setLatch(${t.node_id}, false)">Solo lector</button>
+      <div class="segmented" role="group" aria-label="Tipo de trampa">
+        <button aria-pressed="${latch}" onclick="setLatch(${t.node_id}, true)">Con pestillo</button>
+        <button aria-pressed="${t.has_latch === false}" onclick="setLatch(${t.node_id}, false)">Solo lector</button>
       </div></div>
     ${latch ? `
     <div class="card step"><div class="strong">3. Calibrar el pestillo</div>
       <p style="margin:0">Por ahora se hace por USB, una vez por trampa, y al cambiar el servo:</p>
       <code>pio run -e calibrate -t upload -t monitor</code>
       <p class="small muted" style="margin:0">Los ángulos quedan guardados en la trampa. Si no está calibrada, rechaza armar y el fallo sale en la bitácora.</p></div>
-    <div class="card step"><div class="strong">4. Escoger a quién capturar</div><div>${subjectToggles(t)}</div></div>
+    <div class="card step"><div class="strong">4. Escoger a quién capturar</div>${trapListEditor(t)}</div>
     <div class="card step"><div class="strong">5. Armado</div>
       <div>La trampa se arma sola. Estado ahora: <span class="strong ${stateClass(t)}">${escapeHtml(stateLabel(t))}</span></div>
       ${t.state === "armed" ? "" : `<p class="small muted" style="margin:0">Si no llega a "Armada" en unos segundos, revisa la bitácora.</p><div><button onclick="arm(${t.node_id})">Armar</button></div>`}
@@ -651,26 +956,35 @@ function renderControl(t) {
         ${t.reachable ? "" : `<div class="warn strong">Sin señal: este es su último reporte.</div>`}
         ${t.state_may_be_stale ? '<div class="warn strong">Puede no ser su último reporte.</div>' : ""}
       </div>
-      <div class="row">
-        ${data.overview?.paused
-          ? '<p class="warn strong" style="margin:0">Todas las trampas están desactivadas. Actívalas desde Inicio.</p>'
-          : armed
-            ? `<button class="big" onclick="testFire(${t.node_id})">Disparar (prueba)</button>
-             <button class="big" onclick="disarm(${t.node_id})">Desarmar para mantenimiento</button>`
-            : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}
-      </div>
+      ${data.overview?.paused
+        ? `<div class="banner banner-warn"><div>Todas las trampas están desactivadas: esta no se arma ni se prueba.</div><button class="primary" onclick="confirmResume()">Activar todas</button></div>`
+        : `<div class="row">${armed
+          ? `<button class="danger-outline big" onclick="testFire(${t.node_id})">Disparar (prueba)</button>
+             <button class="danger-outline big" onclick="disarm(${t.node_id})">Desarmar para mantenimiento</button>`
+          : `<button class="primary big" onclick="arm(${t.node_id})">Armar</button>`}</div>`}
       ${t.pending_command || t.test_fire_pending ? `<div class="banner banner-info"><div>${pending}: esperando confirmación de la trampa…</div><button onclick="cancelCommand(${t.node_id})">Cancelar</button></div>` : ""}
-      <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un sujeto de su lista; el mismo tag no la vuelve a disparar hasta que respondas la captura (o 10 min). "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
+      <p class="small muted" style="margin:0">La trampa se arma sola al prenderla y 5 s después de cada disparo. Se suelta cuando llega un individuo de su lista; el mismo tag no la vuelve a disparar hasta que respondas la captura (o 10 min). "Armada" confirma que el servo se movió, no que el aro esté puesto. "Armar" solo aparece si quedó desarmada.</p>
     </div>
-    <div class="card"><h2>Últimos comandos</h2><div id="log-rows" class="muted">Cargando…</div></div>
+    <div class="card"><div class="section-head"><h2>Últimos comandos</h2><a href="#/trampa/${t.node_id}/log">Ver bitácora</a></div><div id="log-rows" class="muted">Cargando…</div></div>
   </div>`;
+}
+
+async function setTrapType(id, hasLatch) {
+  // A reader that gets a latch needs calibrating and choosing whom to catch.
+  const profile = hasLatch ? { has_latch: true, setup_done: false } : { has_latch: false, setup_done: true };
+  const done = await act(`/api/traps/${id}/profile`, jsonBody("PATCH", profile), hasLatch ? "Ahora es una trampa con pestillo: falta prepararla." : "Ahora es solo lector.");
+  if (done && hasLatch) location.hash = `#/trampa/${id}/prep`;
+}
+
+async function redoPrep(id) {
+  const done = await act(`/api/traps/${id}/profile`, jsonBody("PATCH", { setup_done: false }));
+  if (done) location.hash = `#/trampa/${id}/prep`;
 }
 
 function renderConfig(t) {
   const [clock, clockClass] = clockNote(t);
   const [list, listClass] = listNote(t);
   const lines = [
-    ["Tipo", t.has_latch === null ? "Sin definir" : t.has_latch ? "Con pestillo" : "Solo lector", ""],
     ["Identificador", `${t.code} (sale de su MAC)`, ""],
     ["Última señal", ago(t.last_seen), t.reachable ? "" : "warn"],
     ["Hora en la trampa", clockTime(t.clock_epoch), ""],
@@ -680,12 +994,18 @@ function renderConfig(t) {
     ["Calibración del pestillo", "Guardada en la trampa, por USB", ""],
     ["Batería", t.battery_mv ? `${t.battery_mv} mV` : "Sin lectura en esta versión", ""],
   ];
-  return `<div class="card narrow">
-    <form onsubmit="event.preventDefault(); saveTrapName(${t.node_id})" class="row" style="align-items:flex-end;margin-bottom:12px">
+  return `<div class="card narrow stack">
+    <form onsubmit="event.preventDefault(); saveTrapName(${t.node_id})" class="row" style="align-items:flex-end">
       <label style="flex:1 1 240px">Lugar (opcional)<input id="trap-name" value="${escapeHtml(t.place || "")}" placeholder="Comedero del jardín"></label>
       <button>Guardar</button>
     </form>
-    ${lines.map(([k, v, css]) => `<div class="line"><span class="muted">${k}</span><span class="${css}">${escapeHtml(v)}</span></div>`).join("")}
+    <div><div class="small muted" style="margin-bottom:4px">Tipo</div>
+      <div class="segmented" role="group" aria-label="Tipo de trampa">
+        <button aria-pressed="${t.has_latch === true}" onclick="setTrapType(${t.node_id}, true)">Con pestillo</button>
+        <button aria-pressed="${t.has_latch === false}" onclick="setTrapType(${t.node_id}, false)">Solo lector</button>
+      </div></div>
+    <div>${lines.map(([k, v, css]) => `<div class="line"><span class="muted">${k}</span><span class="${css}">${escapeHtml(v)}</span></div>`).join("")}</div>
+    ${t.has_latch ? `<div class="row"><button onclick="redoPrep(${t.node_id})">Volver a preparar</button></div>` : ""}
   </div>`;
 }
 
@@ -693,17 +1013,19 @@ function renderList(t) {
   const [list] = listNote(t);
   const css = t.targets_match === true && t.pending_command !== "set_targets" ? "banner-ok"
     : t.targets_match === false ? "banner-warn" : "banner-info";
-  const reported = t.reported === null || t.reported === undefined
-    ? '<p class="muted">La trampa todavía no ha reportado su lista.</p>'
-    : t.reported.length
-      ? t.reported.map((r) => `<div class="line"><span class="mono small">${escapeHtml(r.biomark)}</span><span class="${r.known ? "italic" : "warn"}">${escapeHtml(r.label)}</span></div>`).join("")
-      : '<p class="muted">La lista de la trampa está vacía.</p>';
   return `<div class="card stack narrow">
-    <div class="banner ${css}"><div class="strong">${list}</div></div>
-    <div><h2>Sujetos de interés para esta trampa</h2>${subjectToggles(t)}</div>
-    <div><h2>Lista que tiene la trampa ahora</h2>${reported}</div>
+    <div class="banner ${css}"><div><span class="strong">${list}</span> · ${t.wanted?.length ?? 0} de ${interestLimit()} tags</div></div>
+    ${trapListEditor(t)}
   </div>`;
 }
+
+
+
+
+
+
+
+
 
 function renderTrapVisits() {
   return `<div class="card scroll" id="visit-rows"><p class="muted">Cargando…</p></div>`;
@@ -713,15 +1035,16 @@ function renderTrapLog() {
   return `<div class="card" id="log-rows"><p class="muted">Cargando…</p></div>`;
 }
 
-function loadVisits({ nodeId, tag, days }) {
+function loadVisits({ nodeId, tag, individual, days }) {
   const query = new URLSearchParams({ days });
   if (nodeId !== undefined && nodeId !== "") query.set("node_id", nodeId);
   if (tag) query.set("tag", tag);
-  return loadInto("visit-rows", `/api/visits?${query}`, ({ visits }) => (visits.length ? `<table style="min-width:680px"><thead><tr><th>Inicio</th><th>Trampa</th><th>Especie</th><th>Biomark</th><th>Duración</th><th>Lecturas</th><th>Hora</th></tr></thead><tbody>
+  if (individual) query.set("individual", individual);
+  return loadInto("visit-rows", `/api/visits?${query}`, ({ visits }) => (visits.length ? `<table style="min-width:680px"><thead><tr><th>Inicio</th><th>Trampa</th><th>Individuo</th><th>Biomark</th><th>Duración</th><th>Lecturas</th><th>Hora</th></tr></thead><tbody>
     ${visits.map((v) => `<tr>
       <td class="mono">${escapeHtml(dateTime(v.start_epoch))}</td>
       <td>${escapeHtml(trapName(v.node_id))}</td>
-      <td class="${v.known ? "italic" : "warn"}">${escapeHtml(v.label)}</td>
+      <td class="${v.known ? "" : "warn"}">${v.known && v.cicg_id ? `<span class="strong">${escapeHtml(v.cicg_id)}</span> · ` : ""}<span class="${v.known ? "italic" : ""}">${escapeHtml(v.label)}</span>${lostChip(v)}</td>
       <td class="mono">${escapeHtml(v.biomark)}</td>
       <td>${v.open ? '<span class="ok strong">En curso</span>' : escapeHtml(duration(v.duration_s))}</td>
       <td>${v.reads}</td>
@@ -729,32 +1052,135 @@ function loadVisits({ nodeId, tag, days }) {
     </tr>`).join("")}</tbody></table>${visits.length >= VISITS_LISTED ? `<p class="small muted">Se muestran las ${VISITS_LISTED} más recientes. Exporta las visitas para verlas todas.</p>` : ""}` : '<p class="muted">Sin visitas en este periodo.</p>'));
 }
 
-function subjectInterest(s) {
-  if (s.all_traps) return ["De interés en todas", "ok"];
-  if (s.trap_ids.length) return [`De interés en ${s.trap_ids.map(trapName).join(" y ")}`, "ok"];
+// More bars than this read better per month.
+const MAX_DAY_COLUMNS = 62;
+
+function visitSummaryHtml(s) {
+  ui.visitTotal = s.visits;
+  if (!s.visits) return '<div class="card muted">Sin visitas en este periodo.</div>';
+  const card = (title, body, note, css = "") => `<div class="card ${css}"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
+  const hours = columns(s.by_hour, s.by_hour.map((_, h) => String(h)), { every: 3, titles: s.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) });
+  let days = "";
+  if (s.by_day.length > 1) {
+    if (s.by_day.length > MAX_DAY_COLUMNS) {
+      const months = new Map();
+      for (const d of s.by_day) months.set(d.day.slice(0, 7), (months.get(d.day.slice(0, 7)) || 0) + d.visits);
+      const keys = [...months.keys()];
+      days = card("Visitas por mes", columns(keys.map((k) => months.get(k)), keys.map(monthLabel), { every: Math.max(1, Math.ceil(keys.length / 5)) }));
+    } else {
+      days = card("Visitas por día", columns(s.by_day.map((d) => d.visits), s.by_day.map((d) => `${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`), {
+        every: Math.max(1, Math.ceil(s.by_day.length / 7)),
+        titles: s.by_day.map((d) => `${dayLabel(d.day)}: ${count(d.visits, "visita", "visitas")}, ${count(d.subjects, "individuo", "individuos")}`),
+      }));
+    }
+  }
+  const top = hbars(s.top.map((t) => ({
+    label: `${tagName(t)}${t.lost_tag ? " (tag perdido)" : ""} · ${t.biomark}`,
+    value: t.visits,
+    text: `${count(t.visits, "visita", "visitas")} · última ${whenLong(t.last_epoch).replace(/^Hoy/, "hoy")}`,
+    href: `#/individuo/${encodeURIComponent(t.known && t.cicg_id ? t.cicg_id : t.tag)}`,
+  })));
+  const species = hbars(s.by_species.map((x) => ({ label: x.label, value: x.visits, text: `${x.visits} · ${x.subjects} ind.` })));
+  const nodes = !ui.visitTrap && s.by_node.length > 1
+    ? card("Por trampa", hbars(s.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits, text: `${n.visits} · ${n.subjects} ind.` }))))
+    : "";
+  return `
+    <div class="grid">
+      ${stat("Visitas", fmt(s.visits, 0))}
+      ${stat("Individuos", fmt(s.subjects, 0), "del CICG, por código")}
+      ${stat("Lecturas", fmt(s.reads, 0))}
+      ${stat("Duración mediana", s.median_duration_s === null ? "—" : duration(s.median_duration_s))}
+      ${stat("Lecturas desconocidas", fmt(s.unknown_visits, 0), count(s.unknown_tags, "tag fuera de la base", "tags fuera de la base"))}
+      ${stat("Con hora dudosa", pct(s.untrusted_visits / s.visits, 0), count(s.untrusted_visits, "visita", "visitas"))}
+    </div>
+    <div class="charts two">
+      ${card("Visitas por hora del día", hours)}
+      ${days}
+      ${card("Individuos con más visitas", top, "Clic en uno para abrir su página.", "full")}
+      ${card("Por especie", species)}
+      ${nodes}
+    </div>`;
+}
+
+function segmented(options, selected, onPick, label) {
+  return `<div class="segmented" role="group" aria-label="${escapeHtml(label)}">${options.map(([value, text]) => `<button aria-pressed="${value === selected}" onclick="${onPick}('${value}')">${escapeHtml(text)}</button>`).join("")}</div>`;
+}
+
+function renderVisitas() {
+  const traps = data.overview?.traps || [];
+  const query = new URLSearchParams({ days: ui.period });
+  if (ui.visitTrap) query.set("node_id", ui.visitTrap);
+  const total = ui.visitTotal;
+  $("screen").innerHTML = `
+    <div class="row between"><h1>Visitas</h1>
+      <div class="row"><a class="button" href="/api/export/visits.csv">Exportar visitas</a><a class="button" href="/api/export/reads.csv">Exportar lecturas</a></div></div>
+    <div class="row" style="align-items:flex-end">
+      <label style="flex:1 1 180px">Trampa<select onchange="setVisitTrap(this.value)"><option value="">Todas</option>${traps.map((t) => `<option value="${t.node_id}" ${String(t.node_id) === ui.visitTrap ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}</select></label>
+      <div style="flex:2 1 300px"><div class="small muted" style="margin-bottom:4px">Periodo</div>${segmented(PERIODS, ui.period, "setPeriod", "Periodo")}</div>
+    </div>
+    <div id="visit-summary" class="stack"><div class="card muted">Cargando…</div></div>
+    <div class="card">
+      <div class="section-head"><h2>Visita por visita</h2>
+        <button id="visit-toggle" onclick="toggleUi('showVisits')">${ui.showVisits ? "Ocultar las visitas" : total ? `Ver las ${total} visitas` : "Ver las visitas"}</button></div>
+      ${ui.showVisits ? '<div class="scroll" id="visit-rows" style="margin-top:8px"><p class="muted">Cargando…</p></div>' : ""}
+    </div>
+    <p class="small muted" style="margin:0">Una visita termina tras 3 s sin leer el tag, igual que en el análisis.</p>`;
+  loadInto("visit-summary", `/api/visits/summary?${query}`, visitSummaryHtml).then(() => {
+    const button = $("visit-toggle");
+    if (button && !ui.showVisits) button.textContent = ui.visitTotal ? `Ver las ${ui.visitTotal} visitas` : "Ver las visitas";
+  });
+  if (ui.showVisits) loadVisits({ nodeId: ui.visitTrap, days: ui.period });
+}
+
+function renderCapturas() {
+  $("screen").innerHTML = '<h1>Capturas</h1><div class="card scroll" id="capture-rows"><p class="muted">Cargando…</p></div>';
+  return loadInto("capture-rows", "/api/captures", ({ captures }) => (captures.length ? `<table style="min-width:600px"><thead><tr><th>Hora</th><th>Trampa</th><th>Individuo</th><th>Biomark</th><th>Resultado</th></tr></thead><tbody>
+    ${captures.map((c) => { const [text, css] = CAPTURE_RESULTS[c.result] || ["Por confirmar", "warn"]; return `<tr>
+      <td class="mono">${escapeHtml(dateTime(c.epoch))}</td><td>${escapeHtml(trapName(c.node_id))}</td>
+      <td class="${c.known ? "" : "warn"}">${c.known && c.cicg_id ? `<a class="strong" href="#/individuo/${encodeURIComponent(c.cicg_id)}">${escapeHtml(c.cicg_id)}</a> · ` : ""}<span class="${c.known ? "italic" : ""}">${escapeHtml(c.label)}</span>${lostChip(c)}</td><td class="mono">${escapeHtml(c.biomark || "—")}</td>
+      <td class="strong ${css}">${text}</td></tr>`; }).join("")}</tbody></table>` : '<p class="muted">Todavía no hay capturas.</p>'));
+}
+
+function renderBitacora() {
+  $("screen").innerHTML = `
+    <div class="row between"><h1>Bitácora</h1>${segmented(FILTERS, ui.filter, "setFilter", "Qué eventos")}</div>
+    <div class="card" id="log-rows"><p class="muted">Cargando…</p></div>`;
+  loadLog({ limit: 200, kind: ui.filter });
+}
+
+function birdInterest(b) {
+  if (!b.inUse.length) return ["Sin tag en uso: no se puede marcar", "warn"];
+  if (birdWanted(b, null)) return ["De interés en todas", "ok"];
+  const at = (data.overview?.traps || []).filter((t) => birdWanted(b, t.node_id)).map((t) => t.name);
+  if (at.length) return [`De interés en ${at.join(" y ")}`, "ok"];
   return ["Sin marcar", "muted"];
 }
 
-// Individuos: the CICG's list filtered down to who to mark. The buttons act on
+// Individuos: the CICG's birds filtered down to who to mark. The buttons act on
 // exactly what the filters show, in the traps the "Dónde" selector names.
 const NO_FILTERS = { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" };
 const NO_SPECIES = "__none__";
 
-function interestLimit() { return data.specimens?.of_interest_limit ?? 81; }
+function interestLimit() { return data.specimens?.of_interest_limit ?? 78; }
 
 function scopeId() { return ui.scope === "all" ? null : Number(ui.scope); }
 
-function scopeName() { return ui.scope === "all" ? "todas las trampas" : trapName(ui.scope); }
+function scopeName() { return scopeLabel(scopeId()); }
 
-// Wanted where the selector points: every trap, or that one.
-function wantedInScope(s) {
-  return ui.scope === "all" ? s.all_traps : isOfInterest(s, ui.scope);
+// Wanted where the selector points: every tag the bird wears, in all or in that trap.
+function wantedInScope(b) { return birdWanted(b, scopeId()); }
+
+function markedInScope(s) { return ui.scope === "all" ? anyMark(s) : isOfInterest(s, ui.scope); }
+
+// What "Quitar" would change: any of the bird's tags, a lost one included.
+function removableInScope(b) { return b.rows.some(markedInScope); }
+
+function tagsToAdd(list) {
+  const nodeId = scopeId();
+  return list.flatMap((b) => b.inUse.filter((s) => !markedIn(s, nodeId))).map((s) => s.tag);
 }
 
-// What "Quitar" would change: in "todas", any interest at all.
-function removableInScope(s) {
-  return ui.scope === "all" ? (s.all_traps || s.trap_ids.length > 0) : isOfInterest(s, ui.scope);
-}
+function tagsToRemove(list) { return list.flatMap((b) => b.rows.filter(markedInScope)).map((s) => s.tag); }
 
 function dayLabel(day) {
   return new Date(`${day}T00:00:00`).toLocaleDateString("es-CO", { day: "numeric", month: "short", year: "numeric" });
@@ -762,39 +1188,43 @@ function dayLabel(day) {
 
 function registeredSubjects() { return (data.specimens?.specimens || []).filter((s) => s.registered); }
 
-function isMarked(s) { return s.all_traps || s.trap_ids.length > 0; }
-
 // Project, locality and dates must hold for one same capture: "captured in
-// Zona alta in 2026" is one capture, not one of each.
+// Zona alta in 2026" is one capture, not one of each. Any tag the bird wore counts.
 function captureMatches(c, f) {
   return (!f.project || c.project === f.project) && (!f.locality || c.locality === f.locality)
     && (!f.from || c.day >= f.from) && (!f.to || c.day <= f.to);
 }
 
-// "Todos" means the tags birds wear now: a lost tag only shows when asked for,
-// or when it is still marked, so it can be removed.
+// "Todos" means birds wearing a tag a trap can read.
 const STATUS_TEST = {
-  "": (s) => !s.replaced,
-  marked: isMarked,
-  unmarked: (s) => !s.replaced && !isMarked(s),
-  replaced: (s) => s.replaced,
+  "": (b) => b.inUse.length > 0,
+  marked: birdMarked,
+  unmarked: (b) => b.inUse.length > 0 && !birdMarked(b),
+  changed: (b) => b.rows.length > 1,
+  notag: (b) => b.inUse.length === 0,
 };
 
-function filteredSubjects() {
-  const f = ui.filters;
-  const byCapture = f.project || f.locality || f.from || f.to;
-  return registeredSubjects().filter((s) => (!f.species || (f.species === NO_SPECIES ? !s.species : s.species === f.species))
-    && (!f.sex || s.sex === f.sex) && (!f.age || s.age === f.age)
-    && (!byCapture || s.captures.some((c) => captureMatches(c, f)))
-    && STATUS_TEST[f.status || ""](s)
-    && matchesSearch(s, f.text))
-    .sort((a, b) => (b.capture_days.at(-1) || "").localeCompare(a.capture_days.at(-1) || "") || a.biomark.localeCompare(b.biomark));
+function matchesBird(b, text) {
+  const q = text.trim().toLowerCase();
+  return !q || [b.code, b.species, b.band_number].some((v) => (v || "").toLowerCase().includes(q))
+    || b.rows.some((s) => matchesSearch(s, q));
 }
 
-// The fullest list after marking these, mirroring the station's own check:
+function filteredBirds() {
+  const f = ui.filters;
+  const byCapture = f.project || f.locality || f.from || f.to;
+  return birds().filter((b) => (!f.species || (f.species === NO_SPECIES ? !b.species : b.species === f.species))
+    && (!f.sex || b.sex === f.sex) && (!f.age || b.age === f.age)
+    && (!byCapture || b.captures.some((c) => captureMatches(c, f)))
+    && (STATUS_TEST[f.status || ""] || STATUS_TEST[""])(b)
+    && matchesBird(b, f.text))
+    .sort((a, b) => (b.capture_days.at(-1) || "").localeCompare(a.capture_days.at(-1) || "") || a.name.localeCompare(b.name));
+}
+
+// The fullest list after adding these tags, mirroring the station's own check:
 // each known trap, plus a trap that connects later when marking in all.
-function fullestAfterAdding(subjects) {
-  const adding = new Set(subjects.map((s) => s.tag));
+function fullestAfterAdding(tags) {
+  const adding = new Set(tags);
   const all = data.specimens?.specimens || [];
   const ids = ui.scope === "all" ? (data.overview?.traps || []).map((t) => t.node_id).concat(null) : [scopeId()];
   return ids.map((id) => ({
@@ -803,57 +1233,70 @@ function fullestAfterAdding(subjects) {
   })).sort((a, b) => b.count - a.count)[0];
 }
 
-// Where a subject stands in each trap: what the trap itself reported, not what
+// Where a bird stands in each trap: what the trap itself reported, not what
 // the station asked for.
-function syncChips(s) {
+function syncChips(b) {
   const traps = data.overview?.traps || [];
   const chips = [];
   for (const t of traps) {
-    const wanted = isOfInterest(s, t.node_id);
-    const has = (t.reported || []).some((r) => r.tag === s.tag);
-    if (wanted && has) chips.push([`En ${t.name}`, "ok"]);
+    const reported = (tag) => (t.reported || []).some((r) => r.tag === tag);
+    const wanted = birdWanted(b, t.node_id);
+    if (wanted && b.inUse.every((s) => reported(s.tag))) chips.push([`En ${t.name}`, "ok"]);
     else if (wanted) chips.push(t.reachable ? [`Enviando a ${t.name}…`, "info"] : [`${t.name}: lo recibe al conectarse`, "warn"]);
-    else if (has) chips.push(t.reachable ? [`Saliendo de ${t.name}…`, "info"] : [`${t.name}: lo quita al conectarse`, "warn"]);
+    else if (b.rows.some((s) => reported(s.tag))) chips.push(t.reachable ? [`Saliendo de ${t.name}…`, "info"] : [`${t.name}: lo quita al conectarse`, "warn"]);
   }
-  if (s.all_traps && !traps.length) chips.push(["Todas las trampas, al conectarse", ""]);
+  if (birdWanted(b, null) && !traps.length) chips.push(["Todas las trampas, al conectarse", ""]);
+  if (lostStillMarked(b).length) chips.push(["Un tag perdido sigue marcado", "warn"]);
   return chips.map(([text, css]) => `<span class="chip ${css}">${escapeHtml(text)}</span>`).join(" ");
 }
 
-function changeSummary(result, action) {
-  const n = result.changed;
-  const verb = action === "add" ? (n === 1 ? "Marcado" : "Marcados") : (n === 1 ? "Quitado" : "Quitados");
-  const parts = [n ? `${verb} ${n} en ${scopeName()}.` : "Nada cambió."];
-  if (result.unchanged) parts.push(`${result.unchanged} ya ${result.unchanged === 1 ? "estaba" : "estaban"} así.`);
-  if (result.created.length) parts.push(`Registrados como nuevos: ${result.created.join(", ")}.`);
-  if (result.missing.length) parts.push(`No encontrados: ${result.missing.join(", ")}.`);
-  if (result.ambiguous.length) parts.push(`Anillo de varios individuos, usa el biomark: ${result.ambiguous.join(", ")}.`);
-  return parts.join(" ");
-}
-
-async function changeInterest(action, body) {
-  const result = await act("/api/specimens/interest/change", jsonBody("POST", { action, node_id: scopeId(), ...body }));
-  if (!result) return null;
-  ui.message = changeSummary(result, action);
-  render(true);
-  return result;
-}
-
-function markOne(tag) { return changeInterest("add", { tags: [tag] }); }
-function unmarkOne(tag) { return changeInterest("remove", { tags: [tag] }); }
+function markOne(key) { const b = birdByKey(key); return b ? changeInterest("add", { tags: tagsToAdd([b]) }) : null; }
+function unmarkOne(key) { const b = birdByKey(key); return b ? changeInterest("remove", { tags: tagsToRemove([b]) }) : null; }
 
 function markFiltered(action) {
-  const subjects = filteredSubjects().filter((s) => (action === "add" ? !wantedInScope(s) : removableInScope(s)));
-  if (!subjects.length) return null;
-  return changeInterest(action, { tags: subjects.map((s) => s.tag) });
+  const list = filteredBirds();
+  const tags = action === "add" ? tagsToAdd(list) : tagsToRemove(list);
+  return tags.length ? changeInterest(action, { tags }) : null;
 }
 
 async function markEntries(action) {
   const entries = ui.entries.split(/[\s,;]+/).filter(Boolean);
-  if (!entries.length) { ui.message = "Escribe o pega al menos un biomark o anillo."; render(true); return; }
+  if (!entries.length) { toast("Escribe o pega al menos un código CICG, biomark o anillo.", { error: true }); return; }
   const result = await changeInterest(action, { entries });
   if (result && !result.missing.length && !result.ambiguous.length) ui.entries = "";
   render(true);
 }
+
+function listStatusRows() {
+  const traps = data.overview?.traps || [];
+  const everywhere = birds().filter((b) => birdWanted(b, null)).length;
+  const head = `<p class="small muted" style="margin:0 0 8px">${count(everywhere, "individuo marcado", "individuos marcados")} en todas las trampas, incluidas las que se conecten después. Cada trampa admite ${interestLimit()} tags, uno por individuo.</p>`;
+  if (!traps.length) return `${head}<p class="muted">Ninguna trampa conectada todavía.</p>`;
+  return head + traps.map((t) => {
+    if (t.has_latch === false) return `<div class="line"><span class="strong">${escapeHtml(t.name)}</span><span class="muted">Solo lector</span></div>`;
+    const [list, css] = t.reachable ? listNote(t) : ["Sin conexión; la recibe al conectarse", "warn"];
+    return `<div class="line"><span><a class="strong" href="#/trampa/${t.node_id}/list">${escapeHtml(t.name)}</a> · ${t.wanted?.length ?? 0} de ${interestLimit()}</span><span class="${css}">${escapeHtml(list)}</span></div>`;
+  }).join("");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function setScope(value) { ui.scope = value; document.activeElement?.blur(); render(true); }
 function setFilterValue(name, value) {
@@ -862,17 +1305,6 @@ function setFilterValue(name, value) {
 }
 function clearFilters() { ui.filters = { ...NO_FILTERS }; render(true); }
 
-function listStatusRows() {
-  const traps = data.overview?.traps || [];
-  const everywhere = registeredSubjects().filter((s) => s.all_traps).length;
-  const head = `<p class="small muted" style="margin:0 0 8px">${count(everywhere, "individuo marcado", "individuos marcados")} en todas las trampas, incluidas las que se conecten después. Cada trampa admite ${interestLimit()}.</p>`;
-  if (!traps.length) return `${head}<p class="muted">Ninguna trampa conectada todavía.</p>`;
-  return head + traps.map((t) => {
-    if (t.has_latch === false) return `<div class="line"><span class="strong">${escapeHtml(t.name)}</span><span class="muted">Solo lector</span></div>`;
-    const [list, css] = t.reachable ? listNote(t) : ["Sin conexión; la recibe al conectarse", "warn"];
-    return `<div class="line"><span><span class="strong">${escapeHtml(t.name)}</span> · ${t.wanted?.length ?? 0} de ${interestLimit()}</span><span class="${css}">${escapeHtml(list)}</span></div>`;
-  }).join("");
-}
 
 function filterOptions(values, selected, anyLabel, label) {
   return [`<option value="">${anyLabel}</option>`].concat(values.map(([value, n]) => `<option value="${escapeHtml(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label(value))} (${n})</option>`)).join("");
@@ -993,24 +1425,24 @@ function topBars(entries, label = (v) => v) {
   return items;
 }
 
-// What the filtered individuals look like, before anyone opens the list.
-function subjectSummary(subjects, toAdd) {
+// What the filtered birds look like, before anyone opens the list.
+function subjectSummary(list, addTags) {
   const f = ui.filters;
   const byCapture = f.project || f.locality || f.from || f.to;
-  const inScope = subjects.filter(wantedInScope).length;
-  const seen = subjects.filter((s) => s.times_seen > 0).length;
-  const species = topBars(tally(subjects.map((s) => s.species || NO_SPECIES)), (v) => (v === NO_SPECIES ? "Sin especie" : v));
-  const sexes = topBars(tally(subjects.map((s) => s.sex).filter(Boolean)));
-  const ages = topBars(tally(subjects.map((s) => s.age).filter(Boolean)));
-  // An individual counts once per place or project it was caught in.
-  const relevant = (s) => s.captures.filter((c) => !byCapture || captureMatches(c, f));
-  const localities = topBars(tally(subjects.flatMap((s) => [...new Set(relevant(s).map((c) => c.locality).filter(Boolean))])));
-  const projects = topBars(tally(subjects.flatMap((s) => [...new Set(relevant(s).map((c) => c.project).filter(Boolean))])));
-  const lastDays = subjects.map((s) => s.capture_days.at(-1)).filter(Boolean);
-  const months = byMonth(lastDays);
+  const inScope = list.filter(wantedInScope).length;
+  const toAdd = list.filter((b) => b.inUse.length && !wantedInScope(b)).length;
+  const seen = list.filter((b) => b.times_seen > 0).length;
+  const species = topBars(tally(list.map((b) => b.species || NO_SPECIES)), (v) => (v === NO_SPECIES ? "Sin especie" : v));
+  const sexes = topBars(tally(list.map((b) => b.sex).filter(Boolean)), es);
+  const ages = topBars(tally(list.map((b) => b.age).filter(Boolean)), es);
+  // A bird counts once per place or project it was caught in, with any of its tags.
+  const relevant = (b) => b.captures.filter((c) => !byCapture || captureMatches(c, f));
+  const localities = topBars(tally(list.flatMap((b) => [...new Set(relevant(b).map((c) => c.locality).filter(Boolean))])));
+  const projects = topBars(tally(list.flatMap((b) => [...new Set(relevant(b).map((c) => c.project).filter(Boolean))])));
+  const months = byMonth(list.map((b) => b.capture_days.at(-1)).filter(Boolean));
 
   const traps = (data.overview?.traps || []).filter((t) => t.has_latch !== false);
-  const adding = new Set(toAdd.map((s) => s.tag));
+  const adding = new Set(addTags);
   const all = data.specimens?.specimens || [];
   const ids = ui.scope === "all" ? traps.map((t) => t.node_id).concat(null) : [scopeId()];
   const limit = interestLimit();
@@ -1022,10 +1454,10 @@ function subjectSummary(subjects, toAdd) {
   const card = (title, body, note) => `<div class="card"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
   return `
     <div class="grid">
-      ${stat("Coinciden", fmt(subjects.length, 0))}
+      ${stat("Coinciden", fmt(list.length, 0), "individuos")}
       ${stat(`De interés en ${scopeName()}`, fmt(inScope, 0))}
-      ${stat("Se agregarían", fmt(toAdd.length, 0))}
-      ${stat("Leídos por las trampas", fmt(seen, 0), subjects.length ? `${pct(seen / subjects.length, 0)} de los que coinciden` : "")}
+      ${stat("Se agregarían", fmt(toAdd, 0))}
+      ${stat("Leídos por las trampas", fmt(seen, 0), list.length ? `${pct(seen / list.length, 0)} de los que coinciden` : "")}
     </div>
     <p class="small muted" style="margin:0">Clic en una barra para filtrar por ella; otro clic quita el filtro.</p>
     <div class="charts">
@@ -1033,31 +1465,32 @@ function subjectSummary(subjects, toAdd) {
       ${card("Sexo y edad", hbars(sexes, { pick: "sex", selected: f.sex }) + '<div style="height:12px"></div>' + hbars(ages, { pick: "age", selected: f.age }))}
       ${card("Localidad", hbars(localities, { pick: "locality", selected: f.locality }), "Dónde fue capturado cada individuo (cuenta una vez por lugar).")}
       ${card("Proyecto", hbars(projects, { pick: "project", selected: f.project }))}
-      ${card("Última captura", months.values.length ? columns(months.values, months.labels, { every: Math.max(1, Math.ceil(months.labels.length / 8)), titles: months.labels.map((l, i) => `${l}: ${count(months.values[i], "individuo", "individuos")}`) }) : '<p class="small muted" style="margin:0">Sin fechas.</p>', "Cuántos se vieron por última vez en la base del CICG en cada mes: los de la izquierda llevan más tiempo sin recapturarse.")}
-      ${card("Cómo quedarían las trampas", occupancy.length ? hbars(occupancy, { max: limit, warnAbove: limit }) : '<p class="small muted" style="margin:0">Ninguna trampa conectada.</p>', toAdd.length ? `Si marcas los ${toAdd.length} en ${escapeHtml(scopeName())}.` : "Con lo que ya está marcado.")}
+      ${card("Última captura", months.values.length ? columns(months.values, months.labels, { every: Math.max(1, Math.ceil(months.labels.length / 5)), titles: months.labels.map((l, i) => `${l}: ${count(months.values[i], "individuo", "individuos")}`) }) : '<p class="small muted" style="margin:0">Sin fechas.</p>', "Cuántos se vieron por última vez en la base del CICG en cada mes: los de la izquierda llevan más tiempo sin recapturarse.")}
+      ${card("Cómo quedarían las trampas", occupancy.length ? hbars(occupancy, { max: limit, warnAbove: limit }) : '<p class="small muted" style="margin:0">Ninguna trampa conectada.</p>', toAdd ? `Si marcas los ${toAdd} en ${escapeHtml(scopeName())}.` : "Con lo que ya está marcado.")}
     </div>`;
 }
 
-function subjectRows(subjects) {
-  const rows = subjects.slice(0, MAX_LISTED);
-  const more = subjects.length > rows.length
-    ? `<p class="small muted">Mostrando ${rows.length} de ${subjects.length}. Afina los filtros para ver el resto; los botones actúan sobre los ${subjects.length}.</p>`
+function subjectRows(list) {
+  const rows = list.slice(0, MAX_LISTED);
+  const more = list.length > rows.length
+    ? `<p class="small muted">Mostrando ${rows.length} de ${list.length}. Afina los filtros para ver el resto; los botones actúan sobre los ${list.length}.</p>`
     : "";
-  if (!rows.length) return '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la lista del CICG.</p>';
-  return more + rows.map((s) => {
-    const [interest, css] = subjectInterest(s);
-    const days = s.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (s.capture_days.length > 3 ? ` y ${s.capture_days.length - 3} más` : "");
-    const last = s.captures.at(-1);
+  if (!rows.length) return '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la base del CICG.</p>';
+  return more + rows.map((b) => {
+    const [interest, css] = birdInterest(b);
+    const days = b.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (b.capture_days.length > 3 ? ` y ${b.capture_days.length - 3} más` : "");
+    const last = b.captures.at(-1);
     const where = [last?.locality, last?.project].filter(Boolean).join(", ");
     const buttons = [];
-    if (!wantedInScope(s)) buttons.push(`<button class="quiet" onclick="markOne('${s.tag}')">Marcar</button>`);
-    if (removableInScope(s)) buttons.push(`<button class="quiet" onclick="unmarkOne('${s.tag}')">Quitar</button>`);
+    if (b.inUse.length && !wantedInScope(b)) buttons.push(`<button class="quiet" onclick="markOne('${b.key}')">Marcar</button>`);
+    if (removableInScope(b)) buttons.push(`<button class="quiet" onclick="unmarkOne('${b.key}')">Quitar</button>`);
+    const tags = b.rows.length > 1 ? ` <span class="chip">${b.rows.length} tags</span>` : "";
     return `<div class="row" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
-      <a href="#/individuo/${s.tag}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
-        ${s.cicg_id ? `<span class="strong">${escapeHtml(s.cicg_id)}</span> · ` : ""}<span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
-        <span class="mono small muted"> · ${escapeHtml(s.biomark)}${s.band_number ? ` · anillo ${escapeHtml(s.band_number)}` : ""}</span><br>
-        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"}${where ? ` (última: ${escapeHtml(where)})` : ""} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
-        ${s.replaced ? '<span class="chip warn">Tag reemplazado: el colibrí ya no lo lleva</span> ' : ""}<span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
+      <a href="${birdHref(b)}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
+        <span class="strong">${escapeHtml(b.code || "Sin código")}</span> · <span class="strong italic">${escapeHtml(b.species || "Sin especie")}</span>${tags}
+        <span class="mono small muted"> · ${b.inUse.length ? escapeHtml(b.inUse.map((s) => s.biomark).join(", ")) : "sin tag en uso"}${b.band_number ? ` · anillo ${escapeHtml(b.band_number)}` : ""}</span><br>
+        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"}${where ? ` (última: ${escapeHtml(where)})` : ""} · ${count(b.times_seen, "lectura", "lecturas")}</span><br>
+        <span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(b)}
       </a>
       <div class="row" style="flex:0 0 auto">${buttons.join("")}</div></div>`;
   }).join("");
@@ -1067,54 +1500,59 @@ function renderFilterResults() {
   const actions = $("filter-actions");
   const target = $("subject-results");
   if (!actions || !target) return;
-  const subjects = filteredSubjects();
-  const toAdd = subjects.filter((s) => !wantedInScope(s));
-  const toRemove = subjects.filter(removableInScope);
-  const fullest = toAdd.length ? fullestAfterAdding(toAdd) : null;
+  const list = filteredBirds();
+  const addTags = tagsToAdd(list);
+  const removeTags = tagsToRemove(list);
+  const adding = list.filter((b) => b.inUse.length && !wantedInScope(b)).length;
+  const removing = list.filter(removableInScope).length;
+  const fullest = addTags.length ? fullestAfterAdding(addTags) : null;
   const over = fullest && fullest.count > interestLimit();
   const where = fullest && (fullest.id === null ? "una trampa nueva" : trapName(fullest.id));
   actions.innerHTML = `
-    <div class="strong">${count(subjects.length, "individuo coincide", "individuos coinciden")}</div>
+    <div class="strong">${count(list.length, "individuo coincide", "individuos coinciden")}</div>
     <div class="row">
-      <button class="primary" ${toAdd.length && !over ? "" : "disabled"} onclick="markFiltered('add')">${toAdd.length || !subjects.length ? `Marcar ${toAdd.length} en ${escapeHtml(scopeName())}` : "Ya están todos marcados"}</button>
-      <button ${toRemove.length ? "" : "disabled"} onclick="markFiltered('remove')">Quitar ${toRemove.length} de ${escapeHtml(scopeName())}</button>
+      <button class="primary" ${addTags.length && !over ? "" : "disabled"} onclick="markFiltered('add')">${adding || !list.length ? `Marcar ${adding} en ${escapeHtml(scopeName())}` : "Ya están todos marcados"}</button>
+      <button class="danger-outline" ${removeTags.length ? "" : "disabled"} onclick="markFiltered('remove')">Quitar ${removing} de ${escapeHtml(scopeName())}</button>
       <button class="quiet" onclick="clearFilters()">Limpiar filtros</button>
     </div>
     ${over ? `<p class="warn small" style="margin:0">Así ${escapeHtml(where)} quedaría con ${fullest.count} de ${interestLimit()}. Afina los filtros o marca en una sola trampa.</p>` : ""}`;
-  target.innerHTML = `${subjectSummary(subjects, toAdd)}
+  target.innerHTML = `${subjectSummary(list, addTags)}
     <div class="card">
-      <div class="section-head"><h2>${count(subjects.length, "individuo", "individuos")}</h2>
-        <button onclick="toggleUi('showList')" ${subjects.length ? "" : "disabled"}>${ui.showList ? "Ocultar la lista" : `Ver ${subjects.length === 1 ? "el individuo" : `los ${subjects.length} individuos`}`}</button></div>
-      ${ui.showList ? `<div style="margin-top:8px">${subjectRows(subjects)}</div>` : ""}
+      <div class="section-head"><h2>${count(list.length, "individuo", "individuos")}</h2>
+        <button onclick="toggleUi('showList')" ${list.length ? "" : "disabled"}>${ui.showList ? "Ocultar la lista" : `Ver ${list.length === 1 ? "el individuo" : `los ${list.length} individuos`}`}</button></div>
+      ${ui.showList ? `<div style="margin-top:8px">${subjectRows(list)}</div>` : ""}
     </div>`;
+}
+
+function importButton(label = "Importar base del CICG") {
+  return `<label class="button file-button">${label}<input class="hidden-file" type="file" accept=".xlsx,.xlsm,.csv" onchange="importExcel(this)"></label>`;
 }
 
 function renderIndividuos() {
   const all = data.specimens?.specimens || [];
   const unknown = all.filter((s) => !s.registered);
-  const registered = registeredSubjects();
+  const flock = birds();
   const f = ui.filters;
   const traps = data.overview?.traps || [];
   if (ui.scope !== "all" && !trapById(ui.scope)) ui.scope = "all";
   const scopes = [["all", "Todas las trampas"]].concat(traps.filter((t) => t.has_latch !== false).map((t) => [String(t.node_id), t.name]));
-  const species = tally(registered.map((s) => s.species || NO_SPECIES)).sort((a, b) => (a[0] === NO_SPECIES) - (b[0] === NO_SPECIES) || a[0].localeCompare(b[0]));
-  const captures = registered.flatMap((s) => s.captures);
+  const species = tally(flock.map((b) => b.species || NO_SPECIES)).sort((a, b) => (a[0] === NO_SPECIES) - (b[0] === NO_SPECIES) || a[0].localeCompare(b[0]));
+  const captures = flock.flatMap((b) => b.captures);
   const byName = (a, b) => a[0].localeCompare(b[0]);
   const projects = tally(captures.map((c) => c.project).filter(Boolean)).sort(byName);
   const localities = tally(captures.map((c) => c.locality).filter(Boolean)).sort(byName);
-  const sexes = tally(registered.map((s) => s.sex).filter(Boolean)).sort(byName);
-  const ages = tally(registered.map((s) => s.age).filter(Boolean)).sort(byName);
+  const sexes = tally(flock.map((b) => b.sex).filter(Boolean)).sort(byName);
+  const ages = tally(flock.map((b) => b.age).filter(Boolean)).sort(byName);
   const days = captures.map((c) => c.day).sort();
-  const replaced = registered.filter((s) => s.replaced).length;
+  const changed = flock.filter(STATUS_TEST.changed).length;
+  const noTag = flock.filter(STATUS_TEST.notag).length;
   const pick = (name, label, values, any, show = (v) => v) => `<label style="flex:1 1 170px">${label}<select ${values.length ? "" : "disabled"} onchange="setFilterValue('${name}', this.value)">${filterOptions(values, f[name], any, show)}</select></label>`;
   const day = (name, label) => `<label style="flex:1 1 150px">${label}<input type="date" value="${escapeHtml(f[name])}" min="${days[0] || ""}" max="${days.at(-1) || ""}" ${days.length ? "" : "disabled"} onchange="setFilterValue('${name}', this.value)"></label>`;
+  const option = (value, label) => `<option value="${value}" ${(f.status || "") === value ? "selected" : ""}>${label}</option>`;
   $("screen").innerHTML = `
     <div class="row between">
       <h1>Individuos</h1>
-      <div class="row">
-        <label class="button" style="color:var(--ink);flex-direction:row;font-size:15px">Importar lista del CICG<input class="hidden-file" type="file" accept=".xlsx,.xlsm,.csv" onchange="importExcel(this)"></label>
-        <a class="button" href="/api/export/reads.csv">Exportar lecturas</a>
-      </div>
+      ${importButton()}
     </div>
     <div class="card"><h2>Listas en las trampas</h2>${listStatusRows()}</div>
     <div class="card stack">
@@ -1123,11 +1561,11 @@ function renderIndividuos() {
         <label style="flex:1 1 240px">Dónde<select onchange="setScope(this.value)">${scopes.map(([value, label]) => `<option value="${value}" ${ui.scope === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
       </div>
       <div class="step">
-        <label>Por biomark, código CICG o anillo: escribe o pega uno o varios, separados por espacio, coma o línea
-          <textarea rows="2" oninput="ui.entries = this.value" placeholder="900_263007596629 CICG_1441 G00530">${escapeHtml(ui.entries)}</textarea></label>
+        <label>Por código CICG, biomark o anillo: escribe o pega uno o varios, separados por espacio, coma o línea
+          <textarea rows="2" oninput="ui.entries = this.value" placeholder="CICG_1441 900_263007596629 G00530">${escapeHtml(ui.entries)}</textarea></label>
         <div class="row">
-          <button class="primary" onclick="markEntries('add')">Marcar en ${escapeHtml(scopeName())}</button>
-          <button onclick="markEntries('remove')">Quitar de ${escapeHtml(scopeName())}</button>
+          <button onclick="markEntries('add')">Marcar en ${escapeHtml(scopeName())}</button>
+          <button class="danger-outline" onclick="markEntries('remove')">Quitar de ${escapeHtml(scopeName())}</button>
         </div>
         <p class="small muted" style="margin:0">Un código CICG marca el tag que el colibrí lleva ahora. Un biomark que no está en la lista se registra al marcarlo.</p>
       </div>
@@ -1135,13 +1573,11 @@ function renderIndividuos() {
         <div class="strong">Por filtros</div>
         <div class="row" style="align-items:flex-end">
           ${pick("species", "Especie", species, "Todas las especies", (v) => (v === NO_SPECIES ? "Sin especie" : v))}
-          ${pick("sex", "Sexo", sexes, "Cualquiera")}
-          ${pick("age", "Edad", ages, "Cualquiera")}
+          ${pick("sex", "Sexo", sexes, "Cualquiera", es)}
+          ${pick("age", "Edad", ages, "Cualquiera", es)}
           <label style="flex:1 1 170px">Estado<select onchange="setFilterValue('status', this.value)">
-            <option value="" ${f.status ? "" : "selected"}>Todos (tags en uso)</option>
-            <option value="marked" ${f.status === "marked" ? "selected" : ""}>De interés</option>
-            <option value="unmarked" ${f.status === "unmarked" ? "selected" : ""}>Sin marcar</option>
-            <option value="replaced" ${f.status === "replaced" ? "selected" : ""}>Tags reemplazados (${replaced})</option></select></label>
+            ${option("", "Todos (con tag en uso)")}${option("marked", "De interés")}${option("unmarked", "Sin marcar")}
+            ${option("changed", `Cambiaron de tag (${changed})`)}${option("notag", `Sin tag en uso (${noTag})`)}</select></label>
         </div>
         <div class="row" style="align-items:flex-end">
           ${pick("project", "Proyecto", projects, "Cualquier proyecto")}
@@ -1149,49 +1585,164 @@ function renderIndividuos() {
           ${day("from", "Capturado desde")}
           ${day("to", "Hasta")}
         </div>
-        <label>Buscar biomark, código CICG, anillo o especie<input value="${escapeHtml(f.text)}" oninput="setFilterValue('text', this.value)" placeholder="CICG_1441"></label>
-        <p class="small muted" style="margin:0">Proyecto, localidad y fechas son de las capturas en la base del CICG (marcaje y recapturas) y se cumplen en una misma captura. Para un solo día, pon la misma fecha en las dos.</p>
+        <label>Buscar código CICG, biomark, anillo o especie<input value="${escapeHtml(f.text)}" oninput="setFilterValue('text', this.value)" placeholder="CICG_1441"></label>
+        <p class="small muted" style="margin:0">Proyecto, localidad y fechas son de las capturas en la base del CICG (marcaje y recapturas, con cualquier tag que haya llevado) y se cumplen en una misma captura. Para un solo día, pon la misma fecha en las dos.</p>
         <div id="filter-actions" class="stack" style="gap:8px"></div>
       </div>
     </div>
     <div id="subject-results" class="stack"></div>
     <div class="card"><div class="section-head"><h2>Lecturas desconocidas (${unknown.length})</h2>
       <button class="quiet" onclick="toggleUi('showUnknown')" ${unknown.length ? "" : "disabled"}>${ui.showUnknown ? "Ocultar" : "Ver"}</button></div>
-      <p class="small muted" style="margin:4px 0 0">Tags que leyó una trampa y que no están en la lista del CICG. Casi siempre es una lectura errónea; si es un individuo real, márcalo o regístralo aquí.</p>
+      <p class="small muted" style="margin:4px 0 0">Tags que leyó una trampa y que no están en la base del CICG. Casi siempre es una lectura errónea; si es un individuo real, márcalo o regístralo aquí.</p>
       ${!ui.showUnknown ? "" : unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
-        <span class="mono small" style="flex:1 1 180px">${escapeHtml(s.biomark)}</span>
+        <a class="mono small" style="flex:1 1 180px" href="#/individuo/${s.tag}">${escapeHtml(s.biomark)}</a>
         <span class="muted">${count(s.times_seen, "lectura", "lecturas")}</span>
-        <div class="row"><button class="quiet" onclick="markOne('${s.tag}')">Marcar en ${escapeHtml(scopeName())}</button>
+        <div class="row"><button class="quiet" onclick="markTag('${s.tag}')">Marcar en ${escapeHtml(scopeName())}</button>
         <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar sin marcar</button></div></div>`).join("")}
     </div>
-    <div class="card"><div class="section-head"><h2>Agregar un individuo que no está en la lista</h2>
+    <div class="card"><div class="section-head"><h2>Agregar un individuo que no está en la base</h2>
       <button class="quiet" onclick="toggleUi('showAdd')">${ui.showAdd ? "Cerrar" : "Abrir"}</button></div>
       ${!ui.showAdd ? "" : `<form onsubmit="addSubject(event)" class="row" style="align-items:flex-end;margin-top:12px">
         <label style="flex:2 1 200px">Biomark (PIT)<input name="pit" required placeholder="900_263007596629"></label>
         <label style="flex:2 1 200px">Especie<input name="species" placeholder="Colibri coruscans"></label>
         <label style="flex:1 1 120px">Anillo<input name="band_number" placeholder="C00103"></label>
         <label class="row" style="flex:1 1 200px;flex-direction:row;font-size:15px;color:var(--ink)"><input type="checkbox" name="of_interest"> De interés en todas las trampas</label>
-        <button class="primary">Agregar</button>
+        <button>Agregar</button>
       </form>`}</div>`;
   renderFilterResults();
 }
+
+
+
 
 // One bird's page. The record comes from /api/specimens/{tag}/detail and is
 // kept here, so a refresh repaints at once and only fetches again now and then.
 const birdPages = new Map();
 const BIRD_REFETCH_MS = 10000;
 
-async function fetchBird(tag) {
-  const known = birdPages.get(tag);
+async function fetchBird(id) {
+  const known = birdPages.get(id);
   if (known?.loading || (known && Date.now() - known.at < BIRD_REFETCH_MS)) return;
-  birdPages.set(tag, { ...(known || {}), loading: true, at: known?.at || 0 });
+  birdPages.set(id, { ...(known || {}), loading: true, at: known?.at || 0 });
   let page = known?.page || null;
   let failed = false;
-  try { page = await api(`/api/specimens/${tag}/detail`); } catch (_) { failed = true; }
+  try { page = await api(`/api/individuals/${encodeURIComponent(id)}/detail`); } catch (_) { failed = true; }
   const changed = JSON.stringify(page) !== JSON.stringify(known?.page);
-  birdPages.set(tag, { page, at: Date.now(), loading: false, failed: failed && !page });
+  birdPages.set(id, { page, at: Date.now(), loading: false, failed: failed && !page });
   const r = route();
-  if ((changed || (failed && !page)) && r.screen === "individuo" && r.id === tag && !isEditing()) renderIndividuo(tag);
+  if ((changed || (failed && !page)) && r.screen === "individuo" && decodeURIComponent(r.id || "") === id && !isEditing()) renderIndividuo(r.id);
+}
+
+function trapVisitsCard(page) {
+  const v = page.visits;
+  const released = page.trap_captures.length
+    ? `<h2 style="margin-top:16px">Disparos de trampa</h2>${page.trap_captures.slice(0, 20).map((c) => {
+      const [text, css] = CAPTURE_RESULTS[c.result] || ["Por confirmar", "warn"];
+      return `<div class="line"><span>${escapeHtml(whenLong(c.epoch))} · ${escapeHtml(trapName(c.node_id))}</span><span class="${css}">${text}</span></div>`;
+    }).join("")}`
+    : "";
+  if (!v.count) return `<div class="card"><h2>En las trampas</h2><p class="muted" style="margin:0">Ninguna trampa lo ha leído todavía.</p>${released}</div>`;
+  return `<div class="card">
+    <div class="section-head"><h2>En las trampas</h2>
+      <button onclick="toggleUi('showBirdVisits')">${ui.showBirdVisits ? "Ocultar las visitas" : `Ver las ${v.count} visitas`}</button></div>
+    <div class="charts two" style="margin-top:12px">
+      <div><div class="small muted" style="margin-bottom:6px">Visitas por hora del día</div>
+        ${columns(v.by_hour, v.by_hour.map((_, h) => String(h)), { every: 3, height: 90, titles: v.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) })}</div>
+      <div><div class="small muted" style="margin-bottom:6px">Por trampa</div>
+        ${hbars(v.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits })))}</div>
+    </div>
+    ${ui.showBirdVisits ? '<div class="scroll" id="visit-rows" style="margin-top:12px"><p class="muted">Cargando…</p></div>' : ""}
+    ${released}</div>`;
+}
+
+function keyDates(page) {
+  const marked = page.marked;
+  const last = page.last_capture;
+  const v = page.visits;
+  const markedNote = marked ? [sinceDay(marked.day), [marked.locality, marked.project].filter(Boolean).join(" · "), marked.details?.tagged_by ? `por ${marked.details.tagged_by}` : ""].filter(Boolean).join(" · ") : "Sin fecha en la base";
+  return `<div class="grid">
+    ${stat("Marcado", marked ? dayLabel(marked.day) : "—", markedNote, true)}
+    ${stat("Última captura", last ? dayLabel(last.day) : "—", last ? [sinceDay(last.day), last.locality].filter(Boolean).join(" · ") : "", true)}
+    ${stat("Recapturas", fmt(page.recaptures, 0), page.captures.length ? count(page.captures.length, "captura en total", "capturas en total") : "", true)}
+    ${stat("Primera lectura en una trampa", v.first_epoch ? whenLong(v.first_epoch) : "Nunca", v.first_node_id !== null ? trapName(v.first_node_id) : "", true)}
+    ${stat("Última vez visto", v.last_epoch ? whenLong(v.last_epoch) : "Nunca", v.last_epoch ? `${ago(epochIso(v.last_epoch))} · ${trapName(v.last_node_id)}` : "", true)}
+    ${stat("Visitas", fmt(v.count, 0), count(v.reads, "lectura", "lecturas"), true)}
+  </div>`;
+}
+
+function birdInterestCard(b) {
+  const traps = (data.overview?.traps || []).filter((t) => t.has_latch !== false);
+  const lost = lostStillMarked(b);
+  if (!b.inUse.length) {
+    return `<div class="card"><h2>De interés en</h2><p class="warn" style="margin:0">No lleva ningún tag que una trampa pueda leer: no se puede marcar.</p>
+      ${lost.length ? `<div class="row" style="margin-top:8px"><button class="danger-outline" onclick="unmarkLost('${b.key}')">Quitar de las trampas el tag perdido</button></div>` : ""}</div>`;
+  }
+  const toggle = (node, label) => {
+    const on = birdWanted(b, node);
+    return `<button class="toggle ${on ? "on" : ""}" aria-pressed="${on}" onclick="toggleBird('${b.key}', ${node === null ? "null" : node})"><span class="strong">${escapeHtml(label)}</span><span>${on ? "De interés" : "No"}</span></button>`;
+  };
+  return `<div class="card"><h2>De interés en</h2>
+    ${toggle(null, "Todas las trampas")}
+    ${traps.map((t) => toggle(t.node_id, t.name)).join("")}
+    <p class="small muted" style="margin:4px 0 0">Se marca el tag que lleva ahora (${escapeHtml(b.inUse.map((s) => s.biomark).join(", "))}). "Todas" incluye las trampas que se conecten después. La lista se envía sola.</p>
+    ${lost.length ? `<div class="banner banner-warn" style="margin-top:12px"><div>Un tag que ya no lleva sigue en la lista de una trampa y le quita un cupo.</div><button onclick="unmarkLost('${b.key}')">Quitarlo</button></div>` : ""}
+  </div>`;
+}
+
+function birdDataCard(b) {
+  const s = b.main;
+  const field = (name, label, value) => `<label style="flex:1 1 180px">${label}<input name="${name}" value="${escapeHtml(value)}"></label>`;
+  return `<div class="card"><div class="section-head"><h2>Datos del CICG</h2><button class="quiet" onclick="toggleUi('editBird')">${ui.editBird ? "Cerrar" : "Editar"}</button></div>
+    ${ui.editBird ? `<form onsubmit="saveSubject(event, '${s.tag}')" class="row" style="align-items:flex-end;margin-top:8px">
+      ${field("species", "Especie", s.species)}
+      ${field("species_code", "Código de especie", s.species_code)}
+      ${field("sex", "Sexo", s.sex)}
+      ${field("age", "Edad", s.age)}
+      ${field("band_number", "Anillo", s.band_number)}
+      ${field("cicg_id", "Código CICG", s.cicg_id)}
+      <button>Guardar</button>
+      <p class="small muted" style="margin:0;flex:1 1 100%">Se guarda en el tag en uso. La próxima importación de la base del CICG lo vuelve a escribir.</p>
+    </form>` : `<div style="margin-top:8px">${[["Código CICG", s.cicg_id], ["Especie", s.species], ["Código de especie", s.species_code], ["Sexo", es(s.sex)], ["Edad", es(s.age)], ["Anillo", s.band_number]].map(([l, v]) => `<div class="line"><span class="muted">${l}</span><span>${escapeHtml(v || "—")}</span></div>`).join("")}</div>`}
+  </div>`;
+}
+
+function renderIndividuo(rawId) {
+  const id = decodeURIComponent(rawId || "");
+  const cached = birdPages.get(id);
+  fetchBird(id);
+  const page = cached?.page;
+  const b = (page && (birdByKey(page.individual) || birdByTag(page.specimen.tag))) || birdOf(id);
+  const crumbs = `<nav class="crumbs" aria-label="Ruta"><a href="#/individuos">Individuos</a><span aria-hidden="true">›</span><span>${escapeHtml(b?.name || id)}</span></nav>`;
+  if (!b) {
+    // A tag nobody registered: a reading, not a bird.
+    const s = subjectByTag(id.toUpperCase());
+    if (!s) {
+      $("screen").innerHTML = `${crumbs}<div class="card muted">${cached?.failed || data.specimens ? "Ese individuo no existe." : "Cargando…"}</div>`;
+      return;
+    }
+    $("screen").innerHTML = `${crumbs}
+      <div><h1 class="warn">Lectura desconocida</h1><div class="mono muted">${escapeHtml(s.biomark)}</div></div>
+      <div class="card"><p style="margin:0 0 12px">Una trampa leyó este tag y no está en la base del CICG. Casi siempre es una lectura errónea.</p>
+        <div class="row"><button onclick="markTag('${s.tag}')">Marcar en todas las trampas</button><button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar sin marcar</button></div></div>
+      ${page ? `${keyDates(page)}${trapVisitsCard(page)}` : '<div class="card muted">Cargando…</div>'}`;
+    if (page && ui.showBirdVisits) loadVisits({ individual: s.tag, days: 36500 });
+    return;
+  }
+  const facts = [b.code, b.inUse.length ? b.inUse.map((s) => s.biomark).join(", ") : "sin tag en uso", b.band_number ? `anillo ${b.band_number}` : "", es(b.sex), es(b.age)].filter(Boolean).map(escapeHtml).join(" · ");
+  const openedLost = b.lost.find((s) => s.tag === id.toUpperCase() || s.biomark === id);
+  const tags = b.rows.length > 1
+    ? `<p class="small" style="margin:6px 0 0">Tags que ha llevado: ${page ? page.tags.map((t) => `<span class="mono">${escapeHtml(t.biomark)}</span> ${t.replaced ? "(perdido)" : "(en uso)"}`).join(" → ") : b.rows.map((s) => `<span class="mono">${escapeHtml(s.biomark)}</span>`).join(", ")}</p>`
+    : "";
+  const body = !page
+    ? `<div class="card muted">${cached?.failed ? "No se pudo cargar el detalle." : "Cargando…"}</div>`
+    : `${keyDates(page)}${measuresCard(page)}${capturesCard(page)}${trapVisitsCard(page)}`;
+  $("screen").innerHTML = `${crumbs}
+    <div><h1 class="italic">${escapeHtml(b.species || "Sin especie")}</h1>
+      <div class="mono muted">${facts}</div>${tags}
+      ${openedLost ? `<p class="info strong" style="margin:8px 0 0">Abriste ${escapeHtml(openedLost.biomark)}, un tag que ${escapeHtml(b.code || "este colibrí")} ya no lleva. Esta es la página del individuo.</p>` : ""}</div>
+    ${body}
+    <div class="grid-wide">${birdInterestCard(b)}${birdDataCard(b)}</div>`;
+  if (page && ui.showBirdVisits) loadVisits({ individual: b.code || b.tag, days: 36500 });
 }
 
 function setThreshold(value) {
@@ -1245,7 +1796,7 @@ function measuresCard(page) {
   if (!measured.length) {
     return `<div class="card">${head}<p class="muted" style="margin:8px 0 0">${hasRecords || !page.captures.length
       ? "Sin medidas en la base del CICG para este individuo."
-      : "Las capturas no traen medidas todavía: vuelve a importar la base del CICG (Individuos, Importar lista del CICG) para traerlas."}</p></div>`;
+      : "Las capturas no traen medidas todavía: vuelve a importar la base del CICG (Estación › Datos, o Individuos › Importar base del CICG) para traerlas."}</p></div>`;
   }
   const rows = measured.map((m) => {
     const flagged = m.values.filter((v) => isOutlier(v.deviation)).length;
@@ -1320,181 +1871,13 @@ function capturesCard(page) {
     ${items}</div>`;
 }
 
-function trapVisitsCard(page, s) {
-  const v = page.visits;
-  if (!v.count) return '<div class="card"><h2>En las trampas</h2><p class="muted" style="margin:0">Ninguna trampa lo ha leído todavía.</p></div>';
-  const released = page.trap_captures.length
-    ? `<h2 style="margin-top:16px">Disparos de trampa</h2>${page.trap_captures.slice(0, 20).map((c) => {
-      const [text, css] = CAPTURE_RESULTS[c.result] || ["Por confirmar", "warn"];
-      return `<div class="line"><span>${escapeHtml(whenLong(c.epoch))} · ${escapeHtml(trapName(c.node_id))}</span><span class="${css}">${text}</span></div>`;
-    }).join("")}`
-    : "";
-  return `<div class="card">
-    <div class="section-head"><h2>En las trampas</h2>
-      <button onclick="toggleUi('showBirdVisits')">${ui.showBirdVisits ? "Ocultar las visitas" : `Ver las ${v.count} visitas`}</button></div>
-    <div class="charts two" style="margin-top:12px">
-      <div><div class="small muted" style="margin-bottom:6px">Visitas por hora del día</div>
-        ${columns(v.by_hour, v.by_hour.map((_, h) => String(h)), { every: 3, height: 90, titles: v.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) })}</div>
-      <div><div class="small muted" style="margin-bottom:6px">Por trampa</div>
-        ${hbars(v.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits })))}</div>
-    </div>
-    ${ui.showBirdVisits ? '<div class="scroll" id="visit-rows" style="margin-top:12px"><p class="muted">Cargando…</p></div>' : ""}
-    ${released}</div>`;
-}
 
-function keyDates(page) {
-  const marked = page.marked;
-  const last = page.last_capture;
-  const v = page.visits;
-  const markedNote = marked ? [sinceDay(marked.day), [marked.locality, marked.project].filter(Boolean).join(" · "), marked.details?.tagged_by ? `por ${marked.details.tagged_by}` : ""].filter(Boolean).join(" · ") : "Sin fecha en la base";
-  return `<div class="grid">
-    ${stat("Marcado", marked ? dayLabel(marked.day) : "—", markedNote, true)}
-    ${stat("Última captura", last ? dayLabel(last.day) : "—", last ? [sinceDay(last.day), last.locality].filter(Boolean).join(" · ") : "", true)}
-    ${stat("Recapturas", fmt(page.recaptures, 0), page.captures.length ? count(page.captures.length, "captura en total", "capturas en total") : "", true)}
-    ${stat("Primera lectura en una trampa", v.first_epoch ? whenLong(v.first_epoch) : "Nunca", v.first_node_id !== null ? trapName(v.first_node_id) : "", true)}
-    ${stat("Última vez visto", v.last_epoch ? whenLong(v.last_epoch) : "Nunca", v.last_epoch ? `${ago(epochIso(v.last_epoch))} · ${trapName(v.last_node_id)}` : "", true)}
-    ${stat("Visitas", fmt(v.count, 0), count(v.reads, "lectura", "lecturas"), true)}
-  </div>`;
-}
 
-function renderIndividuo(tag) {
-  const s = subjectByTag(tag);
-  const cached = birdPages.get(tag);
-  fetchBird(tag);
-  if (!s) {
-    $("screen").innerHTML = '<div class="card muted">Ese individuo no existe.</div>';
-    return;
-  }
-  const page = cached?.page;
-  const traps = data.overview?.traps || [];
-  const field = (name, label, value) => `<label style="flex:1 1 180px">${label}<input name="${name}" value="${escapeHtml(value)}"></label>`;
-  const facts = [s.cicg_id, s.biomark, s.band_number ? `anillo ${s.band_number}` : "", s.sex, s.age].filter(Boolean).map(escapeHtml).join(" · ");
-  const tags = page && page.tags.length > 1
-    ? `<p class="small" style="margin:6px 0 0">Tags que ha llevado: ${page.tags.map((t) => `<span class="mono">${escapeHtml(t.biomark)}</span>${t.replaced ? " (perdido)" : " (actual)"}`).join(" → ")}</p>`
-    : "";
-  const body = !page
-    ? `<div class="card muted">${cached?.failed ? "No se pudo cargar el detalle." : "Cargando…"}</div>`
-    : `${keyDates(page)}${measuresCard(page)}${capturesCard(page)}${trapVisitsCard(page, s)}`;
-  $("screen").innerHTML = `
-    <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/individuos">Volver a individuos</a></div>
-    <div><h1 class="${s.registered ? "italic" : "warn"}">${escapeHtml(s.registered ? (s.species || "Sin especie") : "Lectura desconocida")}</h1>
-      <div class="mono muted">${facts}</div>
-      ${s.replaced ? '<p class="warn strong" style="margin:8px 0 0">Tag reemplazado: el colibrí perdió este tag y ya lleva otro.</p>' : ""}${tags}</div>
-    ${body}
-    <div class="grid-wide">
-      <div class="card"><h2>De interés en</h2>
-        <button class="toggle ${s.all_traps ? "on" : ""}" onclick="toggleInterestEverywhere('${s.tag}')"><span class="strong">Todas las trampas</span><span>${s.all_traps ? "De interés" : "No"}</span></button>
-        ${traps.map((t) => { const on = isOfInterest(s, t.node_id); return `<button class="toggle ${on ? "on" : ""}" onclick="toggleInterest('${s.tag}', ${t.node_id})"><span class="strong">${escapeHtml(t.name)}</span><span>${on ? "De interés" : "No"}</span></button>`; }).join("")}
-        <p class="small muted" style="margin:4px 0 0">"Todas" incluye las trampas que se conecten después. La lista se envía sola.</p>
-      </div>
-      <div class="card"><div class="section-head"><h2>Datos del CICG</h2><button class="quiet" onclick="toggleUi('editBird')">${ui.editBird ? "Cerrar" : "Editar"}</button></div>
-        ${ui.editBird ? `<form onsubmit="saveSubject(event, '${s.tag}')" class="row" style="align-items:flex-end;margin-top:8px">
-          ${field("species", "Especie", s.species)}
-          ${field("species_code", "Código", s.species_code)}
-          ${field("sex", "Sexo", s.sex)}
-          ${field("age", "Edad", s.age)}
-          ${field("band_number", "Anillo", s.band_number)}
-          ${field("cicg_id", "Código CICG", s.cicg_id)}
-          <button>Guardar</button>
-        </form>` : `<div style="margin-top:8px">${[["Especie", s.species], ["Código", s.species_code], ["Sexo", s.sex], ["Edad", s.age], ["Anillo", s.band_number], ["Código CICG", s.cicg_id]].map(([l, v]) => `<div class="line"><span class="muted">${l}</span><span>${escapeHtml(v || "—")}</span></div>`).join("")}</div>`}
-      </div>
-    </div>`;
-  if (page && ui.showBirdVisits) loadVisits({ tag: s.tag, days: 36500 });
-}
 
-// More bars than this read better per month.
-const MAX_DAY_COLUMNS = 62;
 
-function visitSummaryHtml(s) {
-  ui.visitTotal = s.visits;
-  if (!s.visits) return '<div class="card muted">Sin visitas en este periodo.</div>';
-  const card = (title, body, note, css = "") => `<div class="card ${css}"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
-  const hours = columns(s.by_hour, s.by_hour.map((_, h) => String(h)), { every: 3, titles: s.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) });
-  let days = "";
-  if (s.by_day.length > 1) {
-    if (s.by_day.length > MAX_DAY_COLUMNS) {
-      const months = new Map();
-      for (const d of s.by_day) months.set(d.day.slice(0, 7), (months.get(d.day.slice(0, 7)) || 0) + d.visits);
-      const keys = [...months.keys()];
-      days = card("Visitas por mes", columns(keys.map((k) => months.get(k)), keys.map(monthLabel), { every: Math.max(1, Math.ceil(keys.length / 8)) }));
-    } else {
-      days = card("Visitas por día", columns(s.by_day.map((d) => d.visits), s.by_day.map((d) => `${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`), {
-        every: Math.max(1, Math.ceil(s.by_day.length / 7)),
-        titles: s.by_day.map((d) => `${dayLabel(d.day)}: ${count(d.visits, "visita", "visitas")}, ${count(d.subjects, "individuo", "individuos")}`),
-      }));
-    }
-  }
-  const top = hbars(s.top.map((t) => ({
-    label: `${t.cicg_id ? `${t.cicg_id} · ` : ""}${t.label} · ${t.biomark}`,
-    value: t.visits,
-    text: `${count(t.visits, "visita", "visitas")} · última ${whenLong(t.last_epoch).replace(/^Hoy/, "hoy")}`,
-    href: `#/individuo/${t.tag}`,
-  })));
-  const species = hbars(s.by_species.map((x) => ({ label: x.label, value: x.visits, text: `${x.visits} · ${x.subjects} ind.` })));
-  const nodes = !ui.visitTrap && s.by_node.length > 1
-    ? card("Por trampa", hbars(s.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits, text: `${n.visits} · ${n.subjects} ind.` }))))
-    : "";
-  return `
-    <div class="grid">
-      ${stat("Visitas", fmt(s.visits, 0))}
-      ${stat("Individuos", fmt(s.subjects, 0), "del CICG")}
-      ${stat("Lecturas", fmt(s.reads, 0))}
-      ${stat("Duración mediana", s.median_duration_s === null ? "—" : duration(s.median_duration_s))}
-      ${stat("Lecturas desconocidas", fmt(s.unknown_visits, 0), count(s.unknown_tags, "tag fuera de la lista", "tags fuera de la lista"))}
-      ${stat("Con hora dudosa", pct(s.untrusted_visits / s.visits, 0), count(s.untrusted_visits, "visita", "visitas"))}
-    </div>
-    <div class="charts two">
-      ${card("Visitas por hora del día", hours)}
-      ${days}
-      ${card("Individuos con más visitas", top, "Clic en uno para abrir su página.", "full")}
-      ${card("Por especie", species)}
-      ${nodes}
-    </div>`;
-}
 
-function renderVisitas() {
-  const traps = data.overview?.traps || [];
-  const query = new URLSearchParams({ days: ui.period });
-  if (ui.visitTrap) query.set("node_id", ui.visitTrap);
-  const total = ui.visitTotal;
-  $("screen").innerHTML = `
-    <div class="row between"><h1>Visitas</h1>
-      <div class="row"><a class="button" href="/api/export/visits.csv">Exportar visitas</a><a class="button primary" href="/api/export/reads.csv">Exportar lecturas</a></div></div>
-    <div class="row">
-      <label style="flex:1 1 180px">Trampa<select onchange="setVisitTrap(this.value)"><option value="">Todas</option>${traps.map((t) => `<option value="${t.node_id}" ${String(t.node_id) === ui.visitTrap ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}</select></label>
-      <label style="flex:1 1 180px">Periodo<select onchange="setPeriod(this.value)">${PERIODS.map(([v, l]) => `<option value="${v}" ${v === ui.period ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-    </div>
-    <div id="visit-summary" class="stack"><div class="card muted">Cargando…</div></div>
-    <div class="card">
-      <div class="section-head"><h2>Visita por visita</h2>
-        <button id="visit-toggle" onclick="toggleUi('showVisits')">${ui.showVisits ? "Ocultar las visitas" : total ? `Ver las ${total} visitas` : "Ver las visitas"}</button></div>
-      ${ui.showVisits ? '<div class="scroll" id="visit-rows" style="margin-top:8px"><p class="muted">Cargando…</p></div>' : ""}
-    </div>
-    <p class="small muted" style="margin:0">Una visita termina tras 3 s sin leer el tag, igual que en el análisis.</p>`;
-  loadInto("visit-summary", `/api/visits/summary?${query}`, visitSummaryHtml).then(() => {
-    const button = $("visit-toggle");
-    if (button && !ui.showVisits) button.textContent = ui.visitTotal ? `Ver las ${ui.visitTotal} visitas` : "Ver las visitas";
-  });
-  if (ui.showVisits) loadVisits({ nodeId: ui.visitTrap, days: ui.period });
-}
 
-function renderCapturas() {
-  $("screen").innerHTML = '<h1>Capturas</h1><div class="card scroll" id="capture-rows"><p class="muted">Cargando…</p></div>';
-  const result = CAPTURE_RESULTS;
-  return loadInto("capture-rows", "/api/captures", ({ captures }) => (captures.length ? `<table style="min-width:600px"><thead><tr><th>Hora</th><th>Trampa</th><th>Sujeto</th><th>Biomark</th><th>Resultado</th></tr></thead><tbody>
-    ${captures.map((c) => { const [text, css] = result[c.result] || ["Por confirmar", "warn"]; return `<tr>
-      <td class="mono">${escapeHtml(dateTime(c.epoch))}</td><td>${escapeHtml(trapName(c.node_id))}</td>
-      <td class="${c.known ? "italic" : "warn"}">${escapeHtml(c.label)}</td><td class="mono">${escapeHtml(c.biomark)}</td>
-      <td class="strong ${css}">${text}</td></tr>`; }).join("")}</tbody></table>` : '<p class="muted">Todavía no hay capturas.</p>'));
-}
 
-function renderBitacora() {
-  $("screen").innerHTML = `
-    <div class="row between"><h1>Bitácora</h1>
-      <div class="row">${FILTERS.map(([v, l]) => `<button class="${v === ui.filter ? "selected" : ""}" onclick="setFilter('${v}')">${l}</button>`).join("")}</div></div>
-    <div class="card" id="log-rows"><p class="muted">Cargando…</p></div>`;
-  loadLog({ limit: 200, kind: ui.filter });
-}
 
 function isEditing() {
   const el = document.activeElement;
@@ -1571,31 +1954,53 @@ function announceCaptures() {
     sound.notified.add(key);
     const subject = subjectByTag(t.capture.tag);
     new Notification(`Captura en ${t.name}`, {
-      body: subject?.registered ? `${subject.species || "Sin especie"} · ${subject.biomark}` : "Lectura desconocida",
+      body: subject?.registered ? `${subject.cicg_id ? `${subject.cicg_id} · ` : ""}${subject.species || "Sin especie"} · ${subject.biomark}` : "Lectura desconocida",
       requireInteraction: true,
     });
   }
+}
+
+// The control every screen needs at hand: whether the traps may capture.
+// Deactivating is the safe side and happens at once; activating asks first.
+function trapSwitch() {
+  const o = data.overview;
+  if (!o) return "";
+  const latched = (o.traps || []).filter(canCapture);
+  if (o.paused) {
+    const done = latched.filter(confirmedPaused).length;
+    return `<div class="ts-state"><span class="dot dot-warn"></span>Trampas desactivadas</div>
+      <div class="ts-note">${latched.length ? `${done} de ${latched.length} ${latched.length === 1 ? "suelta" : "sueltas"}` : "Ninguna conectada"}</div>
+      <button class="primary" onclick="confirmResume()">Activar todas</button>`;
+  }
+  return `<div class="ts-state"><span class="dot dot-ok"></span>Trampas activas</div>
+    <button class="danger-outline" onclick="pauseTraps()">Desactivar todas</button>`;
+}
+
+function navStatus() {
+  const traps = data.overview?.traps || [];
+  const online = traps.filter((t) => t.reachable).length;
+  const link = data.health?.link;
+  const gateway = !link ? ["Gateway: sin datos", "dot-off"] : link.connected ? ["Gateway conectada", "dot-ok"] : ["Gateway desconectada", "dot-warn"];
+  const soundNote = sound.on && sound.ctx?.state !== "running" ? '<div class="ts-note">Haz clic en la página para oírlo.</div>' : "";
+  return `<div class="indicator"><span class="dot ${gateway[1]}"></span>${gateway[0]}</div>
+    <div class="indicator"><span class="dot ${online ? "dot-ok" : "dot-off"}"></span>${online} de ${count(traps.length, "trampa", "trampas")} en línea</div>
+    <button class="switch" role="switch" aria-checked="${sound.on}" onclick="toggleCaptureSound()"><span class="switch-track"><span class="switch-thumb"></span></span>Sonido de captura</button>${soundNote}`;
 }
 
 function render(force) {
   renderBanners();
   announceCaptures();
   const r = route();
-  document.querySelectorAll("nav a").forEach((a) => {
+  document.querySelectorAll("nav a[data-nav]").forEach((a) => {
     const name = a.dataset.nav;
     const on = name === r.screen || (r.screen === "trampa" && name === "inicio")
       || (r.screen === "individuo" && name === "individuos");
     a.classList.toggle("on", on);
+    if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  const online = (data.overview?.traps || []).filter((t) => t.reachable).length;
-  const link = data.health?.link;
-  const soundNote = !sound.on ? "Sonido de captura: apagado"
-    : sound.ctx?.state === "running" ? "Sonido de captura: encendido" : "Sonido: haz clic en la página";
-  $("nav-status").innerHTML = `<div><a href="#/gateway">${link && link.connected === false ? "Gateway desconectada" : "Gateway conectada"}</a></div><div>${count(online, "trampa en línea", "trampas en línea")}</div>
-    <div style="margin-top:10px"><a href="#" onclick="toggleCaptureSound(); return false">${soundNote}</a></div>
-    <div style="margin-top:10px">${data.overview?.paused
-      ? '<a href="#" onclick="resumeTraps(); return false">Trampas desactivadas: activar todas</a>'
-      : '<a href="#" onclick="pauseTraps(); return false">Desactivar todas las trampas</a>'}</div>`;
+  $("trap-switch").innerHTML = trapSwitch();
+  $("nav-status").innerHTML = navStatus();
+  $("nav-version").textContent = data.update?.current || data.station?.version || "";
   if (!force && isEditing()) return;
   if (r.screen === "trampa") renderTrampa(r.id, r.tab);
   else if (r.screen === "individuos") renderIndividuos();
@@ -1603,35 +2008,32 @@ function render(force) {
   else if (r.screen === "visitas") renderVisitas();
   else if (r.screen === "capturas") renderCapturas();
   else if (r.screen === "bitacora") renderBitacora();
-  else if (r.screen === "gateway") renderGateway();
+  else if (r.screen === "estacion") renderEstacion();
   else renderInicio();
 }
 
 async function refresh(force) {
-  const onGateway = route().screen === "gateway";
-  const [overview, health, specimens, gateway, update] = await Promise.all([
+  const onStation = route().screen === "estacion";
+  const [overview, health, specimens, gateway, update, station] = await Promise.all([
     fetch("/api/overview").then((r) => r.json()).catch(() => data.overview),
     fetch("/health").then((r) => r.json()).catch(() => data.health),
     fetch("/api/specimens").then((r) => r.json()).catch(() => data.specimens),
-    onGateway ? fetch("/api/gateway").then((r) => r.json()).catch(() => data.gateway) : data.gateway,
+    onStation ? fetch("/api/gateway").then((r) => r.json()).catch(() => data.gateway) : data.gateway,
     fetch("/api/update").then((r) => r.json()).catch(() => data.update),
+    onStation || !data.station ? fetch("/api/station").then((r) => r.json()).catch(() => data.station) : data.station,
   ]);
-  Object.assign(data, { overview, health, specimens, gateway, update });
+  Object.assign(data, { overview, health, specimens, gateway, update, station });
   render(force === true);
 }
 
-// The port the gateway is on: chosen here, tried at once, remembered for the
-// next start. "Automático" is right whenever only the gateway is plugged in.
-function renderGateway() {
+// --- Estación: this station's own settings and data -------------------------
+// Only what is set once in a while or read rarely. Arming, marking and
+// deactivating the traps are the day's work and stay where they happen.
+
+function gatewaySection() {
   const g = data.gateway;
-  if (!g) {
-    $("screen").innerHTML = '<h1>Gateway</h1><div class="card muted">Cargando…</div>';
-    return;
-  }
-  if (!g.enabled) {
-    $("screen").innerHTML = '<h1>Gateway</h1><div class="card">La estación arrancó sin gateway (--no-gateway).</div>';
-    return;
-  }
+  if (!g) return '<p class="muted" style="margin:0">Cargando…</p>';
+  if (!g.enabled) return '<p style="margin:0">La estación arrancó sin gateway (--no-gateway).</p>';
   const state = g.connected
     ? `<span class="ok strong">Conectada</span> en <span class="mono">${escapeHtml(g.device)}</span>`
     : `<span class="warn strong">Sin conexión</span>${g.last_error ? `: ${escapeHtml(g.last_error)}` : ""}`;
@@ -1640,32 +2042,133 @@ function renderGateway() {
   const options = [option("auto", "Automático (el único puerto USB)")]
     .concat(g.ports.map((p) => option(p.device, `${p.device}${p.description ? ` · ${p.description}` : ""}${p.usb ? "" : " (no es USB)"}`)))
     .concat(g.configured && g.configured !== "auto" && !listed ? [option(g.configured, `${g.configured} (no está conectado)`)] : []);
+  return `<div>${state}</div>
+    <div class="row" style="align-items:flex-end">
+      <label style="flex:1 1 280px">Puerto de la gateway<select id="gateway-port">${options.join("")}</select></label>
+      <button onclick="chooseGatewayPort()">Usar este puerto</button></div>
+    <p class="small muted" style="margin:0">Se prueba de inmediato y la estación lo recuerda la próxima vez que la abras. "Automático" sirve cuando la gateway es lo único conectado por USB; con varias placas conectadas, elige el puerto.</p>`;
+}
+
+function soundSection() {
+  const permission = "Notification" in window ? Notification.permission : "unsupported";
+  const notes = {
+    granted: ["Permitidas: una captura también avisa en el sistema.", ""],
+    denied: ["Bloqueadas en este navegador. Se permiten desde la configuración del sitio.", "warn"],
+    default: ["Todavía no se han permitido.", "muted"],
+    unsupported: ["Este navegador no las tiene.", "muted"],
+  }[permission];
+  return `<button class="switch switch-light" role="switch" aria-checked="${sound.on}" onclick="toggleCaptureSound()"><span class="switch-track"><span class="switch-thumb"></span></span>Sonido de captura en este computador</button>
+    <div class="row"><button onclick="bell()" ${sound.on ? "" : "disabled"}>Probar sonido</button>
+      ${permission === "default" ? '<button onclick="askNotifications()">Permitir notificaciones</button>' : ""}</div>
+    <p class="small ${notes[1]}" style="margin:0">Notificaciones del sistema: ${notes[0]}</p>
+    <p class="small muted" style="margin:0">La campana suena cada 6 s mientras una captura espera respuesta. Se recuerda en este computador.</p>`;
+}
+
+async function askNotifications() {
+  if ("Notification" in window) await Notification.requestPermission();
+  render(true);
+}
+
+function dataSection() {
+  const st = data.station;
+  const last = st?.last_import;
+  const lastText = last
+    ? `${whenLong(last.epoch)} · ${last.filename}${last.sheet ? ` (hoja "${last.sheet}")` : ""} · ${count(last.individuals, "individuo", "individuos")}, ${count(last.tags, "tag", "tags")}${last.warnings ? ` · ${count(last.warnings, "aviso", "avisos")}` : ""}`
+    : "Todavía no se ha importado.";
+  return `<div class="line"><span class="muted">Base del CICG</span><span>${escapeHtml(lastText)}</span></div>
+    <div class="line"><span class="muted">Datos de la estación</span><span class="mono small">${escapeHtml(st?.db_path || "—")}</span></div>
+    <div class="row">${importButton("Importar base del CICG")}
+      <a class="button" href="/api/export/reads.csv">Exportar lecturas</a>
+      <a class="button" href="/api/export/visits.csv">Exportar visitas</a>
+      <button onclick="makeBackup()">Hacer respaldo completo</button></div>
+    <p class="small muted" style="margin:0">El respaldo copia toda la base de la estación, con un CSV y un README, en <span class="mono">${escapeHtml(st?.backup_folder || "respaldos")}</span>. Cópialo a una memoria USB o a la nube.</p>`;
+}
+
+async function makeBackup() {
+  toast("Haciendo el respaldo…");
+  await act("/api/backup", { method: "POST" }, (result) => `Respaldo listo en ${result.folder}`);
+}
+
+function clockSection() {
+  const trust = data.station?.clock_trust || data.health?.clock_trust;
+  const windows = data.station?.windows;
+  const states = {
+    ntp: ["Confirmado por internet", "ok", "La estación le pasa esta hora a las trampas."],
+    rtc: ["Confirmado por el reloj de respaldo", "ok", "La estación le pasa esta hora a las trampas."],
+    unset: ["Sin confirmar", "warn", windows
+      ? "Conecta el computador a internet y activa Configuración › Hora e idioma › Establecer la hora automáticamente. Mientras tanto la estación no le pasa la hora a las trampas."
+      : "Conecta el computador a internet y activa la hora automática (Configuración › Fecha y hora, o `timedatectl set-ntp true`). Mientras tanto la estación no le pasa la hora a las trampas."],
+  };
+  const [label, css, note] = states[trust] || ["Sin datos", "muted", ""];
+  return `<div class="line"><span class="muted">Reloj de este computador</span><span class="strong ${css}">${label}</span></div>
+    <p class="small muted" style="margin:0">${escapeHtml(note)}</p>`;
+}
+
+function versionSection() {
+  const u = data.update;
+  const st = data.station;
+  const version = u?.current || st?.version || "—";
+  if (!st?.updates) {
+    return `<div class="line"><span class="muted">Versión</span><span class="strong">${escapeHtml(version)}</span></div>
+      <p class="small muted" style="margin:0">Esta copia corre desde el código: se actualiza con git, no desde aquí.</p>`;
+  }
+  let state = "Al día.";
+  if (u?.state && u.state !== "idle") state = u.message || u.state;
+  else if (u?.available) state = `Hay una versión nueva: ${u.latest}.`;
+  return `<div class="line"><span class="muted">Versión</span><span class="strong">${escapeHtml(version)}</span></div>
+    <p style="margin:0">${escapeHtml(state)}</p>
+    <div class="row">
+      ${u?.available ? (u.action === "install" ? '<button class="primary" onclick="runUpdate()">Actualizar</button>' : `<a class="button" href="${escapeHtml(u.url)}">Descargar la nueva</a>`) : ""}
+      <button onclick="checkUpdates()">Buscar actualizaciones</button>
+      ${u?.notes_url ? `<a href="${escapeHtml(u.notes_url)}" target="_blank" rel="noopener">Novedades</a>` : ""}</div>`;
+}
+
+async function checkUpdates() {
+  toast("Buscando actualizaciones…");
+  try { data.update = await api("/api/update/check", { method: "POST" }); } catch (error) { toast(error.message, { error: true }); return; }
+  setTimeout(async () => {
+    await refresh(true);
+    toast(data.update?.available ? `Hay una versión nueva: ${data.update.latest}.` : "No hay una versión nueva.");
+  }, 2500);
+}
+
+function measuresSection() {
+  return `<label style="flex-direction:row;align-items:center;gap:8px;color:var(--ink)">Resaltar medidas a más de
+      <input type="number" min="1" max="100" step="1" value="${escapeHtml(ui.threshold)}" style="width:84px" onchange="setThreshold(this.value)"> % de la mediana del individuo</label>
+    <p class="small muted" style="margin:0">Vale para la página de cada individuo y se recuerda en este computador. También se cambia desde allí.</p>`;
+}
+
+function renderEstacion() {
+  const section = (id, title, body) => `<section class="card stack" id="${id}" style="gap:12px"><h2 style="margin:0">${title}</h2>${body}</section>`;
   $("screen").innerHTML = `
-    <h1>Gateway</h1>
-    <div class="card stack narrow">
-      <div>${state}</div>
-      <label>Puerto de la gateway<select id="gateway-port">${options.join("")}</select></label>
-      <div class="row"><button class="primary" onclick="chooseGatewayPort()">Usar este puerto</button></div>
-      <p class="small muted" style="margin:0">Se prueba de inmediato y la estación lo recuerda la próxima vez que la abras. "Automático" sirve cuando la gateway es lo único conectado por USB; con varias placas conectadas, elige el puerto.</p>
+    <h1>Estación</h1>
+    <div class="stack narrow">
+      ${section("gateway", "Gateway", gatewaySection())}
+      ${section("avisos", "Aviso de captura", soundSection())}
+      ${section("datos", "Datos", dataSection())}
+      ${section("reloj", "Reloj", clockSection())}
+      ${section("version", "Versión", versionSection())}
+      ${section("medidas", "Medidas", measuresSection())}
     </div>`;
 }
 
 async function chooseGatewayPort() {
   const device = $("gateway-port").value;
   document.activeElement?.blur();
-  const result = await act("/api/gateway", jsonBody("PUT", { device }));
-  if (result) {
-    ui.message = device === "auto" ? "Gateway en automático." : `Gateway en ${device}.`;
-    render(true);
-  }
+  await act("/api/gateway", jsonBody("PUT", { device }), device === "auto" ? "Gateway en automático." : `Gateway en ${device}.`);
 }
 
 window.addEventListener("hashchange", () => {
-  ui.message = "";
   ui.showBirdVisits = false;
   ui.editBird = false;
-  if (route().screen === "gateway") refresh(true); else render(true);
+  const r = route();
+  if (r.screen === "gateway") { location.hash = "#/estacion"; return; }
+  if (r.screen === "estacion") refresh(true); else render(true);
 });
+
+
+
+
 new EventSource("/api/events").onmessage = () => refresh();
 refresh(true);
 setInterval(refresh, 5000);

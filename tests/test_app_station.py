@@ -308,7 +308,7 @@ def test_an_older_database_keeps_described_subjects_as_registered(tmp_path: Path
 def test_the_page_shows_biomark_and_never_loads_anything_external() -> None:
     html = (Path(app_module.__file__).parent / "static" / "index.html").read_text("utf-8")
     assert "Lectura desconocida" in html
-    assert "Importar lista del CICG" in html
+    assert "Importar base del CICG" in html
     assert "/api/export/reads.csv" in html
     assert "s.biomark" in html
     assert "://" not in html

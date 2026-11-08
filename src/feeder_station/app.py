@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import statistics
+import sys
 import threading
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -26,6 +27,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, field_validator
 
+from feeder_station import __version__
 from feeder_station.adapters.clock import Clock, StationClock
 from feeder_station.adapters.export import export_station
 from feeder_station.adapters.serial_gateway import (
@@ -577,7 +579,8 @@ def _readings(events: Iterable[StoredEvent]) -> list[Reading]:
 
 def _subject_fields(row: SpecimenRow | None) -> dict[str, Any]:
     """How a tag reads to a person. A tag nobody registered is not a subject:
-    every marked bird is on the list, so it is most likely a misread."""
+    every marked bird is on the list, so it is most likely a misread. A bird
+    is named by its CICG code; ``lost_tag`` says the bird no longer wears it."""
     known = row is not None and row.registered
     return {
         "known": known,
@@ -585,7 +588,28 @@ def _subject_fields(row: SpecimenRow | None) -> dict[str, Any]:
         "label": (
             (row.species or "Sin especie") if row is not None and known else "Lectura desconocida"
         ),
+        "cicg_id": row.cicg_id if row is not None and known else None,
+        "lost_tag": bool(row is not None and known and row.replaced),
     }
+
+
+def individual_key(row: SpecimenRow | None, tag: bytes) -> str:
+    """One bird, whatever tag it wore: its CICG code, or the tag itself when
+    it has none (a reading nobody registered, a bird added by hand)."""
+    code = (row.cicg_id or "").strip().lower() if row is not None and row.registered else ""
+    return f"cicg:{code}" if code else f"tag:{tag.hex().upper()}"
+
+
+def _who(row: SpecimenRow | None, tag: bytes) -> str:
+    """A tag as the log says it: the bird's code and species, or why not."""
+    subject = _subject_fields(row)
+    if not subject["known"]:
+        return f"tag desconocido ({to_biomark(tag)})"
+    code = subject["cicg_id"]
+    if subject["lost_tag"]:
+        return f"tag perdido de {code or subject['label']} ({to_biomark(tag)})"
+    name = f"{code} · {subject['label']}" if code else subject["label"]
+    return f"{name} ({to_biomark(tag)})"
 
 
 def _local_day(epoch: float) -> str:
@@ -614,15 +638,21 @@ def visit_summary(
         row = specimens.get(tag)
         return row is not None and row.registered
 
+    def bird(tag: bytes) -> str:
+        return individual_key(specimens.get(tag), tag)
+
+    def birds(listed: Iterable[Visit], *, only_known: bool = False) -> int:
+        return len({bird(v.tag) for v in listed if known(v.tag) or not only_known})
+
     by_hour = [0] * 24
     days: dict[str, list[Visit]] = {}
-    tags: dict[bytes, list[Visit]] = {}
+    individuals: dict[str, list[Visit]] = {}
     labels: dict[str, list[Visit]] = {}
     nodes: dict[int, list[Visit]] = {}
     for visit in visits:
         by_hour[_local_hour(visit.start)] += 1
         days.setdefault(_local_day(visit.start), []).append(visit)
-        tags.setdefault(visit.tag, []).append(visit)
+        individuals.setdefault(bird(visit.tag), []).append(visit)
         labels.setdefault(_subject_fields(specimens.get(visit.tag))["label"], []).append(visit)
         nodes.setdefault(visit.node_id, []).append(visit)
 
@@ -637,17 +667,21 @@ def visit_summary(
                 {
                     "day": day.isoformat(),
                     "visits": len(listed),
-                    "subjects": len({v.tag for v in listed if known(v.tag)}),
+                    "subjects": birds(listed, only_known=True),
                 }
             )
             day += timedelta(days=1)
 
-    top = sorted(tags.items(), key=lambda item: (-len(item[1]), -max(v.start for v in item[1])))
+    def newest(listed: list[Visit]) -> Visit:
+        return max(listed, key=lambda v: v.start)
+
+    top = sorted(individuals.values(), key=lambda listed: (-len(listed), -newest(listed).start))
+    unknown = [listed for listed in individuals.values() if not known(listed[0].tag)]
     return {
         "visits": len(visits),
-        "subjects": sum(1 for tag in tags if known(tag)),
-        "unknown_tags": sum(1 for tag in tags if not known(tag)),
-        "unknown_visits": sum(len(listed) for tag, listed in tags.items() if not known(tag)),
+        "subjects": len(individuals) - len(unknown),
+        "unknown_tags": len(unknown),
+        "unknown_visits": sum(len(listed) for listed in unknown),
         "reads": sum(v.reads for v in visits),
         "median_duration_s": statistics.median(v.duration for v in visits) if visits else None,
         "untrusted_visits": sum(1 for v in visits if not v.clock_trusted),
@@ -655,19 +689,20 @@ def visit_summary(
         "by_day": by_day,
         "top": [
             {
-                "tag": tag.hex().upper(),
-                "biomark": to_biomark(tag),
-                **_subject_fields(specimens.get(tag)),
-                "cicg_id": (row.cicg_id if (row := specimens.get(tag)) else None),
+                # The tag it was read with most recently names the bird.
+                "tag": newest(listed).tag.hex().upper(),
+                "biomark": to_biomark(newest(listed).tag),
+                **_subject_fields(specimens.get(newest(listed).tag)),
+                "individual": bird(newest(listed).tag),
                 "visits": len(listed),
                 "reads": sum(v.reads for v in listed),
-                "last_epoch": max(v.start for v in listed),
+                "last_epoch": newest(listed).start,
             }
-            for tag, listed in top[:10]
+            for listed in top[:10]
         ],
         "by_species": sorted(
             (
-                {"label": label, "visits": len(listed), "subjects": len({v.tag for v in listed})}
+                {"label": label, "visits": len(listed), "subjects": birds(listed)}
                 for label, listed in labels.items()
             ),
             key=lambda item: (-item["visits"], item["label"]),
@@ -677,7 +712,7 @@ def visit_summary(
                 {
                     "node_id": node_id,
                     "visits": len(listed),
-                    "subjects": len({v.tag for v in listed if known(v.tag)}),
+                    "subjects": birds(listed, only_known=True),
                 }
                 for node_id, listed in nodes.items()
             ),
@@ -694,6 +729,24 @@ def bird_rows(row: SpecimenRow, rows: Iterable[SpecimenRow]) -> list[SpecimenRow
         return [row]
     same = [r for r in rows if (r.cicg_id or "").strip().lower() == code]
     return sorted(same or [row], key=lambda r: (r.capture_days[:1] or ("9999",), r.tag))
+
+
+def resolve_individual(ident: str, rows: Sequence[SpecimenRow]) -> SpecimenRow | None:
+    """The row a page about ``ident`` stands on: ``ident`` is a CICG code, a
+    BioMark or a tag in hex. Whatever tag it names, the bird's page is about
+    the tag it wears now, so marking it never spends a slot on a lost tag."""
+    text = ident.strip()
+    tag = bytes.fromhex(text) if _TAG_HEX_PATTERN.fullmatch(text) else parse_tag(text)
+    found = next((r for r in rows if r.tag == tag), None) if tag is not None else None
+    if found is None:
+        code = text.lower()
+        found = next((r for r in rows if (r.cicg_id or "").strip().lower() == code), None)
+    if found is None:
+        return None
+    in_use = [r for r in bird_rows(found, rows) if not r.replaced]
+    if not in_use or found in in_use:
+        return found
+    return max(in_use, key=lambda r: (r.capture_days[-1:] or ("",), r.tag))
 
 
 def _capture_json(record: CaptureRecord) -> dict[str, Any]:
@@ -761,6 +814,8 @@ def specimen_detail(
     newest = max(visits, key=lambda v: v.end) if visits else None
     return {
         "specimen": _specimen_to_json(row),
+        "individual": individual_key(row, row.tag),
+        "in_use": [r.tag.hex().upper() for r in tags if not r.replaced],
         "tags": [
             {
                 "tag": r.tag.hex().upper(),
@@ -1416,7 +1471,7 @@ def create_app(
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"Así {which} quedaría con {count} sujetos de interés; "
+                        f"Así {which} quedaría con {count} tags de interés; "
                         f"una trampa admite hasta {_MAX_TARGET_TAGS}."
                     ),
                 )
@@ -1489,7 +1544,11 @@ def create_app(
             "traps": traps,
             "visits_today": len(visits),
             "subjects_today": len(
-                {v.tag for v in visits if (r := specimens.get(v.tag)) and r.registered}
+                {
+                    individual_key(r, v.tag)
+                    for v in visits
+                    if (r := specimens.get(v.tag)) and r.registered
+                }
             ),
             "captures_today": sum(1 for c in store.captures() if c.epoch >= today),
             "paused": store.traps_paused(),
@@ -1572,7 +1631,12 @@ def create_app(
             if tag is not None and (tag in rows or body.action == "add"):
                 tags.append(tag)
                 continue
-            matches = by_code.get(text.lower()) or by_band.get(text.lower(), [])
+            worn = by_code.get(text.lower())
+            if worn:
+                # A CICG code is the bird: every tag it wears now.
+                tags.extend(worn)
+                continue
+            matches = by_band.get(text.lower(), [])
             if len(matches) == 1:
                 tags.append(matches[0])
             elif matches:
@@ -1602,6 +1666,8 @@ def create_app(
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
             "changed": len(changes),
+            # So the page can offer "Deshacer": each tag goes back to where it was.
+            "changed_tags": [tag.hex().upper() for tag in changes],
             "unchanged": unchanged,
             "created": [to_biomark(tag) for tag in created],
             "missing": missing,
@@ -1622,6 +1688,22 @@ def create_app(
             table.specimens,
             {tag: list(days.values()) for tag, days in table.captures.items()},
             table.replaced,
+        )
+        await asyncio.to_thread(
+            store.record_import,
+            {
+                "epoch": now().timestamp(),
+                "filename": filename,
+                "sheet": table.sheet,
+                "tags": len(table.specimens),
+                "individuals": len(
+                    {
+                        (f.get("cicg_id") or tag.hex()).strip().lower()
+                        for tag, f in table.specimens.items()
+                    }
+                ),
+                "warnings": len(table.warnings),
+            },
         )
         app.state.broadcaster.publish({"type": "traps_changed"})
         return {
@@ -1654,20 +1736,30 @@ def create_app(
 
     @app.get("/api/visits")
     def visits(
-        node_id: int | None = None, tag: str | None = None, days: int = 1, limit: int = 300
+        node_id: int | None = None,
+        tag: str | None = None,
+        days: int = 1,
+        limit: int = 300,
+        individual: str | None = None,
     ) -> dict[str, Any]:
+        """``individual`` (a CICG code, BioMark or tag) is every tag the bird wore."""
         store = app.state.store
         if store is None:
             return {"visits": [], "gap_seconds": DEFAULT_GAP_SECONDS}
         since = _start_of_today() - (max(days, 1) - 1) * 86400
         readings = _readings(store.reads_between(since_epoch=since))
-        specimens = {row.tag: row for row in store.specimens()}
+        rows = store.specimens()
+        specimens = {row.tag: row for row in rows}
         grouped = group_visits(readings)
         if node_id is not None:
             grouped = [v for v in grouped if v.node_id == node_id]
         if tag is not None:
             wanted_tag = _tag_from_path(tag)
             grouped = [v for v in grouped if v.tag == wanted_tag]
+        if individual is not None:
+            found = resolve_individual(individual, rows)
+            worn = {r.tag for r in bird_rows(found, rows)} if found is not None else set()
+            grouped = [v for v in grouped if v.tag in worn]
         at = now().timestamp()
         return {
             "visits": [_visit_to_json(v, specimens, at) for v in grouped[:limit]],
@@ -1687,19 +1779,28 @@ def create_app(
         specimens = {row.tag: row for row in store.specimens()}
         return visit_summary(grouped, specimens, first_day=first_day)
 
-    @app.get("/api/specimens/{tag_hex}/detail")
-    def specimen_page(tag_hex: str) -> dict[str, Any]:
+    def _individual_page(ident: str) -> dict[str, Any]:
         store = _require_store()
-        tag = _tag_from_path(tag_hex)
         rows = store.specimens()
-        row = next((r for r in rows if r.tag == tag), None)
+        row = resolve_individual(ident, rows)
         if row is None:
             raise HTTPException(status_code=404, detail="unknown specimen")
         worn = bird_rows(row, rows)
         tags = {r.tag for r in worn}
         visits = group_visits(_readings(store.reads_of(tags)))
         released = [c for c in store.captures() if c.tag in tags]
-        return specimen_detail(row, worn, store.capture_records(tags), visits, released)
+        page = specimen_detail(row, worn, store.capture_records(tags), visits, released)
+        page["opened"] = ident
+        return page
+
+    @app.get("/api/individuals/{ident}/detail")
+    def individual_page(ident: str) -> dict[str, Any]:
+        """One bird by its CICG code, a BioMark or a tag in hex."""
+        return _individual_page(ident)
+
+    @app.get("/api/specimens/{tag_hex}/detail")
+    def specimen_page(tag_hex: str) -> dict[str, Any]:
+        return _individual_page(_tag_from_path(tag_hex).hex().upper())
 
     @app.get("/api/captures")
     def captures() -> dict[str, Any]:
@@ -1734,11 +1835,7 @@ def create_app(
         specimens = {row.tag: row for row in store.specimens()}
         rows: list[dict[str, Any]] = []
         for event in store.log_events(msg_types, limit=min(limit, 500), node_id=node_id):
-            who = ""
-            if event.tag is not None:
-                subject = _subject_fields(specimens.get(event.tag))
-                name = subject["label"] if subject["known"] else "tag desconocido"
-                who = f"{name} ({to_biomark(event.tag)})"
+            who = "" if event.tag is None else _who(specimens.get(event.tag), event.tag)
             entry = event_log.describe(event.msg_type, event.fields, who)
             if entry is not None:
                 rows.append(
@@ -1779,6 +1876,8 @@ def create_app(
                     (row.sex or "") if row and known else "",
                     (row.age or "") if row and known else "",
                     (row.band_number or "") if row and known else "",
+                    (row.cicg_id or "") if row and known else "",
+                    ("no" if row.replaced else "si") if row and known else "",
                 )
 
         stamp = now().astimezone().strftime("%Y%m%d-%H%M")
@@ -1798,6 +1897,8 @@ def create_app(
                 "sexo",
                 "edad",
                 "anillo",
+                "codigo_cicg",
+                "tag_en_uso",
             ),
             rows(),
         )
@@ -1822,6 +1923,8 @@ def create_app(
                     to_biomark(visit.tag),
                     "registrado" if known else "lectura desconocida",
                     (row.species or "") if row and known else "",
+                    (row.cicg_id or "") if row and known else "",
+                    ("no" if row.replaced else "si") if row and known else "",
                 )
 
         stamp = now().astimezone().strftime("%Y%m%d-%H%M")
@@ -1837,6 +1940,8 @@ def create_app(
                 "biomark",
                 "clasificacion",
                 "especie",
+                "codigo_cicg",
+                "tag_en_uso",
             ),
             rows(),
         )
@@ -1924,6 +2029,40 @@ def create_app(
             ) from exc
         app.state.broadcaster.publish({"type": "traps_changed"})
         return _gateway_json(gateway)
+
+    def _backup_root(store: Store) -> Path:
+        return store.path.resolve().parent / "respaldos"
+
+    @app.get("/api/station")
+    def station_info() -> dict[str, Any]:
+        """What the Estación page shows about this copy and its data."""
+        store = app.state.store
+        return {
+            "version": __version__,
+            "updates": app.state.updates is not None,
+            "db_path": str(store.path.resolve()) if store is not None else None,
+            "backup_folder": str(_backup_root(store)) if store is not None else None,
+            "last_import": store.last_import() if store is not None else None,
+            "clock_trust": app.state.clock.trust().value,
+            "windows": sys.platform == "win32",
+        }
+
+    @app.post("/api/backup")
+    def backup() -> dict[str, Any]:
+        """A full copy of the station's data (the database, its CSV and a
+        README) in the data folder's ``respaldos``, one folder per copy."""
+        store = _require_store()
+        folder = export_station(store, _backup_root(store), now=now())
+        return {"folder": str(folder)}
+
+    @app.post("/api/update/check")
+    def check_updates() -> dict[str, Any]:
+        """The "Buscar actualizaciones" button: ask GitHub now."""
+        checker = app.state.updates
+        if checker is None:
+            return {"enabled": False, "available": False}
+        status: dict[str, Any] = checker.check_now()
+        return status
 
     @app.get("/api/update")
     def update_status() -> dict[str, Any]:

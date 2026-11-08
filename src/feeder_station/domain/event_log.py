@@ -92,7 +92,7 @@ def describe(msg_type: int, fields: Mapping[str, object], who: str) -> LogEntry 
     if msg_type == OPERATOR_SET_TARGETS:
         tags = fields.get("tags")
         count = len(tags) if isinstance(tags, list) else 0
-        return LogEntry("commands", f"Lista de interés enviada: {count} sujetos")
+        return LogEntry("commands", f"Lista de interés enviada: {count} tags")
     if msg_type == payloads.TARGETS:
         return LogEntry(
             "commands", f"La trampa reportó su lista, versión {fields.get('targets_version')}"
