@@ -80,6 +80,18 @@ sección se llama con el número de versión, sin la "v" y sin "-rc".
   horas, método, quién lo marcó y lo midió, muestra y fotos.
 - La importación de la base del CICG guarda ahora todas las columnas de cada
   captura. Hay que volver a importar el Excel una vez para traer las medidas.
+- En Visitas, el individuo de cada visita abre su página (también en la
+  pestaña Visitas de cada trampa).
+- Individuos ordena su resumen por relevancia: especie, tiempo sin recapturar,
+  proyecto, localidad, y sexo y edad. "Tiempo sin recapturar" (menos de 3
+  meses, 3 a 6, 6 a 12, 1 a 2 años, más de 2) reemplaza la gráfica por mes y
+  también es un filtro. Las barras van de mayor a menor, con "Desconocido" y
+  "Sin especie" al final. Cómo quedarían las listas de las trampas se ve junto
+  al botón de marcar.
+- Visitas muestra tres cifras (visitas, individuos, lecturas desconocidas) y
+  una nota con las lecturas, la duración y la hora sin confirmar; las gráficas
+  van por hora, por especie y los individuos con más visitas; "por día" solo
+  con periodos de 7 días o más.
 - Un individuo es su código CICG: los tags que ha llevado (el que lleva y los
   que perdió) cuentan como un solo individuo. Individuos muestra una fila por
   colibrí y cuenta colibríes; los filtros de proyecto, localidad y fechas miran

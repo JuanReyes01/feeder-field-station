@@ -278,7 +278,7 @@ const TRAP_TABS = {
 const data = { overview: null, health: null, specimens: null, gateway: null, update: null, station: null };
 const ui = {
   filter: "all", period: "1", visitTrap: "", trapSearch: "", updateHidden: false,
-  filters: { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" }, scope: "all", entries: "",
+  filters: { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "", gap: "" }, scope: "all", entries: "",
   // Details only when asked for: lists, tables and each capture stay closed.
   showList: false, showUnknown: false, showAdd: false, showVisits: false, showBirdVisits: false,
   editBird: false, openCaptures: new Set(), visitTotal: null, threshold: 10,
@@ -1044,7 +1044,7 @@ function loadVisits({ nodeId, tag, individual, days }) {
     ${visits.map((v) => `<tr>
       <td class="mono">${escapeHtml(dateTime(v.start_epoch))}</td>
       <td>${escapeHtml(trapName(v.node_id))}</td>
-      <td class="${v.known ? "" : "warn"}">${v.known && v.cicg_id ? `<span class="strong">${escapeHtml(v.cicg_id)}</span> · ` : ""}<span class="${v.known ? "italic" : ""}">${escapeHtml(v.label)}</span>${lostChip(v)}</td>
+      <td class="${v.known ? "" : "warn"}"><a href="#/individuo/${encodeURIComponent(v.known && v.cicg_id ? v.cicg_id : v.tag)}">${v.known && v.cicg_id ? `<span class="strong">${escapeHtml(v.cicg_id)}</span> · ` : ""}<span class="${v.known ? "italic" : ""}">${escapeHtml(v.label)}</span></a>${lostChip(v)}</td>
       <td class="mono">${escapeHtml(v.biomark)}</td>
       <td>${v.open ? '<span class="ok strong">En curso</span>' : escapeHtml(duration(v.duration_s))}</td>
       <td>${v.reads}</td>
@@ -1061,7 +1061,7 @@ function visitSummaryHtml(s) {
   const card = (title, body, note, css = "") => `<div class="card ${css}"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
   const hours = columns(s.by_hour, s.by_hour.map((_, h) => String(h)), { every: 3, titles: s.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) });
   let days = "";
-  if (s.by_day.length > 1) {
+  if (Number(ui.period) >= 7 && s.by_day.length > 1) {
     if (s.by_day.length > MAX_DAY_COLUMNS) {
       const months = new Map();
       for (const d of s.by_day) months.set(d.day.slice(0, 7), (months.get(d.day.slice(0, 7)) || 0) + d.visits);
@@ -1087,17 +1087,15 @@ function visitSummaryHtml(s) {
   return `
     <div class="grid">
       ${stat("Visitas", fmt(s.visits, 0))}
-      ${stat("Individuos", fmt(s.subjects, 0), "del CICG, por código")}
-      ${stat("Lecturas", fmt(s.reads, 0))}
-      ${stat("Duración mediana", s.median_duration_s === null ? "—" : duration(s.median_duration_s))}
+      ${stat("Individuos", fmt(s.subjects, 0), "distintos, por código CICG")}
       ${stat("Lecturas desconocidas", fmt(s.unknown_visits, 0), count(s.unknown_tags, "tag fuera de la base", "tags fuera de la base"))}
-      ${stat("Con hora dudosa", pct(s.untrusted_visits / s.visits, 0), count(s.untrusted_visits, "visita", "visitas"))}
     </div>
+    <p class="small muted" style="margin:0">${count(s.reads, "lectura", "lecturas")} en total · cada visita dura ${s.median_duration_s === null ? "—" : duration(s.median_duration_s)} (mediana)${s.untrusted_visits ? ` · ${count(s.untrusted_visits, "visita", "visitas")} con la hora de la trampa sin confirmar` : ""}.</p>
     <div class="charts two">
       ${card("Visitas por hora del día", hours)}
-      ${days}
-      ${card("Individuos con más visitas", top, "Clic en uno para abrir su página.", "full")}
       ${card("Por especie", species)}
+      ${card("Individuos con más visitas", top, "Clic en uno para abrir su página.", "full")}
+      ${days}
       ${nodes}
     </div>`;
 }
@@ -1158,8 +1156,27 @@ function birdInterest(b) {
 
 // Individuos: the CICG's birds filtered down to who to mark. The buttons act on
 // exactly what the filters show, in the traps the "Dónde" selector names.
-const NO_FILTERS = { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" };
+const NO_FILTERS = { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "", gap: "" };
 const NO_SPECIES = "__none__";
+
+// How long since the CICG last caught a bird, with any of its tags: the first
+// question when choosing whom to recapture. Oldest last, in a fixed order.
+const GAPS = [
+  ["lt3", "Menos de 3 meses", 0, 3], ["3to6", "3 a 6 meses", 3, 6], ["6to12", "6 a 12 meses", 6, 12],
+  ["12to24", "1 a 2 años", 12, 24], ["gt24", "Más de 2 años", 24, Infinity],
+];
+const NO_DATE = "nodate";
+
+function monthsSince(day) { return (Date.now() - new Date(`${day}T00:00:00`).getTime()) / (86400000 * 30.44); }
+
+function gapOf(b) {
+  const last = b.capture_days.at(-1);
+  if (!last) return NO_DATE;
+  const months = monthsSince(last);
+  return GAPS.find(([, , from, to]) => months >= from && months < to)?.[0] || "gt24";
+}
+
+function gapLabel(key) { return key === NO_DATE ? "Sin fecha de captura" : (GAPS.find(([k]) => k === key)?.[1] || key); }
 
 function interestLimit() { return data.specimens?.of_interest_limit ?? 78; }
 
@@ -1216,6 +1233,7 @@ function filteredBirds() {
   return birds().filter((b) => (!f.species || (f.species === NO_SPECIES ? !b.species : b.species === f.species))
     && (!f.sex || b.sex === f.sex) && (!f.age || b.age === f.age)
     && (!byCapture || b.captures.some((c) => captureMatches(c, f)))
+    && (!f.gap || gapOf(b) === f.gap)
     && (STATUS_TEST[f.status || ""] || STATUS_TEST[""])(b)
     && matchesBird(b, f.text))
     .sort((a, b) => (b.capture_days.at(-1) || "").localeCompare(a.capture_days.at(-1) || "") || a.name.localeCompare(b.name));
@@ -1362,31 +1380,6 @@ function monthLabel(key) {
   return new Date(year, month - 1, 1).toLocaleDateString("es-CO", { month: "short", year: "2-digit" });
 }
 
-// Counts per month from ISO days, every month in between included; per year
-// when the span is too long to read month by month.
-function byMonth(days) {
-  if (!days.length) return { values: [], labels: [] };
-  const sorted = days.slice().sort();
-  const [y0, m0] = sorted[0].slice(0, 7).split("-").map(Number);
-  const [y1, m1] = sorted.at(-1).slice(0, 7).split("-").map(Number);
-  const months = (y1 - y0) * 12 + (m1 - m0) + 1;
-  const counts = new Map();
-  if (months > 48) {
-    for (const d of sorted) counts.set(d.slice(0, 4), (counts.get(d.slice(0, 4)) || 0) + 1);
-    const labels = [];
-    for (let y = y0; y <= y1; y += 1) labels.push(String(y));
-    return { values: labels.map((l) => counts.get(l) || 0), labels };
-  }
-  for (const d of sorted) counts.set(d.slice(0, 7), (counts.get(d.slice(0, 7)) || 0) + 1);
-  const keys = [];
-  for (let i = 0; i < months; i += 1) {
-    const y = y0 + Math.floor((m0 - 1 + i) / 12);
-    const m = ((m0 - 1 + i) % 12) + 1;
-    keys.push(`${y}-${String(m).padStart(2, "0")}`);
-  }
-  return { values: keys.map((k) => counts.get(k) || 0), labels: keys.map(monthLabel) };
-}
-
 // How long ago a day was, in the unit that reads best.
 function sinceDay(day) {
   if (!day) return "";
@@ -1417,8 +1410,13 @@ function pickFilter(name, value) {
 }
 
 // The ten largest, the rest as one bar that does not filter.
+// Values that say "we don't know" go last, whatever their count.
+function isUnknownValue(v) {
+  return v === NO_SPECIES || v === NO_DATE || /^(unknown|desconocid|sin\b|n\/?a$|nd$)/i.test(String(v || "").trim());
+}
+
 function topBars(entries, label = (v) => v) {
-  const sorted = entries.slice().sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const sorted = entries.slice().sort((a, b) => isUnknownValue(a[0]) - isUnknownValue(b[0]) || b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
   const items = sorted.slice(0, 10).map(([key, n]) => ({ key, label: label(key), value: n }));
   const rest = sorted.slice(10);
   if (rest.length) items.push({ label: `Otras ${rest.length}`, value: rest.reduce((sum, [, n]) => sum + n, 0) });
@@ -1439,17 +1437,9 @@ function subjectSummary(list, addTags) {
   const relevant = (b) => b.captures.filter((c) => !byCapture || captureMatches(c, f));
   const localities = topBars(tally(list.flatMap((b) => [...new Set(relevant(b).map((c) => c.locality).filter(Boolean))])));
   const projects = topBars(tally(list.flatMap((b) => [...new Set(relevant(b).map((c) => c.project).filter(Boolean))])));
-  const months = byMonth(list.map((b) => b.capture_days.at(-1)).filter(Boolean));
-
-  const traps = (data.overview?.traps || []).filter((t) => t.has_latch !== false);
-  const adding = new Set(addTags);
-  const all = data.specimens?.specimens || [];
-  const ids = ui.scope === "all" ? traps.map((t) => t.node_id).concat(null) : [scopeId()];
-  const limit = interestLimit();
-  const occupancy = ids.map((id) => {
-    const n = all.filter((s) => adding.has(s.tag) || (id === null ? s.all_traps : isOfInterest(s, id))).length;
-    return { label: id === null ? "Trampa que se conecte después" : trapName(id), value: n, text: `${n} de ${limit}` };
-  });
+  const gapCounts = tally(list.map(gapOf));
+  const gaps = GAPS.map(([key, text]) => ({ key, label: text, value: gapCounts.find(([k]) => k === key)?.[1] || 0 }))
+    .concat(gapCounts.some(([k]) => k === NO_DATE) ? [{ key: NO_DATE, label: gapLabel(NO_DATE), value: gapCounts.find(([k]) => k === NO_DATE)[1] }] : []);
 
   const card = (title, body, note) => `<div class="card"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
   return `
@@ -1462,12 +1452,26 @@ function subjectSummary(list, addTags) {
     <p class="small muted" style="margin:0">Clic en una barra para filtrar por ella; otro clic quita el filtro.</p>
     <div class="charts">
       ${card("Especie", hbars(species, { pick: "species", selected: f.species }))}
-      ${card("Sexo y edad", hbars(sexes, { pick: "sex", selected: f.sex }) + '<div style="height:12px"></div>' + hbars(ages, { pick: "age", selected: f.age }))}
-      ${card("Localidad", hbars(localities, { pick: "locality", selected: f.locality }), "Dónde fue capturado cada individuo (cuenta una vez por lugar).")}
+      ${card("Tiempo sin recapturar", hbars(gaps, { pick: "gap", selected: f.gap }), "Desde su última captura en la base del CICG, con cualquier tag.")}
       ${card("Proyecto", hbars(projects, { pick: "project", selected: f.project }))}
-      ${card("Última captura", months.values.length ? columns(months.values, months.labels, { every: Math.max(1, Math.ceil(months.labels.length / 5)), titles: months.labels.map((l, i) => `${l}: ${count(months.values[i], "individuo", "individuos")}`) }) : '<p class="small muted" style="margin:0">Sin fechas.</p>', "Cuántos se vieron por última vez en la base del CICG en cada mes: los de la izquierda llevan más tiempo sin recapturarse.")}
-      ${card("Cómo quedarían las trampas", occupancy.length ? hbars(occupancy, { max: limit, warnAbove: limit }) : '<p class="small muted" style="margin:0">Ninguna trampa conectada.</p>', toAdd ? `Si marcas los ${toAdd} en ${escapeHtml(scopeName())}.` : "Con lo que ya está marcado.")}
+      ${card("Localidad", hbars(localities, { pick: "locality", selected: f.locality }), "Dónde fue capturado (cuenta una vez por lugar).")}
+      ${card("Sexo y edad", hbars(sexes, { pick: "sex", selected: f.sex }) + '<div style="height:12px"></div>' + hbars(ages, { pick: "age", selected: f.age }))}
     </div>`;
+}
+
+// How full each trap's list would be after "Marcar": shown by the button.
+function occupancyBars(addTags) {
+  const traps = (data.overview?.traps || []).filter((t) => t.has_latch !== false);
+  const adding = new Set(addTags);
+  const all = data.specimens?.specimens || [];
+  const ids = ui.scope === "all" ? traps.map((t) => t.node_id).concat(null) : [scopeId()];
+  const limit = interestLimit();
+  if (!ids.length) return "";
+  const items = ids.map((id) => {
+    const n = all.filter((s) => adding.has(s.tag) || (id === null ? s.all_traps : isOfInterest(s, id))).length;
+    return { label: id === null ? "Trampa que se conecte después" : trapName(id), value: n, text: `${n} de ${limit}` };
+  });
+  return `<div style="max-width:560px"><div class="small muted" style="margin-bottom:2px">${addTags.length ? "Cómo quedarían las listas si marcas" : "Cómo están las listas"}</div>${hbars(items, { max: limit, warnAbove: limit })}</div>`;
 }
 
 function subjectRows(list) {
@@ -1515,7 +1519,8 @@ function renderFilterResults() {
       <button class="danger-outline" ${removeTags.length ? "" : "disabled"} onclick="markFiltered('remove')">Quitar ${removing} de ${escapeHtml(scopeName())}</button>
       <button class="quiet" onclick="clearFilters()">Limpiar filtros</button>
     </div>
-    ${over ? `<p class="warn small" style="margin:0">Así ${escapeHtml(where)} quedaría con ${fullest.count} de ${interestLimit()}. Afina los filtros o marca en una sola trampa.</p>` : ""}`;
+    ${over ? `<p class="warn small" style="margin:0">Así ${escapeHtml(where)} quedaría con ${fullest.count} de ${interestLimit()}. Afina los filtros o marca en una sola trampa.</p>` : ""}
+    ${occupancyBars(addTags)}`;
   target.innerHTML = `${subjectSummary(list, addTags)}
     <div class="card">
       <div class="section-head"><h2>${count(list.length, "individuo", "individuos")}</h2>
@@ -1580,6 +1585,8 @@ function renderIndividuos() {
             ${option("changed", `Cambiaron de tag (${changed})`)}${option("notag", `Sin tag en uso (${noTag})`)}</select></label>
         </div>
         <div class="row" style="align-items:flex-end">
+          <label style="flex:1 1 170px">Tiempo sin recapturar<select onchange="setFilterValue('gap', this.value)">
+            <option value="">Cualquiera</option>${GAPS.concat([[NO_DATE, gapLabel(NO_DATE)]]).map(([key, text]) => `<option value="${key}" ${f.gap === key ? "selected" : ""}>${text}</option>`).join("")}</select></label>
           ${pick("project", "Proyecto", projects, "Cualquier proyecto")}
           ${pick("locality", "Localidad", localities, "Cualquier localidad")}
           ${day("from", "Capturado desde")}

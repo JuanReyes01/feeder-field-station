@@ -218,5 +218,6 @@ def test_the_page_draws_its_summaries_without_loading_anything() -> None:
 
     html = (Path(app_module.__file__).parent / "static" / "index.html").read_text("utf-8")
     assert "/api/visits/summary" in html
+    assert "Tiempo sin recapturar" in html
     assert "/detail`" in html
     assert "<svg" in html and "://" not in html  # charts drawn inline, nothing fetched
