@@ -1,5 +1,5 @@
 import io
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from openpyxl import Workbook
 
@@ -157,11 +157,52 @@ def test_the_individuals_database_is_read_from_its_capture_sheet() -> None:
         "sex": "Male",  # a later "Unknown" does not erase it
     }
     assert table.captures[TAG] == {
-        date(2025, 9, 5): Capture(date(2025, 9, 5), "Pit tagging intensivo", "CICG"),
-        date(2026, 2, 10): Capture(date(2026, 2, 10), "CICG", "CICG-Zona alta"),
+        date(2025, 9, 5): Capture(
+            date(2025, 9, 5), "Pit tagging intensivo", "CICG", {"age": "Adult", "sex": "Male"}
+        ),
+        # Each capture keeps what was written that day, "Unknown" included.
+        date(2026, 2, 10): Capture(
+            date(2026, 2, 10), "CICG", "CICG-Zona alta", {"age": "Adult", "sex": "Unknown"}
+        ),
     }
     assert table.without_tag == 2
     assert table.replaced == set()
+
+
+def test_each_capture_keeps_its_whole_record() -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["CICG CODE", None, "MEASURES"])
+    sheet.append(
+        [
+            "CICG_ID", "Especie", "Pit tag code", "Date", "Time captured", "Measured by",
+            "weight", "wing length", "Exposed culmen", "Primaries", "Comments molt",
+            "Wing ph", "Tail ph", "Sample (Y/N)", "Comments",
+        ]
+    )  # fmt: skip
+    sheet.append(
+        [
+            "CICG_1", "Colibri coruscans", "900_263007596629", datetime(2025, 9, 5),  # noqa: DTZ001
+            time(9, 9), "MAMA", 7.1, "68,5", "NA", "X", "p10,8", True, False, "N", "ok",
+        ]
+    )  # fmt: skip
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    table = read_specimens("CICG_Individuals_database.xlsx", buffer.getvalue())
+    assert table.errors == []
+    capture = table.captures[TAG][date(2025, 9, 5)]
+    assert capture.details == {
+        "time_captured": "09:09",
+        "measured_by": "MAMA",
+        "weight": 7.1,
+        "wing": 68.5,  # a comma decimal typed as text
+        "molt_primaries": "X",
+        "molt_comments": "p10,8",
+        "photo_wing": True,  # an unticked photo is left out
+        "sample": "N",
+        "comments": "ok",
+    }
 
 
 def test_a_list_without_codes_cannot_tell_a_lost_tag() -> None:

@@ -700,7 +700,13 @@ def test_an_unconfirmed_list_gets_a_new_number_while_the_trap_keeps_reporting(
     for _ in range(3):
         assert trap.pending_command is not None
         trap.pending_command = trap.pending_command.sent(sent)
-    later = sent + timedelta(seconds=5)
+    soon = sent + timedelta(seconds=5)
+    registry.heartbeat(1, TrapState.IDLE, at=soon, targets_version=1)
+    # Three sends and a report, but only 5 s in: too soon for a new number.
+    assert renumber_unconfirmed_lists(store, registry, StationClock(), soon) == []
+    later = sent + timedelta(seconds=61)
+    assert trap.pending_command is not None
+    trap.pending_command = trap.pending_command.sent(later - timedelta(seconds=1))
     # Nothing heard since the last send: maybe out of range, so no new number.
     assert renumber_unconfirmed_lists(store, registry, StationClock(), later) == []
     # The trap reports, still on its old version: version 2 got dropped.

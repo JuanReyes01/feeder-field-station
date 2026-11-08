@@ -111,6 +111,49 @@
   .check { flex-direction: row; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; }
   code { font-family: var(--mono); font-size: 13px; background: var(--soft); padding: 2px 6px; border-radius: 4px; }
   .hidden-file { position: absolute; left: -9999px; }
+  /* Charts, drawn by hand: the station works offline, with no library to load. */
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; align-items: start; }
+  .charts.two { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+  .charts > * { min-width: 0; }
+  .charts .full { grid-column: 1 / -1; }
+  /* One grid for all the rows, so every track starts and ends at the same place. */
+  .bars { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(36px, 1fr) auto; row-gap: 2px; }
+  .bar-row {
+    grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; gap: 10px;
+    align-items: center; min-height: 34px; padding: 4px 6px; border-radius: 4px; color: inherit;
+    text-decoration: none; text-align: left; width: 100%;
+  }
+  button.bar-row { border: 0; background: transparent; font-size: 14px; min-height: 36px; justify-content: stretch; }
+  button.bar-row:hover, a.bar-row:hover { background: var(--soft); filter: none; }
+  button.bar-row.on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+  .bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { height: 12px; background: var(--soft); border-radius: 3px; overflow: hidden; }
+  .bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .bar-fill.over { background: var(--warn); }
+  .bar-value { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .columns { display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid var(--line); }
+  .column-slot { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; }
+  .column { display: block; width: 100%; background: var(--accent); border-radius: 2px 2px 0 0; }
+  .column-axis { display: flex; gap: 2px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+  .column-axis span { flex: 1 1 0; min-width: 0; white-space: nowrap; }
+  .chart-note { font-size: 12px; color: var(--muted); }
+  .spark { color: var(--accent); display: block; }
+  .spark .dot { fill: var(--accent); }
+  .spark .dot-warn { fill: var(--warn); }
+  .stat .label { font-size: 13px; color: var(--muted); }
+  .stat .value.small-value { font-size: 18px; }
+  .stat .note { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.flagged td { background: var(--warn-soft); }
+  .capture-head {
+    width: 100%; justify-content: space-between; gap: 12px; text-align: left; border-color: var(--line);
+    flex-wrap: wrap; min-height: 52px;
+  }
+  .capture-head.open { border-color: var(--accent); background: var(--accent-soft); }
+  .capture-body { padding: 4px 4px 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 4px 24px; }
+  .capture-body h3 { margin: 10px 0 2px; font-size: 14px; font-weight: 600; grid-column: 1 / -1; }
+  .section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+  .section-head h2 { margin: 0; }
 </style>
 <div class="layout">
   <nav aria-label="Secciones">
@@ -145,7 +188,7 @@ const FILTERS = [
   ["all", "Todo"], ["captures", "Capturas"], ["commands", "Comandos"], ["faults", "Fallos"],
   ["connections", "Conexiones"], ["reads", "Lecturas"],
 ];
-const PERIODS = [["1", "Hoy"], ["7", "Últimos 7 días"], ["36500", "Todo"]];
+const PERIODS = [["1", "Hoy"], ["7", "Últimos 7 días"], ["30", "Últimos 30 días"], ["36500", "Todo"]];
 const TRAP_TABS = {
   prep: "Preparar", control: "Control", config: "Configuración", list: "Lista de interés",
   visits: "Visitas", log: "Bitácora",
@@ -155,12 +198,19 @@ const data = { overview: null, health: null, specimens: null, gateway: null, upd
 const ui = {
   filter: "all", period: "1", visitTrap: "", trapSearch: "", message: "", updateHidden: false,
   filters: { species: "", project: "", locality: "", sex: "", age: "", from: "", to: "", text: "", status: "" }, scope: "all", entries: "",
+  // Details only when asked for: lists, tables and each capture stay closed.
+  showList: false, showUnknown: false, showAdd: false, showVisits: false, showBirdVisits: false,
+  editBird: false, openCaptures: new Set(), visitTotal: null, threshold: 10,
 };
+try { ui.threshold = Number(localStorage.getItem("measureThreshold")) || 10; } catch (_) { /* default */ }
+
+function toggleUi(name) { ui[name] = !ui[name]; render(true); }
 
 // The real list has more than a thousand individuals: a screen shows what
 // matters and search reaches the rest.
 const MAX_LISTED = 100;
 const MAX_SEARCH_RESULTS = 20;
+const VISITS_LISTED = 300; // /api/visits' own default limit
 
 function matchesSearch(s, text) {
   const q = text.trim().toLowerCase();
@@ -676,7 +726,7 @@ function loadVisits({ nodeId, tag, days }) {
       <td>${v.open ? '<span class="ok strong">En curso</span>' : escapeHtml(duration(v.duration_s))}</td>
       <td>${v.reads}</td>
       <td class="${v.clock_trusted ? "" : "warn"}">${v.clock_trusted ? "Confiable" : "Dudosa"}</td>
-    </tr>`).join("")}</tbody></table>` : '<p class="muted">Sin visitas en este periodo.</p>'));
+    </tr>`).join("")}</tbody></table>${visits.length >= VISITS_LISTED ? `<p class="small muted">Se muestran las ${VISITS_LISTED} más recientes. Exporta las visitas para verlas todas.</p>` : ""}` : '<p class="muted">Sin visitas en este periodo.</p>'));
 }
 
 function subjectInterest(s) {
@@ -834,6 +884,185 @@ function tally(values) {
   return [...counts];
 }
 
+// --- Charts and figures ------------------------------------------------------
+
+function fmt(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return Number(value).toLocaleString("es-CO", { maximumFractionDigits: digits });
+}
+
+function pct(fraction, digits = 1) {
+  return fraction === null || fraction === undefined ? "—" : `${fmt(fraction * 100, digits)} %`;
+}
+
+function stat(label, value, note, small) {
+  return `<div class="stat"><div class="label">${escapeHtml(label)}</div><div class="value ${small ? "small-value" : ""}">${escapeHtml(value)}</div>${note ? `<div class="note">${escapeHtml(note)}</div>` : ""}</div>`;
+}
+
+// Horizontal bars. With `pick` (a filter's name) each bar is a button: a click
+// filters by it, a second click on the chosen one takes the filter off.
+function hbars(items, { pick, selected, max, warnAbove } = {}) {
+  if (!items.length) return '<p class="small muted" style="margin:0">Sin datos.</p>';
+  const top = max ?? Math.max(...items.map((i) => i.value), 1);
+  return `<div class="bars">${items.map((i) => {
+    const width = Math.max(0, Math.min(100, (i.value / top) * 100));
+    const over = warnAbove !== undefined && i.value > warnAbove;
+    const inner = `<span class="bar-label" title="${escapeHtml(i.label)}">${escapeHtml(i.label)}</span>
+      <span class="bar-track"><span class="bar-fill ${over ? "over" : ""}" style="width:${width.toFixed(1)}%"></span></span>
+      <span class="bar-value">${escapeHtml(i.text ?? fmt(i.value, 0))}</span>`;
+    if (i.href) return `<a class="bar-row" href="${escapeHtml(i.href)}">${inner}</a>`;
+    if (!pick || i.key === undefined) return `<div class="bar-row">${inner}</div>`;
+    const on = selected === i.key;
+    return `<button class="bar-row ${on ? "on" : ""}" aria-pressed="${on}" onclick="pickFilter('${pick}', ${escapeHtml(JSON.stringify(i.key))})">${inner}</button>`;
+  }).join("")}</div>`;
+}
+
+// Columns for a series in time: hours of the day, days, months.
+function columns(values, labels, { every = 1, height = 110, titles } = {}) {
+  const top = Math.max(...values, 1);
+  return `<div class="columns" style="height:${height}px" role="img" aria-label="${escapeHtml(labels[0] || "")} a ${escapeHtml(labels.at(-1) || "")}">${values.map((v, i) => `<span class="column-slot" title="${escapeHtml(titles ? titles[i] : `${labels[i]}: ${v}`)}"><span class="column" style="height:${((v / top) * 100).toFixed(1)}%"></span></span>`).join("")}</div>
+    <div class="column-axis">${labels.map((l, i) => `<span>${i % every === 0 ? escapeHtml(l) : ""}</span>`).join("")}</div>
+    <div class="chart-note">Máximo: ${fmt(Math.max(...values, 0), 0)}</div>`;
+}
+
+function monthLabel(key) {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString("es-CO", { month: "short", year: "2-digit" });
+}
+
+// Counts per month from ISO days, every month in between included; per year
+// when the span is too long to read month by month.
+function byMonth(days) {
+  if (!days.length) return { values: [], labels: [] };
+  const sorted = days.slice().sort();
+  const [y0, m0] = sorted[0].slice(0, 7).split("-").map(Number);
+  const [y1, m1] = sorted.at(-1).slice(0, 7).split("-").map(Number);
+  const months = (y1 - y0) * 12 + (m1 - m0) + 1;
+  const counts = new Map();
+  if (months > 48) {
+    for (const d of sorted) counts.set(d.slice(0, 4), (counts.get(d.slice(0, 4)) || 0) + 1);
+    const labels = [];
+    for (let y = y0; y <= y1; y += 1) labels.push(String(y));
+    return { values: labels.map((l) => counts.get(l) || 0), labels };
+  }
+  for (const d of sorted) counts.set(d.slice(0, 7), (counts.get(d.slice(0, 7)) || 0) + 1);
+  const keys = [];
+  for (let i = 0; i < months; i += 1) {
+    const y = y0 + Math.floor((m0 - 1 + i) / 12);
+    const m = ((m0 - 1 + i) % 12) + 1;
+    keys.push(`${y}-${String(m).padStart(2, "0")}`);
+  }
+  return { values: keys.map((k) => counts.get(k) || 0), labels: keys.map(monthLabel) };
+}
+
+// How long ago a day was, in the unit that reads best.
+function sinceDay(day) {
+  if (!day) return "";
+  const days = Math.round((Date.now() - new Date(`${day}T00:00:00`).getTime()) / 86400000);
+  if (days < 1) return "hoy";
+  if (days < 60) return `hace ${count(days, "día", "días")}`;
+  if (days < 730) return `hace ${count(Math.round(days / 30.4), "mes", "meses")}`;
+  return `hace ${fmt(days / 365.25, 1)} años`;
+}
+
+const CAPTURE_RESULTS = { capturado: ["Capturado", "ok"], sin_colibri: ["Sin colibrí", "warn"] };
+
+// A date and a time, with the date even when it is today.
+function whenLong(epoch) {
+  if (epoch === null || epoch === undefined) return "—";
+  const when = new Date(epoch * 1000);
+  const time = when.toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (when.toDateString() === new Date().toDateString()) return `Hoy, ${time}`;
+  return `${when.toLocaleDateString("es-CO", { day: "numeric", month: "short", year: "numeric" })}, ${time}`;
+}
+
+function epochIso(epoch) { return epoch === null || epoch === undefined ? null : new Date(epoch * 1000).toISOString(); }
+
+
+function pickFilter(name, value) {
+  ui.filters = { ...ui.filters, [name]: ui.filters[name] === value ? "" : value };
+  render(true);
+}
+
+// The ten largest, the rest as one bar that does not filter.
+function topBars(entries, label = (v) => v) {
+  const sorted = entries.slice().sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const items = sorted.slice(0, 10).map(([key, n]) => ({ key, label: label(key), value: n }));
+  const rest = sorted.slice(10);
+  if (rest.length) items.push({ label: `Otras ${rest.length}`, value: rest.reduce((sum, [, n]) => sum + n, 0) });
+  return items;
+}
+
+// What the filtered individuals look like, before anyone opens the list.
+function subjectSummary(subjects, toAdd) {
+  const f = ui.filters;
+  const byCapture = f.project || f.locality || f.from || f.to;
+  const inScope = subjects.filter(wantedInScope).length;
+  const seen = subjects.filter((s) => s.times_seen > 0).length;
+  const species = topBars(tally(subjects.map((s) => s.species || NO_SPECIES)), (v) => (v === NO_SPECIES ? "Sin especie" : v));
+  const sexes = topBars(tally(subjects.map((s) => s.sex).filter(Boolean)));
+  const ages = topBars(tally(subjects.map((s) => s.age).filter(Boolean)));
+  // An individual counts once per place or project it was caught in.
+  const relevant = (s) => s.captures.filter((c) => !byCapture || captureMatches(c, f));
+  const localities = topBars(tally(subjects.flatMap((s) => [...new Set(relevant(s).map((c) => c.locality).filter(Boolean))])));
+  const projects = topBars(tally(subjects.flatMap((s) => [...new Set(relevant(s).map((c) => c.project).filter(Boolean))])));
+  const lastDays = subjects.map((s) => s.capture_days.at(-1)).filter(Boolean);
+  const months = byMonth(lastDays);
+
+  const traps = (data.overview?.traps || []).filter((t) => t.has_latch !== false);
+  const adding = new Set(toAdd.map((s) => s.tag));
+  const all = data.specimens?.specimens || [];
+  const ids = ui.scope === "all" ? traps.map((t) => t.node_id).concat(null) : [scopeId()];
+  const limit = interestLimit();
+  const occupancy = ids.map((id) => {
+    const n = all.filter((s) => adding.has(s.tag) || (id === null ? s.all_traps : isOfInterest(s, id))).length;
+    return { label: id === null ? "Trampa que se conecte después" : trapName(id), value: n, text: `${n} de ${limit}` };
+  });
+
+  const card = (title, body, note) => `<div class="card"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
+  return `
+    <div class="grid">
+      ${stat("Coinciden", fmt(subjects.length, 0))}
+      ${stat(`De interés en ${scopeName()}`, fmt(inScope, 0))}
+      ${stat("Se agregarían", fmt(toAdd.length, 0))}
+      ${stat("Leídos por las trampas", fmt(seen, 0), subjects.length ? `${pct(seen / subjects.length, 0)} de los que coinciden` : "")}
+    </div>
+    <p class="small muted" style="margin:0">Clic en una barra para filtrar por ella; otro clic quita el filtro.</p>
+    <div class="charts">
+      ${card("Especie", hbars(species, { pick: "species", selected: f.species }))}
+      ${card("Sexo y edad", hbars(sexes, { pick: "sex", selected: f.sex }) + '<div style="height:12px"></div>' + hbars(ages, { pick: "age", selected: f.age }))}
+      ${card("Localidad", hbars(localities, { pick: "locality", selected: f.locality }), "Dónde fue capturado cada individuo (cuenta una vez por lugar).")}
+      ${card("Proyecto", hbars(projects, { pick: "project", selected: f.project }))}
+      ${card("Última captura", months.values.length ? columns(months.values, months.labels, { every: Math.max(1, Math.ceil(months.labels.length / 8)), titles: months.labels.map((l, i) => `${l}: ${count(months.values[i], "individuo", "individuos")}`) }) : '<p class="small muted" style="margin:0">Sin fechas.</p>', "Cuántos se vieron por última vez en la base del CICG en cada mes: los de la izquierda llevan más tiempo sin recapturarse.")}
+      ${card("Cómo quedarían las trampas", occupancy.length ? hbars(occupancy, { max: limit, warnAbove: limit }) : '<p class="small muted" style="margin:0">Ninguna trampa conectada.</p>', toAdd.length ? `Si marcas los ${toAdd.length} en ${escapeHtml(scopeName())}.` : "Con lo que ya está marcado.")}
+    </div>`;
+}
+
+function subjectRows(subjects) {
+  const rows = subjects.slice(0, MAX_LISTED);
+  const more = subjects.length > rows.length
+    ? `<p class="small muted">Mostrando ${rows.length} de ${subjects.length}. Afina los filtros para ver el resto; los botones actúan sobre los ${subjects.length}.</p>`
+    : "";
+  if (!rows.length) return '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la lista del CICG.</p>';
+  return more + rows.map((s) => {
+    const [interest, css] = subjectInterest(s);
+    const days = s.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (s.capture_days.length > 3 ? ` y ${s.capture_days.length - 3} más` : "");
+    const last = s.captures.at(-1);
+    const where = [last?.locality, last?.project].filter(Boolean).join(", ");
+    const buttons = [];
+    if (!wantedInScope(s)) buttons.push(`<button class="quiet" onclick="markOne('${s.tag}')">Marcar</button>`);
+    if (removableInScope(s)) buttons.push(`<button class="quiet" onclick="unmarkOne('${s.tag}')">Quitar</button>`);
+    return `<div class="row" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
+      <a href="#/individuo/${s.tag}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
+        ${s.cicg_id ? `<span class="strong">${escapeHtml(s.cicg_id)}</span> · ` : ""}<span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
+        <span class="mono small muted"> · ${escapeHtml(s.biomark)}${s.band_number ? ` · anillo ${escapeHtml(s.band_number)}` : ""}</span><br>
+        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"}${where ? ` (última: ${escapeHtml(where)})` : ""} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
+        ${s.replaced ? '<span class="chip warn">Tag reemplazado: el colibrí ya no lo lleva</span> ' : ""}<span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
+      </a>
+      <div class="row" style="flex:0 0 auto">${buttons.join("")}</div></div>`;
+  }).join("");
+}
+
 function renderFilterResults() {
   const actions = $("filter-actions");
   const target = $("subject-results");
@@ -852,27 +1081,12 @@ function renderFilterResults() {
       <button class="quiet" onclick="clearFilters()">Limpiar filtros</button>
     </div>
     ${over ? `<p class="warn small" style="margin:0">Así ${escapeHtml(where)} quedaría con ${fullest.count} de ${interestLimit()}. Afina los filtros o marca en una sola trampa.</p>` : ""}`;
-  const rows = subjects.slice(0, MAX_LISTED);
-  const more = subjects.length > rows.length
-    ? `<p class="small muted">Mostrando ${rows.length} de ${subjects.length}. Afina los filtros para ver el resto; los botones actúan sobre los ${subjects.length}.</p>`
-    : "";
-  target.innerHTML = rows.length ? more + rows.map((s) => {
-    const [interest, css] = subjectInterest(s);
-    const days = s.capture_days.slice(-3).reverse().map(dayLabel).join(", ") + (s.capture_days.length > 3 ? ` y ${s.capture_days.length - 3} más` : "");
-    const last = s.captures.at(-1);
-    const where = [last?.locality, last?.project].filter(Boolean).join(", ");
-    const buttons = [];
-    if (!wantedInScope(s)) buttons.push(`<button class="quiet" onclick="markOne('${s.tag}')">Marcar</button>`);
-    if (removableInScope(s)) buttons.push(`<button class="quiet" onclick="unmarkOne('${s.tag}')">Quitar</button>`);
-    return `<div class="row" style="border-top:1px solid var(--soft);padding:6px 0;flex-wrap:nowrap">
-      <a href="#/individuo/${s.tag}" style="flex:1 1 auto;min-width:0;color:inherit;text-decoration:none;padding:4px">
-        ${s.cicg_id ? `<span class="strong">${escapeHtml(s.cicg_id)}</span> · ` : ""}<span class="strong italic">${escapeHtml(s.species || "Sin especie")}</span>
-        <span class="mono small muted"> · ${escapeHtml(s.biomark)}${s.band_number ? ` · anillo ${escapeHtml(s.band_number)}` : ""}</span><br>
-        <span class="small muted">${days ? `Capturado ${escapeHtml(days)}` : "Sin fecha en la lista"}${where ? ` (última: ${escapeHtml(where)})` : ""} · ${count(s.times_seen, "lectura", "lecturas")}</span><br>
-        ${s.replaced ? '<span class="chip warn">Tag reemplazado: el colibrí ya no lo lleva</span> ' : ""}<span class="small strong ${css}">${escapeHtml(interest)}</span> ${syncChips(s)}
-      </a>
-      <div class="row" style="flex:0 0 auto">${buttons.join("")}</div></div>`;
-  }).join("") : '<p class="muted">Ningún individuo coincide. Cambia los filtros o importa la lista del CICG.</p>';
+  target.innerHTML = `${subjectSummary(subjects, toAdd)}
+    <div class="card">
+      <div class="section-head"><h2>${count(subjects.length, "individuo", "individuos")}</h2>
+        <button onclick="toggleUi('showList')" ${subjects.length ? "" : "disabled"}>${ui.showList ? "Ocultar la lista" : `Ver ${subjects.length === 1 ? "el individuo" : `los ${subjects.length} individuos`}`}</button></div>
+      ${ui.showList ? `<div style="margin-top:8px">${subjectRows(subjects)}</div>` : ""}
+    </div>`;
 }
 
 function renderIndividuos() {
@@ -940,47 +1154,241 @@ function renderIndividuos() {
         <div id="filter-actions" class="stack" style="gap:8px"></div>
       </div>
     </div>
-    <div class="card" id="subject-results"></div>
-    <div class="card"><h2>Lecturas desconocidas</h2>
-      <p class="small muted" style="margin:0 0 8px">Tags que leyó una trampa y que no están en la lista del CICG. Casi siempre es una lectura errónea; si es un individuo real, márcalo o regístralo aquí.</p>
-      ${unknown.length ? unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
+    <div id="subject-results" class="stack"></div>
+    <div class="card"><div class="section-head"><h2>Lecturas desconocidas (${unknown.length})</h2>
+      <button class="quiet" onclick="toggleUi('showUnknown')" ${unknown.length ? "" : "disabled"}>${ui.showUnknown ? "Ocultar" : "Ver"}</button></div>
+      <p class="small muted" style="margin:4px 0 0">Tags que leyó una trampa y que no están en la lista del CICG. Casi siempre es una lectura errónea; si es un individuo real, márcalo o regístralo aquí.</p>
+      ${!ui.showUnknown ? "" : unknown.map((s) => `<div class="row between" style="border-top:1px solid var(--soft);padding:6px 0">
         <span class="mono small" style="flex:1 1 180px">${escapeHtml(s.biomark)}</span>
         <span class="muted">${count(s.times_seen, "lectura", "lecturas")}</span>
         <div class="row"><button class="quiet" onclick="markOne('${s.tag}')">Marcar en ${escapeHtml(scopeName())}</button>
-        <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar sin marcar</button></div></div>`).join("") : '<p class="muted">Ninguna.</p>'}
+        <button class="quiet" onclick="registerUnknown('${s.tag}')">Registrar sin marcar</button></div></div>`).join("")}
     </div>
-    <details class="card"><summary class="strong" style="cursor:pointer;min-height:28px">Agregar un individuo que no está en la lista</summary>
-      <form onsubmit="addSubject(event)" class="row" style="align-items:flex-end;margin-top:12px">
+    <div class="card"><div class="section-head"><h2>Agregar un individuo que no está en la lista</h2>
+      <button class="quiet" onclick="toggleUi('showAdd')">${ui.showAdd ? "Cerrar" : "Abrir"}</button></div>
+      ${!ui.showAdd ? "" : `<form onsubmit="addSubject(event)" class="row" style="align-items:flex-end;margin-top:12px">
         <label style="flex:2 1 200px">Biomark (PIT)<input name="pit" required placeholder="900_263007596629"></label>
         <label style="flex:2 1 200px">Especie<input name="species" placeholder="Colibri coruscans"></label>
         <label style="flex:1 1 120px">Anillo<input name="band_number" placeholder="C00103"></label>
         <label class="row" style="flex:1 1 200px;flex-direction:row;font-size:15px;color:var(--ink)"><input type="checkbox" name="of_interest"> De interés en todas las trampas</label>
         <button class="primary">Agregar</button>
-      </form></details>`;
+      </form>`}</div>`;
   renderFilterResults();
+}
+
+// One bird's page. The record comes from /api/specimens/{tag}/detail and is
+// kept here, so a refresh repaints at once and only fetches again now and then.
+const birdPages = new Map();
+const BIRD_REFETCH_MS = 10000;
+
+async function fetchBird(tag) {
+  const known = birdPages.get(tag);
+  if (known?.loading || (known && Date.now() - known.at < BIRD_REFETCH_MS)) return;
+  birdPages.set(tag, { ...(known || {}), loading: true, at: known?.at || 0 });
+  let page = known?.page || null;
+  let failed = false;
+  try { page = await api(`/api/specimens/${tag}/detail`); } catch (_) { failed = true; }
+  const changed = JSON.stringify(page) !== JSON.stringify(known?.page);
+  birdPages.set(tag, { page, at: Date.now(), loading: false, failed: failed && !page });
+  const r = route();
+  if ((changed || (failed && !page)) && r.screen === "individuo" && r.id === tag && !isEditing()) renderIndividuo(tag);
+}
+
+function setThreshold(value) {
+  const n = Number(value);
+  if (!(n > 0)) return;
+  ui.threshold = n;
+  try { localStorage.setItem("measureThreshold", String(n)); } catch (_) { /* not remembered */ }
+  render(true);
+}
+
+function toggleCapture(key) {
+  if (ui.openCaptures.has(key)) ui.openCaptures.delete(key); else ui.openCaptures.add(key);
+  render(true);
+}
+
+function openAllCaptures(open) {
+  const page = birdPages.get(route().id)?.page;
+  ui.openCaptures = new Set(open && page ? page.captures.map((c) => `${c.day}|${c.tag}`) : []);
+  render(true);
+}
+
+function isOutlier(deviation) {
+  return deviation !== null && deviation !== undefined && Math.abs(deviation) * 100 > ui.threshold;
+}
+
+function sparkline(values) {
+  if (values.length < 2) return "";
+  const w = 132, h = 30, pad = 4;
+  const nums = values.map((v) => v.value);
+  const lo = Math.min(...nums), span = (Math.max(...nums) - lo) || 1;
+  const x = (i) => pad + (i * (w - 2 * pad)) / (values.length - 1);
+  const y = (v) => h - pad - ((v - lo) / span) * (h - 2 * pad);
+  const points = values.map((v, i) => `${x(i).toFixed(1)},${y(v.value).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="Valores en cada captura"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="1.5"></polyline>${values.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v.value).toFixed(1)}" r="${isOutlier(v.deviation) ? 3.5 : 2.2}" class="${isOutlier(v.deviation) ? "dot-warn" : "dot"}"><title>${escapeHtml(dayLabel(v.day))}: ${escapeHtml(fmt(v.value))}</title></circle>`).join("")}</svg>`;
+}
+
+function withUnit(value, unit) { return value === null || value === undefined ? "—" : `${fmt(value)}${unit ? ` ${unit}` : ""}`; }
+
+function signed(value, unit) {
+  if (value === null || value === undefined) return "—";
+  const text = withUnit(Math.abs(value), unit);
+  return value > 0 ? `+${text}` : value < 0 ? `−${text}` : text;
+}
+
+function measuresCard(page) {
+  const measured = page.measures;
+  const hasRecords = page.captures.some((c) => Object.keys(c.details || {}).length);
+  const head = `<div class="section-head"><h2>Variación de medidas entre capturas</h2>
+    <label style="flex-direction:row;align-items:center;gap:8px;color:var(--ink)">Resaltar a más de
+      <input type="number" min="1" max="100" step="1" value="${escapeHtml(ui.threshold)}" style="width:84px" onchange="setThreshold(this.value)"> % de su mediana</label></div>`;
+  if (!measured.length) {
+    return `<div class="card">${head}<p class="muted" style="margin:8px 0 0">${hasRecords || !page.captures.length
+      ? "Sin medidas en la base del CICG para este individuo."
+      : "Las capturas no traen medidas todavía: vuelve a importar la base del CICG (Individuos, Importar lista del CICG) para traerlas."}</p></div>`;
+  }
+  const rows = measured.map((m) => {
+    const flagged = m.values.filter((v) => isOutlier(v.deviation)).length;
+    return `<tr class="${flagged ? "flagged" : ""}">
+      <td><span class="strong">${escapeHtml(m.label)}</span>${flagged ? `<br><span class="small warn">${count(flagged, "valor alejado", "valores alejados")}</span>` : ""}</td>
+      <td class="num">${m.count}</td>
+      <td class="num">${withUnit(m.first, m.unit)}</td>
+      <td class="num">${withUnit(m.last, m.unit)}</td>
+      <td class="num">${m.count > 1 ? signed(m.change, m.unit) : "—"}</td>
+      <td class="num">${m.count > 1 ? `${fmt(m.min)} a ${fmt(m.max)}` : "—"}</td>
+      <td class="num">${withUnit(m.median, m.unit)}</td>
+      <td class="num">${m.stdev === null ? "—" : `± ${fmt(m.stdev)}`}</td>
+      <td class="num">${m.cv === null ? "—" : pct(m.cv)}</td>
+      <td>${sparkline(m.values)}</td></tr>`;
+  }).join("");
+  return `<div class="card">${head}
+    <div class="scroll" style="margin-top:8px"><table style="min-width:860px"><thead><tr>
+      <th>Medida</th><th class="num">Veces</th><th class="num">Primera</th><th class="num">Última</th><th class="num">Cambio</th>
+      <th class="num">Rango</th><th class="num">Mediana</th><th class="num">Desv. est.</th><th class="num">CV</th><th>En cada captura</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <p class="small muted" style="margin:8px 0 0">CV: desviación estándar sobre la media. Un valor resaltado se aleja de la mediana del individuo más que el umbral: puede ser real (el peso cambia con la época, el ala con la muda) o un error de medición o de digitación.</p></div>`;
+}
+
+function captureRecord(page, capture, deviations) {
+  const fields = page.fields;
+  const details = capture.details || {};
+  const groups = page.groups.map((g) => {
+    const inGroup = fields.filter((f) => f.group === g.key && details[f.key] !== undefined);
+    if (!inGroup.length) return "";
+    if (g.key === "fotos") {
+      return `<h3>${escapeHtml(g.label)}</h3><div class="small" style="grid-column:1 / -1">${escapeHtml(inGroup.map((f) => f.label).join(", "))}</div>`;
+    }
+    return `<h3>${escapeHtml(g.label)}</h3>` + inGroup.map((f) => {
+      const value = details[f.key];
+      const deviation = deviations[f.key]?.[capture.day];
+      const shown = f.kind === "number" ? withUnit(value, f.unit) : String(value);
+      const dev = deviation === undefined || deviation === null ? "" : ` <span class="small ${isOutlier(deviation) ? "warn strong" : "muted"}">(${deviation >= 0 ? "+" : "−"}${fmt(Math.abs(deviation) * 100, 1)} %)</span>`;
+      return `<div class="line"><span class="muted">${escapeHtml(f.label)}</span><span>${escapeHtml(shown)}${dev}</span></div>`;
+    }).join("");
+  }).join("");
+  return groups || '<p class="small muted" style="margin:4px 0">Sin más datos de esta captura en la base importada.</p>';
+}
+
+function capturesCard(page) {
+  if (!page.captures.length) return '<div class="card"><h2>Capturas</h2><p class="muted" style="margin:0">Sin capturas en la lista importada.</p></div>';
+  const deviations = {};
+  for (const m of page.measures) {
+    deviations[m.key] = {};
+    for (const v of m.values) deviations[m.key][v.day] = v.deviation;
+  }
+  const severalTags = page.tags.length > 1;
+  const items = page.captures.map((c, index) => ({ c, index })).reverse().map(({ c, index }) => {
+    const key = `${c.day}|${c.tag}`;
+    const open = ui.openCaptures.has(key);
+    const d = c.details || {};
+    const quick = [["weight", "g"], ["wing", "mm"]].filter(([k]) => d[k] !== undefined).map(([k, unit]) => `${k === "weight" ? "peso" : "ala"} ${withUnit(d[k], unit)}`);
+    const flagged = Object.keys(deviations).filter((k) => isOutlier(deviations[k][c.day])).length;
+    const title = index === 0 ? "Marcaje" : `Recaptura ${index}`;
+    const where = [c.locality, c.project].filter(Boolean).join(" · ");
+    return `<div style="margin-bottom:8px">
+      <button class="capture-head ${open ? "open" : ""}" aria-expanded="${open}" onclick="toggleCapture('${escapeHtml(key)}')">
+        <span><span class="strong">${title}</span> · ${escapeHtml(dayLabel(c.day))}${d.time_captured ? ` · ${escapeHtml(d.time_captured)}` : ""}<br>
+          <span class="small muted">${escapeHtml(where || "Sin lugar")}${severalTags ? ` · tag ${escapeHtml(c.biomark)}` : ""}</span></span>
+        <span class="small">${escapeHtml(quick.join(" · "))}${flagged ? ` <span class="chip warn">${count(flagged, "medida alejada", "medidas alejadas")}</span>` : ""}</span>
+      </button>
+      ${open ? `<div class="capture-body">${captureRecord(page, c, deviations)}</div>` : ""}</div>`;
+  }).join("");
+  return `<div class="card">
+    <div class="section-head"><h2>${count(page.captures.length, "captura", "capturas")} en la base del CICG</h2>
+      <div class="row"><button class="quiet" onclick="openAllCaptures(true)">Abrir todas</button><button class="quiet" onclick="openAllCaptures(false)">Cerrar todas</button></div></div>
+    <p class="small muted" style="margin:4px 0 12px">Abre una captura para ver todas sus medidas, la muda, quién lo manipuló y la muestra.</p>
+    ${items}</div>`;
+}
+
+function trapVisitsCard(page, s) {
+  const v = page.visits;
+  if (!v.count) return '<div class="card"><h2>En las trampas</h2><p class="muted" style="margin:0">Ninguna trampa lo ha leído todavía.</p></div>';
+  const released = page.trap_captures.length
+    ? `<h2 style="margin-top:16px">Disparos de trampa</h2>${page.trap_captures.slice(0, 20).map((c) => {
+      const [text, css] = CAPTURE_RESULTS[c.result] || ["Por confirmar", "warn"];
+      return `<div class="line"><span>${escapeHtml(whenLong(c.epoch))} · ${escapeHtml(trapName(c.node_id))}</span><span class="${css}">${text}</span></div>`;
+    }).join("")}`
+    : "";
+  return `<div class="card">
+    <div class="section-head"><h2>En las trampas</h2>
+      <button onclick="toggleUi('showBirdVisits')">${ui.showBirdVisits ? "Ocultar las visitas" : `Ver las ${v.count} visitas`}</button></div>
+    <div class="charts two" style="margin-top:12px">
+      <div><div class="small muted" style="margin-bottom:6px">Visitas por hora del día</div>
+        ${columns(v.by_hour, v.by_hour.map((_, h) => String(h)), { every: 3, height: 90, titles: v.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) })}</div>
+      <div><div class="small muted" style="margin-bottom:6px">Por trampa</div>
+        ${hbars(v.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits })))}</div>
+    </div>
+    ${ui.showBirdVisits ? '<div class="scroll" id="visit-rows" style="margin-top:12px"><p class="muted">Cargando…</p></div>' : ""}
+    ${released}</div>`;
+}
+
+function keyDates(page) {
+  const marked = page.marked;
+  const last = page.last_capture;
+  const v = page.visits;
+  const markedNote = marked ? [sinceDay(marked.day), [marked.locality, marked.project].filter(Boolean).join(" · "), marked.details?.tagged_by ? `por ${marked.details.tagged_by}` : ""].filter(Boolean).join(" · ") : "Sin fecha en la base";
+  return `<div class="grid">
+    ${stat("Marcado", marked ? dayLabel(marked.day) : "—", markedNote, true)}
+    ${stat("Última captura", last ? dayLabel(last.day) : "—", last ? [sinceDay(last.day), last.locality].filter(Boolean).join(" · ") : "", true)}
+    ${stat("Recapturas", fmt(page.recaptures, 0), page.captures.length ? count(page.captures.length, "captura en total", "capturas en total") : "", true)}
+    ${stat("Primera lectura en una trampa", v.first_epoch ? whenLong(v.first_epoch) : "Nunca", v.first_node_id !== null ? trapName(v.first_node_id) : "", true)}
+    ${stat("Última vez visto", v.last_epoch ? whenLong(v.last_epoch) : "Nunca", v.last_epoch ? `${ago(epochIso(v.last_epoch))} · ${trapName(v.last_node_id)}` : "", true)}
+    ${stat("Visitas", fmt(v.count, 0), count(v.reads, "lectura", "lecturas"), true)}
+  </div>`;
 }
 
 function renderIndividuo(tag) {
   const s = subjectByTag(tag);
+  const cached = birdPages.get(tag);
+  fetchBird(tag);
   if (!s) {
     $("screen").innerHTML = '<div class="card muted">Ese individuo no existe.</div>';
     return;
   }
+  const page = cached?.page;
   const traps = data.overview?.traps || [];
   const field = (name, label, value) => `<label style="flex:1 1 180px">${label}<input name="${name}" value="${escapeHtml(value)}"></label>`;
+  const facts = [s.cicg_id, s.biomark, s.band_number ? `anillo ${s.band_number}` : "", s.sex, s.age].filter(Boolean).map(escapeHtml).join(" · ");
+  const tags = page && page.tags.length > 1
+    ? `<p class="small" style="margin:6px 0 0">Tags que ha llevado: ${page.tags.map((t) => `<span class="mono">${escapeHtml(t.biomark)}</span>${t.replaced ? " (perdido)" : " (actual)"}`).join(" → ")}</p>`
+    : "";
+  const body = !page
+    ? `<div class="card muted">${cached?.failed ? "No se pudo cargar el detalle." : "Cargando…"}</div>`
+    : `${keyDates(page)}${measuresCard(page)}${capturesCard(page)}${trapVisitsCard(page, s)}`;
   $("screen").innerHTML = `
     <div><a class="button" style="min-height:40px;border-color:#8A968F" href="#/individuos">Volver a individuos</a></div>
     <div><h1 class="${s.registered ? "italic" : "warn"}">${escapeHtml(s.registered ? (s.species || "Sin especie") : "Lectura desconocida")}</h1>
-      <div class="mono muted">${s.cicg_id ? `${escapeHtml(s.cicg_id)} · ` : ""}${escapeHtml(s.biomark)}</div>
-      ${s.replaced ? '<p class="warn strong" style="margin:8px 0 0">Tag reemplazado: el colibrí perdió este tag y ya lleva otro.</p>' : ""}</div>
+      <div class="mono muted">${facts}</div>
+      ${s.replaced ? '<p class="warn strong" style="margin:8px 0 0">Tag reemplazado: el colibrí perdió este tag y ya lleva otro.</p>' : ""}${tags}</div>
+    ${body}
     <div class="grid-wide">
       <div class="card"><h2>De interés en</h2>
         <button class="toggle ${s.all_traps ? "on" : ""}" onclick="toggleInterestEverywhere('${s.tag}')"><span class="strong">Todas las trampas</span><span>${s.all_traps ? "De interés" : "No"}</span></button>
         ${traps.map((t) => { const on = isOfInterest(s, t.node_id); return `<button class="toggle ${on ? "on" : ""}" onclick="toggleInterest('${s.tag}', ${t.node_id})"><span class="strong">${escapeHtml(t.name)}</span><span>${on ? "De interés" : "No"}</span></button>`; }).join("")}
         <p class="small muted" style="margin:4px 0 0">"Todas" incluye las trampas que se conecten después. La lista se envía sola.</p>
       </div>
-      <div class="card"><h2>Datos del CICG</h2>
-        <form onsubmit="saveSubject(event, '${s.tag}')" class="row" style="align-items:flex-end">
+      <div class="card"><div class="section-head"><h2>Datos del CICG</h2><button class="quiet" onclick="toggleUi('editBird')">${ui.editBird ? "Cerrar" : "Editar"}</button></div>
+        ${ui.editBird ? `<form onsubmit="saveSubject(event, '${s.tag}')" class="row" style="align-items:flex-end;margin-top:8px">
           ${field("species", "Especie", s.species)}
           ${field("species_code", "Código", s.species_code)}
           ${field("sex", "Sexo", s.sex)}
@@ -988,17 +1396,67 @@ function renderIndividuo(tag) {
           ${field("band_number", "Anillo", s.band_number)}
           ${field("cicg_id", "Código CICG", s.cicg_id)}
           <button>Guardar</button>
-        </form></div>
+        </form>` : `<div style="margin-top:8px">${[["Especie", s.species], ["Código", s.species_code], ["Sexo", s.sex], ["Edad", s.age], ["Anillo", s.band_number], ["Código CICG", s.cicg_id]].map(([l, v]) => `<div class="line"><span class="muted">${l}</span><span>${escapeHtml(v || "—")}</span></div>`).join("")}</div>`}
+      </div>
+    </div>`;
+  if (page && ui.showBirdVisits) loadVisits({ tag: s.tag, days: 36500 });
+}
+
+// More bars than this read better per month.
+const MAX_DAY_COLUMNS = 62;
+
+function visitSummaryHtml(s) {
+  ui.visitTotal = s.visits;
+  if (!s.visits) return '<div class="card muted">Sin visitas en este periodo.</div>';
+  const card = (title, body, note, css = "") => `<div class="card ${css}"><h2>${title}</h2>${body}${note ? `<p class="small muted" style="margin:8px 0 0">${note}</p>` : ""}</div>`;
+  const hours = columns(s.by_hour, s.by_hour.map((_, h) => String(h)), { every: 3, titles: s.by_hour.map((n, h) => `${h}:00 a ${h}:59: ${count(n, "visita", "visitas")}`) });
+  let days = "";
+  if (s.by_day.length > 1) {
+    if (s.by_day.length > MAX_DAY_COLUMNS) {
+      const months = new Map();
+      for (const d of s.by_day) months.set(d.day.slice(0, 7), (months.get(d.day.slice(0, 7)) || 0) + d.visits);
+      const keys = [...months.keys()];
+      days = card("Visitas por mes", columns(keys.map((k) => months.get(k)), keys.map(monthLabel), { every: Math.max(1, Math.ceil(keys.length / 8)) }));
+    } else {
+      days = card("Visitas por día", columns(s.by_day.map((d) => d.visits), s.by_day.map((d) => `${Number(d.day.slice(8))}/${Number(d.day.slice(5, 7))}`), {
+        every: Math.max(1, Math.ceil(s.by_day.length / 7)),
+        titles: s.by_day.map((d) => `${dayLabel(d.day)}: ${count(d.visits, "visita", "visitas")}, ${count(d.subjects, "individuo", "individuos")}`),
+      }));
+    }
+  }
+  const top = hbars(s.top.map((t) => ({
+    label: `${t.cicg_id ? `${t.cicg_id} · ` : ""}${t.label} · ${t.biomark}`,
+    value: t.visits,
+    text: `${count(t.visits, "visita", "visitas")} · última ${whenLong(t.last_epoch).replace(/^Hoy/, "hoy")}`,
+    href: `#/individuo/${t.tag}`,
+  })));
+  const species = hbars(s.by_species.map((x) => ({ label: x.label, value: x.visits, text: `${x.visits} · ${x.subjects} ind.` })));
+  const nodes = !ui.visitTrap && s.by_node.length > 1
+    ? card("Por trampa", hbars(s.by_node.map((n) => ({ label: trapName(n.node_id), value: n.visits, text: `${n.visits} · ${n.subjects} ind.` }))))
+    : "";
+  return `
+    <div class="grid">
+      ${stat("Visitas", fmt(s.visits, 0))}
+      ${stat("Individuos", fmt(s.subjects, 0), "del CICG")}
+      ${stat("Lecturas", fmt(s.reads, 0))}
+      ${stat("Duración mediana", s.median_duration_s === null ? "—" : duration(s.median_duration_s))}
+      ${stat("Lecturas desconocidas", fmt(s.unknown_visits, 0), count(s.unknown_tags, "tag fuera de la lista", "tags fuera de la lista"))}
+      ${stat("Con hora dudosa", pct(s.untrusted_visits / s.visits, 0), count(s.untrusted_visits, "visita", "visitas"))}
     </div>
-    <div class="card"><h2>Capturas en la base del CICG</h2>
-      ${s.captures.length ? s.captures.slice().reverse().map((c) => `<div class="line"><span>${escapeHtml(dayLabel(c.day))}</span><span class="muted">${escapeHtml([c.locality, c.project].filter(Boolean).join(" · ") || "—")}</span></div>`).join("") : '<p class="muted">Sin capturas en la lista importada.</p>'}
-    </div>
-    <div class="card scroll"><h2>Visitas</h2><div id="visit-rows"><p class="muted">Cargando…</p></div></div>`;
-  loadVisits({ tag: s.tag, days: 36500 });
+    <div class="charts two">
+      ${card("Visitas por hora del día", hours)}
+      ${days}
+      ${card("Individuos con más visitas", top, "Clic en uno para abrir su página.", "full")}
+      ${card("Por especie", species)}
+      ${nodes}
+    </div>`;
 }
 
 function renderVisitas() {
   const traps = data.overview?.traps || [];
+  const query = new URLSearchParams({ days: ui.period });
+  if (ui.visitTrap) query.set("node_id", ui.visitTrap);
+  const total = ui.visitTotal;
   $("screen").innerHTML = `
     <div class="row between"><h1>Visitas</h1>
       <div class="row"><a class="button" href="/api/export/visits.csv">Exportar visitas</a><a class="button primary" href="/api/export/reads.csv">Exportar lecturas</a></div></div>
@@ -1006,14 +1464,23 @@ function renderVisitas() {
       <label style="flex:1 1 180px">Trampa<select onchange="setVisitTrap(this.value)"><option value="">Todas</option>${traps.map((t) => `<option value="${t.node_id}" ${String(t.node_id) === ui.visitTrap ? "selected" : ""}>${escapeHtml(t.name)}</option>`).join("")}</select></label>
       <label style="flex:1 1 180px">Periodo<select onchange="setPeriod(this.value)">${PERIODS.map(([v, l]) => `<option value="${v}" ${v === ui.period ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     </div>
-    <div class="card scroll" id="visit-rows"><p class="muted">Cargando…</p></div>
+    <div id="visit-summary" class="stack"><div class="card muted">Cargando…</div></div>
+    <div class="card">
+      <div class="section-head"><h2>Visita por visita</h2>
+        <button id="visit-toggle" onclick="toggleUi('showVisits')">${ui.showVisits ? "Ocultar las visitas" : total ? `Ver las ${total} visitas` : "Ver las visitas"}</button></div>
+      ${ui.showVisits ? '<div class="scroll" id="visit-rows" style="margin-top:8px"><p class="muted">Cargando…</p></div>' : ""}
+    </div>
     <p class="small muted" style="margin:0">Una visita termina tras 3 s sin leer el tag, igual que en el análisis.</p>`;
-  loadVisits({ nodeId: ui.visitTrap, days: ui.period });
+  loadInto("visit-summary", `/api/visits/summary?${query}`, visitSummaryHtml).then(() => {
+    const button = $("visit-toggle");
+    if (button && !ui.showVisits) button.textContent = ui.visitTotal ? `Ver las ${ui.visitTotal} visitas` : "Ver las visitas";
+  });
+  if (ui.showVisits) loadVisits({ nodeId: ui.visitTrap, days: ui.period });
 }
 
 function renderCapturas() {
   $("screen").innerHTML = '<h1>Capturas</h1><div class="card scroll" id="capture-rows"><p class="muted">Cargando…</p></div>';
-  const result = { capturado: ["Capturado", "ok"], sin_colibri: ["Sin colibrí", "warn"] };
+  const result = CAPTURE_RESULTS;
   return loadInto("capture-rows", "/api/captures", ({ captures }) => (captures.length ? `<table style="min-width:600px"><thead><tr><th>Hora</th><th>Trampa</th><th>Sujeto</th><th>Biomark</th><th>Resultado</th></tr></thead><tbody>
     ${captures.map((c) => { const [text, css] = result[c.result] || ["Por confirmar", "warn"]; return `<tr>
       <td class="mono">${escapeHtml(dateTime(c.epoch))}</td><td>${escapeHtml(trapName(c.node_id))}</td>
@@ -1195,6 +1662,8 @@ async function chooseGatewayPort() {
 
 window.addEventListener("hashchange", () => {
   ui.message = "";
+  ui.showBirdVisits = false;
+  ui.editBird = false;
   if (route().screen === "gateway") refresh(true); else render(true);
 });
 new EventSource("/api/events").onmessage = () => refresh();

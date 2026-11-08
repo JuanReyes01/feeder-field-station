@@ -9,6 +9,10 @@ Two shapes are read the same way:
   ``CICG_ID``, ``Especie``, ``Pit tag code``, ``Ring``, ``Age``, ``Sex``,
   ``Project``, ``Date``, ``Localidad``, ``Other code``.
 
+Each capture also keeps its whole record from the database -- measures, molt,
+who handled the bird and how, sample, photos (``domain/measures.py`` names the
+columns) -- for the bird's own page, never for the lists.
+
 In a workbook, the sheet with a species column and the most readable PITs wins:
 the database also holds lookup, pivot and analysis sheets. The header is looked
 for in the first rows.
@@ -34,14 +38,16 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import NamedTuple
 
 from openpyxl import load_workbook
 
+from feeder_station.domain.measures import CAPTURE_FIELDS, CaptureField
 from feeder_station.domain.tags import parse_tag
 
 _NULL_TOKENS = {"", "null", "none", "na", "n/a", "-", "_", "no info"}
@@ -159,6 +165,8 @@ class Capture(NamedTuple):
     day: date
     project: str | None = None
     locality: str | None = None
+    # The rest of the row, by `domain/measures.py` key: float, "HH:MM", text or True.
+    details: dict[str, object] | None = None
 
 
 @dataclass
@@ -185,10 +193,12 @@ class ImportedTable:
         if known is None:
             days[capture.day] = capture
         else:
+            details = {**(capture.details or {}), **(known.details or {})}
             days[capture.day] = Capture(
                 capture.day,
                 known.project or capture.project,
                 known.locality or capture.locality,
+                details or None,
             )
 
 
@@ -275,6 +285,60 @@ def _cell(row: list[object], column: int | None) -> str | None:
     return _clean(row[column]) if column is not None and column < len(row) else None
 
 
+def _number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = _clean(value)
+        if text is None:
+            return None
+        try:
+            number = float(text.replace(",", "."))
+        except ValueError:
+            return None
+    return number if math.isfinite(number) else None
+
+
+def _clock(value: object) -> str | None:
+    if isinstance(value, datetime):
+        value = value.time()
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    if isinstance(value, float) and 0 <= value < 1:  # a time cell read as a fraction of a day
+        minutes = round(value * 24 * 60)
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    return _clean(value)
+
+
+def _ticked(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _clean(value)
+    return text is not None and text.lower() in ("true", "y", "yes", "si", "sí", "x", "1")
+
+
+def _details(row: list[object], columns: list[tuple[CaptureField, int]]) -> dict[str, object]:
+    found: dict[str, object] = {}
+    for spec, column in columns:
+        if column >= len(row):
+            continue
+        raw = row[column]
+        value: object
+        if spec.kind == "number":
+            value = _number(raw)
+        elif spec.kind == "time":
+            value = _clock(raw)
+        elif spec.kind == "flag":
+            value = True if _ticked(raw) else None
+        else:
+            value = _cell(row, column)
+        if value is not None:
+            found[spec.key] = value
+    return found
+
+
 def read_specimens(filename: str, data: bytes) -> ImportedTable:
     table = ImportedTable()
     try:
@@ -299,6 +363,11 @@ def read_specimens(filename: str, data: bytes) -> ImportedTable:
         for aliases, parse in _DATE_COLUMNS
         if (column := _column_of(header, aliases)) is not None
     ]
+    detail_columns = [
+        (spec, column)
+        for spec in CAPTURE_FIELDS
+        if (column := _column_of(header, spec.aliases)) is not None
+    ]
 
     tags_by_code: dict[str, set[bytes]] = {}
     untagged_recaptures: list[tuple[str, Capture]] = []
@@ -310,7 +379,10 @@ def read_specimens(filename: str, data: bytes) -> ImportedTable:
         day = _row_date(table, row, line, date_columns)
         capture = (
             Capture(
-                day, _cell(row, capture_columns["project"]), _cell(row, capture_columns["locality"])
+                day,
+                _cell(row, capture_columns["project"]),
+                _cell(row, capture_columns["locality"]),
+                _details(row, detail_columns) or None,
             )
             if day is not None
             else None

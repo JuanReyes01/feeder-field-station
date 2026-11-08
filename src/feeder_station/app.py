@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import re
+import statistics
 import threading
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -35,7 +36,7 @@ from feeder_station.adapters.serial_gateway import (
 )
 from feeder_station.adapters.settings import StationSettings, save_settings
 from feeder_station.adapters.specimen_import import read_specimens
-from feeder_station.adapters.store import SpecimenRow, Store, StoredEvent
+from feeder_station.adapters.store import CaptureRecord, CaptureRow, SpecimenRow, Store, StoredEvent
 from feeder_station.adapters.updates import UpdateChecker
 from feeder_station.adapters.workers import FrameGateway, WorkerStatus, start_workers
 from feeder_station.config import StationConfig
@@ -49,6 +50,7 @@ from feeder_station.domain.events import (
     OPERATOR_SET_TARGETS,
     StationEvent,
 )
+from feeder_station.domain.measures import CAPTURE_FIELDS, GROUPS, MEASURES, summarize
 from feeder_station.domain.payloads import TAG_BYTES, TAGS_PER_SET_TARGETS_FRAME
 from feeder_station.domain.tags import parse_tag, to_biomark
 from feeder_station.domain.traps import Registry, Trap, TrapState
@@ -514,6 +516,11 @@ def keep_traps_paused(
 # version (a list left half-received is never accepted again under the same
 # number), so only a newer one can get through.
 _LIST_SENDS_BEFORE_NEW_VERSION = 3
+# ...and never sooner than this after the version first went out. The resends
+# back off 1, 2, 4 s, so three of them alone take 3 s: without this floor a
+# list that cannot get through (a frame the gateway drops, a trap at the edge
+# of range) got a new number on every 5 s tick, each one spending airtime.
+_LIST_SECONDS_BEFORE_NEW_VERSION = 60.0
 
 
 def renumber_unconfirmed_lists(
@@ -529,6 +536,9 @@ def renumber_unconfirmed_lists(
         if command is None or command.kind is not CommandKind.SET_TARGETS:
             continue
         if command.attempts < _LIST_SENDS_BEFORE_NEW_VERSION or command.last_sent_at is None:
+            continue
+        first_sent = command.first_sent_at or command.last_sent_at
+        if at - first_sent < timedelta(seconds=_LIST_SECONDS_BEFORE_NEW_VERSION):
             continue
         # It must have reported since the last send: silence means out of
         # range, where a new number would not help.
@@ -575,6 +585,219 @@ def _subject_fields(row: SpecimenRow | None) -> dict[str, Any]:
         "label": (
             (row.species or "Sin especie") if row is not None and known else "Lectura desconocida"
         ),
+    }
+
+
+def _local_day(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=UTC).astimezone().date().isoformat()
+
+
+def _local_hour(epoch: float) -> int:
+    return datetime.fromtimestamp(epoch, tz=UTC).astimezone().hour
+
+
+# A period longer than this ("Todo") is drawn from its first visit, not its start.
+_LONGEST_DRAWN_PERIOD_DAYS = 366
+
+
+def visit_summary(
+    visits: Sequence[Visit],
+    specimens: Mapping[bytes, SpecimenRow],
+    *,
+    first_day: str | None = None,
+) -> dict[str, Any]:
+    """What the Visits page shows above the table: totals, when, who and
+    where. Computed over every visit in the period, not the page's first rows.
+    ``by_day`` runs from ``first_day`` (ISO), or the first visit, to today."""
+
+    def known(tag: bytes) -> bool:
+        row = specimens.get(tag)
+        return row is not None and row.registered
+
+    by_hour = [0] * 24
+    days: dict[str, list[Visit]] = {}
+    tags: dict[bytes, list[Visit]] = {}
+    labels: dict[str, list[Visit]] = {}
+    nodes: dict[int, list[Visit]] = {}
+    for visit in visits:
+        by_hour[_local_hour(visit.start)] += 1
+        days.setdefault(_local_day(visit.start), []).append(visit)
+        tags.setdefault(visit.tag, []).append(visit)
+        labels.setdefault(_subject_fields(specimens.get(visit.tag))["label"], []).append(visit)
+        nodes.setdefault(visit.node_id, []).append(visit)
+
+    by_day: list[dict[str, Any]] = []
+    if visits:
+        first = datetime.fromisoformat(min(first_day or min(days), min(days))).date()
+        last = datetime.fromisoformat(max(_local_day(now().timestamp()), max(days))).date()
+        day = first
+        while day <= last:
+            listed = days.get(day.isoformat(), [])
+            by_day.append(
+                {
+                    "day": day.isoformat(),
+                    "visits": len(listed),
+                    "subjects": len({v.tag for v in listed if known(v.tag)}),
+                }
+            )
+            day += timedelta(days=1)
+
+    top = sorted(tags.items(), key=lambda item: (-len(item[1]), -max(v.start for v in item[1])))
+    return {
+        "visits": len(visits),
+        "subjects": sum(1 for tag in tags if known(tag)),
+        "unknown_tags": sum(1 for tag in tags if not known(tag)),
+        "unknown_visits": sum(len(listed) for tag, listed in tags.items() if not known(tag)),
+        "reads": sum(v.reads for v in visits),
+        "median_duration_s": statistics.median(v.duration for v in visits) if visits else None,
+        "untrusted_visits": sum(1 for v in visits if not v.clock_trusted),
+        "by_hour": by_hour,
+        "by_day": by_day,
+        "top": [
+            {
+                "tag": tag.hex().upper(),
+                "biomark": to_biomark(tag),
+                **_subject_fields(specimens.get(tag)),
+                "cicg_id": (row.cicg_id if (row := specimens.get(tag)) else None),
+                "visits": len(listed),
+                "reads": sum(v.reads for v in listed),
+                "last_epoch": max(v.start for v in listed),
+            }
+            for tag, listed in top[:10]
+        ],
+        "by_species": sorted(
+            (
+                {"label": label, "visits": len(listed), "subjects": len({v.tag for v in listed})}
+                for label, listed in labels.items()
+            ),
+            key=lambda item: (-item["visits"], item["label"]),
+        ),
+        "by_node": sorted(
+            (
+                {
+                    "node_id": node_id,
+                    "visits": len(listed),
+                    "subjects": len({v.tag for v in listed if known(v.tag)}),
+                }
+                for node_id, listed in nodes.items()
+            ),
+            key=lambda item: -item["visits"],
+        ),
+    }
+
+
+def bird_rows(row: SpecimenRow, rows: Iterable[SpecimenRow]) -> list[SpecimenRow]:
+    """Every tag this bird has worn: the rows sharing its CICG code, or just
+    this one when it has none. Oldest tag first."""
+    code = (row.cicg_id or "").strip().lower()
+    if not code:
+        return [row]
+    same = [r for r in rows if (r.cicg_id or "").strip().lower() == code]
+    return sorted(same or [row], key=lambda r: (r.capture_days[:1] or ("9999",), r.tag))
+
+
+def _capture_json(record: CaptureRecord) -> dict[str, Any]:
+    return {
+        "day": record.day,
+        "project": record.project,
+        "locality": record.locality,
+        "tag": record.tag.hex().upper(),
+        "biomark": to_biomark(record.tag),
+        "details": record.details,
+    }
+
+
+def specimen_detail(
+    row: SpecimenRow,
+    tags: Sequence[SpecimenRow],
+    records: Sequence[CaptureRecord],
+    visits: Sequence[Visit],
+    trap_captures: Sequence[CaptureRow],
+) -> dict[str, Any]:
+    """One bird's page: what the CICG recorded at each capture, how its
+    measures vary across them, and what the traps saw of it."""
+    measures = []
+    for spec in MEASURES:
+        series = [
+            (record.day, float(value))
+            for record in records
+            if isinstance(value := record.details.get(spec.key), (int, float))
+            and not isinstance(value, bool)
+        ]
+        summary = summarize(series)
+        if summary is None:
+            continue
+        measures.append(
+            {
+                "key": spec.key,
+                "label": spec.label,
+                "unit": spec.unit,
+                "count": summary.count,
+                "first": summary.first,
+                "last": summary.last,
+                "min": summary.minimum,
+                "max": summary.maximum,
+                "mean": summary.mean,
+                "median": summary.median,
+                "stdev": summary.stdev,
+                "cv": summary.cv,
+                "change": summary.change,
+                "values": [
+                    {"day": v.day, "value": v.value, "deviation": v.deviation}
+                    for v in summary.values
+                ],
+            }
+        )
+
+    def capture_point(record: CaptureRecord | None) -> dict[str, Any] | None:
+        return None if record is None else _capture_json(record)
+
+    by_hour = [0] * 24
+    by_node: dict[int, int] = {}
+    for visit in visits:
+        by_hour[_local_hour(visit.start)] += 1
+        by_node[visit.node_id] = by_node.get(visit.node_id, 0) + 1
+    oldest = min(visits, key=lambda v: v.start) if visits else None
+    newest = max(visits, key=lambda v: v.end) if visits else None
+    return {
+        "specimen": _specimen_to_json(row),
+        "tags": [
+            {
+                "tag": r.tag.hex().upper(),
+                "biomark": to_biomark(r.tag),
+                "replaced": r.replaced,
+                "first_day": r.capture_days[0] if r.capture_days else None,
+                "last_day": r.capture_days[-1] if r.capture_days else None,
+                "times_seen": r.times_seen,
+            }
+            for r in tags
+        ],
+        "captures": [_capture_json(record) for record in records],
+        "recaptures": max(len(records) - 1, 0),
+        "marked": capture_point(records[0] if records else None),
+        "last_capture": capture_point(records[-1] if records else None),
+        "measures": measures,
+        "fields": [
+            {"key": f.key, "label": f.label, "group": f.group, "kind": f.kind, "unit": f.unit}
+            for f in CAPTURE_FIELDS
+        ],
+        "groups": [{"key": key, "label": label} for key, label in GROUPS],
+        "visits": {
+            "count": len(visits),
+            "reads": sum(v.reads for v in visits),
+            "first_epoch": oldest.start if oldest else None,
+            "first_node_id": oldest.node_id if oldest else None,
+            "last_epoch": newest.end if newest else None,
+            "last_node_id": newest.node_id if newest else None,
+            "by_hour": by_hour,
+            "by_node": [
+                {"node_id": node_id, "visits": count}
+                for node_id, count in sorted(by_node.items(), key=lambda item: -item[1])
+            ],
+        },
+        "trap_captures": [
+            {"node_id": c.node_id, "epoch": c.epoch, "result": c.result} for c in trap_captures
+        ],
     }
 
 
@@ -1450,6 +1673,33 @@ def create_app(
             "visits": [_visit_to_json(v, specimens, at) for v in grouped[:limit]],
             "gap_seconds": DEFAULT_GAP_SECONDS,
         }
+
+    @app.get("/api/visits/summary")
+    def visits_summary(node_id: int | None = None, days: int = 1) -> dict[str, Any]:
+        store = app.state.store
+        since = _start_of_today() - (max(days, 1) - 1) * 86400
+        first_day = _local_day(since) if days <= _LONGEST_DRAWN_PERIOD_DAYS else None
+        if store is None:
+            return visit_summary([], {}, first_day=first_day)
+        grouped = group_visits(_readings(store.reads_between(since_epoch=since)))
+        if node_id is not None:
+            grouped = [v for v in grouped if v.node_id == node_id]
+        specimens = {row.tag: row for row in store.specimens()}
+        return visit_summary(grouped, specimens, first_day=first_day)
+
+    @app.get("/api/specimens/{tag_hex}/detail")
+    def specimen_page(tag_hex: str) -> dict[str, Any]:
+        store = _require_store()
+        tag = _tag_from_path(tag_hex)
+        rows = store.specimens()
+        row = next((r for r in rows if r.tag == tag), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown specimen")
+        worn = bird_rows(row, rows)
+        tags = {r.tag for r in worn}
+        visits = group_visits(_readings(store.reads_of(tags)))
+        released = [c for c in store.captures() if c.tag in tags]
+        return specimen_detail(row, worn, store.capture_records(tags), visits, released)
 
     @app.get("/api/captures")
     def captures() -> dict[str, Any]:

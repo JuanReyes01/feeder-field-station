@@ -113,6 +113,7 @@ class Command:
     targets_version: int | None = None
     attempts: int = 0
     last_sent_at: datetime | None = None
+    first_sent_at: datetime | None = None
 
     def satisfied_by(self, heartbeat: ReportedState) -> bool:
         if self.kind is CommandKind.ARM:
@@ -137,4 +138,9 @@ class Command:
 
     def sent(self, at: datetime) -> Command:
         """A new value recording that this command was just (re)sent."""
-        return replace(self, attempts=self.attempts + 1, last_sent_at=at)
+        return replace(
+            self,
+            attempts=self.attempts + 1,
+            last_sent_at=at,
+            first_sent_at=self.first_sent_at or at,
+        )

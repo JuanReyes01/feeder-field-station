@@ -81,7 +81,7 @@ def _boot_count_is_newer(candidate: int, stored: int) -> bool:
     return 0 < forward_distance < _BOOT_COUNT_MODULUS // 2
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS specimen_trap_interest (
 -- SCHEMA_VERSION 6: the days a subject appears on in the CICG's list (its
 -- marking and every recapture), as ISO dates. Filled only by importing the
 -- list; the operator filters by them. SCHEMA_VERSION 7 adds each capture's
--- project and locality (migration below).
+-- project and locality, SCHEMA_VERSION 8 the rest of its record as JSON
+-- (measures, molt, handling: `domain/measures.py`), both by migration below.
 CREATE TABLE IF NOT EXISTS specimen_capture_day (
     tag BLOB NOT NULL,
     day TEXT NOT NULL,
@@ -318,6 +319,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE specimen ADD COLUMN replaced INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE specimen_capture_day ADD COLUMN project TEXT")
         conn.execute("ALTER TABLE specimen_capture_day ADD COLUMN locality TEXT")
+    if previous_version < 8:
+        # Read again from the file on the next import; nothing to backfill.
+        conn.execute("ALTER TABLE specimen_capture_day ADD COLUMN details TEXT")
 
     conn.execute(
         """
@@ -406,6 +410,17 @@ class SpecimenRow:
 
 
 @dataclass(frozen=True)
+class CaptureRecord:
+    """One capture in the CICG's list with its whole record (SCHEMA_VERSION 8)."""
+
+    tag: bytes
+    day: str
+    project: str | None
+    locality: str | None
+    details: dict[str, object]
+
+
+@dataclass(frozen=True)
 class CaptureRow:
     """One trap release and what the operator found, if they have said."""
 
@@ -440,6 +455,19 @@ _SPECIMEN_EDITABLE_FIELDS = (
     "registered",
 )
 _SPECIMEN_DESCRIBING_FIELDS = ("species", "species_code", "sex", "age", "band_number", "cicg_id")
+
+
+def _capture_values(tag: bytes, row: Sequence[object]) -> tuple[object, ...]:
+    """(day, project, locality[, details]) as ``specimen_capture_day`` stores it."""
+    day = row[0]
+    details = row[3] if len(row) > 3 else None
+    return (
+        tag,
+        day.isoformat() if isinstance(day, date) else str(day),
+        row[1],
+        row[2],
+        json.dumps(details, ensure_ascii=False, sort_keys=True) if details else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -943,6 +971,43 @@ class Store:
             ) in rows
         ]
 
+    def capture_records(self, tags: Collection[bytes]) -> list[CaptureRecord]:
+        """These tags' captures in the CICG's list with their whole record,
+        oldest first: one bird's history across the tags it has worn."""
+        if not tags:
+            return []
+        marks = ",".join("?" for _ in tags)
+        records: list[CaptureRecord] = []
+        for tag, day, project, locality, details in self._conn.execute(
+            f"""
+            SELECT tag, day, project, locality, details FROM specimen_capture_day
+             WHERE tag IN ({marks}) ORDER BY day, tag
+            """,
+            tuple(tags),
+        ):
+            loaded = json.loads(details) if details else {}
+            records.append(
+                CaptureRecord(
+                    tag, day, project, locality, loaded if isinstance(loaded, dict) else {}
+                )
+            )
+        return records
+
+    def reads_of(self, tags: Collection[bytes]) -> list[StoredEvent]:
+        """Every READS row of these tags, oldest first: one bird's own visits."""
+        if not tags:
+            return []
+        marks = ",".join("?" for _ in tags)
+        rows = self._conn.execute(
+            f"""
+            SELECT {_SELECT_COLUMNS} FROM event
+             WHERE msg_type = ? AND tag IN ({marks})
+             ORDER BY seq ASC
+            """,
+            (payloads.READS, *tags),
+        ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
     def wanted_tags(self) -> list[bytes]:
         """The current shared target list (messages.md's open question 2,
         answered 2026-09-26: "shared by the whole network"): every specimen
@@ -999,15 +1064,17 @@ class Store:
     def register_specimens(
         self,
         specimens: Mapping[bytes, Mapping[str, str]],
-        captures: Mapping[bytes, Iterable[tuple[date, str | None, str | None]]] | None = None,
+        captures: Mapping[bytes, Iterable[Sequence[object]]] | None = None,
         replaced: Collection[bytes] | None = None,
     ) -> tuple[int, int]:
         """Create or update registered subjects, never touching who is of
         interest: re-importing the list must not change what a trap hunts.
-        Captures (day, project, locality) add to the ones already known: the
-        short list and the full database share days, and importing one must
-        not erase what only the other knows. A day already known keeps its
-        project and locality unless it had none. With ``replaced``, every
+        Captures (day, project, locality, and optionally the record's details)
+        add to the ones already known: the short list and the full database
+        share days, and importing one must not erase what only the other
+        knows. A day already known keeps its project and locality unless it
+        had none; its details are replaced by the newest file that has any,
+        since that file is the CICG's own corrected record. With ``replaced``, every
         subject given is flagged as a lost tag or not by it; a file that cannot
         tell passes None and leaves the flags alone. Returns how many were
         created and how many updated."""
@@ -1034,13 +1101,14 @@ class Store:
                     continue
                 conn.executemany(
                     """
-                    INSERT INTO specimen_capture_day (tag, day, project, locality)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO specimen_capture_day (tag, day, project, locality, details)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(tag, day) DO UPDATE SET
                         project  = COALESCE(project, excluded.project),
-                        locality = COALESCE(locality, excluded.locality)
+                        locality = COALESCE(locality, excluded.locality),
+                        details  = COALESCE(excluded.details, details)
                     """,
-                    [(tag, day.isoformat(), project, locality) for day, project, locality in rows],
+                    [_capture_values(tag, row) for row in rows],
                 )
             if replaced is not None:
                 conn.executemany(
